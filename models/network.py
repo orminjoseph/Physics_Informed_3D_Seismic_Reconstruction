@@ -1,9 +1,14 @@
 """
 =========================================================
-Physics-Informed 3D Encoder–Decoder Framework
+Complete Physics-Informed 3D Encoder–Decoder Network
 =========================================================
 
-Complete Network
+Project:
+Physics-Informed 3D Encoder–Decoder Framework
+with Predictive Uncertainty for Seismic Data Reconstruction
+
+Author:
+Ormin Joseph
 =========================================================
 """
 
@@ -15,35 +20,44 @@ from models.bottleneck import Bottleneck3D
 from models.decoder import Decoder3D
 
 
-class PhysicsInformed3DUNet(nn.Module):
+class Network3D(nn.Module):
     """
-    Physics-Informed 3D Encoder–Decoder Framework
-
-    Outputs
-    -------
-    reconstruction
-    log_variance
+    Complete 3D Encoder–Decoder Network
     """
 
     def __init__(
-        self,
-        in_channels: int = 1,
-        out_channels: int = 1
+            self,
+            in_channels=1,
+            out_channels=1
     ):
 
         super().__init__()
+
+        # ------------------------------------------
+        # Encoder
+        # ------------------------------------------
 
         self.encoder = Encoder3D(
             in_channels=in_channels
         )
 
-        self.bottleneck = Bottleneck3D()
+        # ------------------------------------------
+        # Bottleneck
+        # ------------------------------------------
+
+        self.bottleneck = Bottleneck3D(
+            channels=512
+        )
+
+        # ------------------------------------------
+        # Decoder
+        # ------------------------------------------
 
         self.decoder = Decoder3D()
 
-        # --------------------------------------------------
+        # ------------------------------------------
         # Reconstruction Head
-        # --------------------------------------------------
+        # ------------------------------------------
 
         self.reconstruction_head = nn.Conv3d(
             32,
@@ -51,64 +65,49 @@ class PhysicsInformed3DUNet(nn.Module):
             kernel_size=1
         )
 
-        # --------------------------------------------------
-        # Predictive Uncertainty Head
-        # --------------------------------------------------
-
-        self.uncertainty_head = nn.Sequential(
-
-            nn.Conv3d(
-                32,
-                16,
-                kernel_size=3,
-                padding=1
-            ),
-
-            nn.ReLU(inplace=True),
-
-            nn.Conv3d(
-                16,
-                out_channels,
-                kernel_size=1
-            )
-        )
-
     def forward(
-        self,
-        x: torch.Tensor
+            self,
+            x
     ):
+
+        # ------------------------------------------
+        # Encoder
+        # ------------------------------------------
 
         x1, x2, x3, x4, x5 = self.encoder(x)
 
-        latent = self.bottleneck(x5)
+        # ------------------------------------------
+        # Bottleneck
+        # ------------------------------------------
 
-        features = self.decoder(
+        bottleneck_output = self.bottleneck(x5)
+
+        # ------------------------------------------
+        # Decoder
+        # ------------------------------------------
+
+        decoder_output = self.decoder(
+
             x1,
+
             x2,
+
             x3,
+
             x4,
-            latent
+
+            bottleneck_output
+
         )
 
-        # -------------------------------
-        # Reconstruction
-        # -------------------------------
+        # ------------------------------------------
+        # Final reconstruction
+        # ------------------------------------------
 
-        reconstruction = self.reconstruction_head(
-            features
+        reconstructed_cube = self.reconstruction_head(
+
+            decoder_output
+
         )
 
-        # -------------------------------
-        # Predictive Uncertainty
-        # -------------------------------
-
-        raw_log_variance = self.uncertainty_head(
-            features
-        )
-
-        # Smoothly bound log-variance
-        log_variance = 5.0 * torch.tanh(
-            raw_log_variance / 5.0
-        )
-
-        return reconstruction, log_variance
+        return reconstructed_cube

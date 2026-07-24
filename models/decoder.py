@@ -49,11 +49,11 @@ class Decoder3D(nn.Module):
         x2,
         x3,
         x4,
-        bottleneck
+        bottleneck_output
     ):
 
         d4 = self.up4(
-            bottleneck,
+            bottleneck_output,
             x4
         )
 
