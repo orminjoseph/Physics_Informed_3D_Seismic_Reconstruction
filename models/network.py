@@ -64,6 +64,15 @@ class Network3D(nn.Module):
             out_channels,
             kernel_size=1
         )
+        # ------------------------------------------
+        # Predictive uncertainty head
+        # ------------------------------------------
+
+        self.uncertainty_head = nn.Conv3d(
+            32,
+            out_channels,
+            kernel_size=1
+        )
 
     def forward(
             self,
@@ -101,13 +110,19 @@ class Network3D(nn.Module):
         )
 
         # ------------------------------------------
-        # Final reconstruction
+        # Reconstruction
         # ------------------------------------------
 
         reconstructed_cube = self.reconstruction_head(
-
             decoder_output
-
         )
 
-        return reconstructed_cube
+        # ------------------------------------------
+        # Predictive uncertainty
+        # ------------------------------------------
+
+        log_variance = self.uncertainty_head(
+            decoder_output
+        )
+
+        return reconstructed_cube, log_variance

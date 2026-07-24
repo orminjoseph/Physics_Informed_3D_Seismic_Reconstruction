@@ -43,9 +43,17 @@ def test_network():
 
     )
 
-    y = model(x)
+    reconstructed_cube, log_variance = model(x)
 
-    loss = y.mean()
+    loss = (
+
+        reconstructed_cube.mean()
+
+        +
+
+        log_variance.mean()
+
+    )
 
     loss.backward()
 
@@ -55,9 +63,25 @@ def test_network():
 
     print("Input Shape :", x.shape)
 
-    print("Output Shape:", y.shape)
+    print("Reconstruction Shape :", reconstructed_cube.shape)
 
-    assert y.shape == (
+    print("Log Variance Shape   :", log_variance.shape)
+
+    assert reconstructed_cube.shape == (
+
+        2,
+
+        1,
+
+        64,
+
+        64,
+
+        64
+
+    )
+
+    assert log_variance.shape == (
 
         2,
 
