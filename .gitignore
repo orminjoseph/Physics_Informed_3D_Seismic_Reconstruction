@@ -1,0 +1,22 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+
+# PyCharm
+.idea/
+
+# Generated datasets
+datasets/
+
+# Training outputs
+checkpoints/
+runs/
+outputs/
+
+# Operating system files
+Thumbs.db
+.DS_Store
