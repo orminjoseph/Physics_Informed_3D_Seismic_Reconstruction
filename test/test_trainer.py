@@ -1,63 +1,84 @@
-import os
-import sys
-
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
+"""
+=========================================================
+Test Trainer
+=========================================================
+"""
 
 import torch
 
-from models.network import PhysicsInformed3DUNet
+from dataset.seismic_dataset import SeismicDataset
+from torch.utils.data import DataLoader
 
-model = PhysicsInformed3DUNet()
-
+from models.network import Network3D
 from losses.total_loss import TotalLoss
 from trainer.trainer import Trainer
 
-from utils.config import DEVICE
 
-model = PhysicsInformed3DUNet()
+def test_trainer():
 
-loss_function = TotalLoss()
+    print()
 
-optimizer = torch.optim.Adam(
-    model.parameters(),
-    lr=1e-4
-)
+    print("=" * 60)
+    print("Testing Trainer")
+    print("=" * 60)
 
-trainer = Trainer(
-    model=model,
-    optimizer=optimizer,
-    loss_function=loss_function,
-    device=DEVICE
-)
-
-input_cube = torch.randn(
-    1,
-    1,
-    64,
-    128,
-    128
-)
-
-target_cube = torch.randn(
-    1,
-    1,
-    64,
-    128,
-    128
-)
-
-losses = trainer.train_step(
-    input_cube,
-    target_cube
-)
-
-print("=" * 60)
-
-for name, value in losses.items():
-    print(
-        f"{name:<15}: {value:.6f}"
+    dataset = SeismicDataset(
+        dataset_directory="datasets"
     )
 
-print("=" * 60)
+
+    dataloader = DataLoader(
+
+        dataset,
+
+        batch_size=2,
+
+        shuffle=False
+
+    )
+
+    model = Network3D()
+
+    criterion = TotalLoss()
+
+    optimizer = torch.optim.Adam(
+
+        model.parameters(),
+
+        lr=1e-3
+
+    )
+
+    trainer = Trainer(
+
+        model,
+
+        criterion,
+
+        optimizer,
+
+        device="cpu"
+
+    )
+
+    trainer.fit(
+
+        dataloader,
+
+        epochs=2
+
+    )
+
+    print()
+
+    print("Trainer Test: PASSED")
+
+
+def main():
+
+    test_trainer()
+
+
+if __name__ == "__main__":
+
+    main()

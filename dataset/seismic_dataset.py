@@ -173,22 +173,16 @@ class SeismicDataset(Dataset):
         # ------------------------------------------
 
         ground_truth = torch.from_numpy(
-
             ground_truth
-
-        ).float()
+        ).float().unsqueeze(0)
 
         corrupted = torch.from_numpy(
-
             corrupted
-
-        ).float()
+        ).float().unsqueeze(0)
 
         mask = torch.from_numpy(
-
             mask
-
-        ).float()
+        ).float().unsqueeze(0)
 
         # ------------------------------------------
         # Return sample
