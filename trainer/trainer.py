@@ -6,6 +6,7 @@ Trainer
 Physics-Informed 3D Encoder–Decoder Framework
 =========================================================
 """
+import os
 
 import torch
 
@@ -38,6 +39,16 @@ class Trainer:
         self.device = device
 
         self.model.to(device)
+
+        self.checkpoint_directory = "checkpoints"
+
+        os.makedirs(
+
+            self.checkpoint_directory,
+
+            exist_ok=True
+
+        )
 
     def train_epoch(
 
@@ -128,6 +139,50 @@ class Trainer:
 
         }
 
+    def save_checkpoint(
+
+            self,
+
+            epoch,
+
+            loss
+
+    ):
+
+        checkpoint = {
+
+            "epoch": epoch,
+
+            "model_state_dict": self.model.state_dict(),
+
+            "optimizer_state_dict": self.optimizer.state_dict(),
+
+            "loss": loss
+
+        }
+
+        torch.save(
+
+            checkpoint,
+
+            os.path.join(
+
+                self.checkpoint_directory,
+
+                f"checkpoint_epoch_{epoch}.pth"
+
+            )
+
+        )
+
+        print(
+
+            f"Checkpoint saved: Epoch {epoch}"
+
+        )
+
+
+
     def fit(
 
             self,
@@ -158,6 +213,14 @@ class Trainer:
             print(f"Uncertainty Loss : {train_losses['uncertainty']:.6f}")
 
             print(f"SSIM Loss        : {train_losses['ssim']:.6f}")
+
+            self.save_checkpoint(
+
+                epoch=epoch + 1,
+
+                loss=train_losses["total"]
+
+            )
 
 
 
