@@ -42,6 +42,8 @@ class Trainer:
 
         self.checkpoint_directory = "checkpoints"
 
+        self.best_loss = float("inf")
+
         os.makedirs(
 
             self.checkpoint_directory,
@@ -49,6 +51,7 @@ class Trainer:
             exist_ok=True
 
         )
+        self.best_loss = float("inf")
 
     def train_epoch(
 
@@ -161,6 +164,10 @@ class Trainer:
 
         }
 
+        # ----------------------------------------
+        # Save latest checkpoint
+        # ----------------------------------------
+
         torch.save(
 
             checkpoint,
@@ -169,7 +176,7 @@ class Trainer:
 
                 self.checkpoint_directory,
 
-                f"checkpoint_epoch_{epoch}.pth"
+                "latest_checkpoint.pth"
 
             )
 
@@ -177,10 +184,36 @@ class Trainer:
 
         print(
 
-            f"Checkpoint saved: Epoch {epoch}"
+            f"Latest checkpoint saved (Epoch {epoch})"
 
         )
 
+        # ----------------------------------------
+        # Save best model
+        # ----------------------------------------
+
+        if loss < self.best_loss:
+            self.best_loss = loss
+
+            torch.save(
+
+                checkpoint,
+
+                os.path.join(
+
+                    self.checkpoint_directory,
+
+                    "best_model.pth"
+
+                )
+
+            )
+
+            print(
+
+                f"New best model saved! Loss = {loss:.6f}"
+
+            )
 
 
     def fit(
