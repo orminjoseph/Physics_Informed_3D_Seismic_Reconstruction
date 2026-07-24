@@ -1,177 +1,115 @@
 """
 =========================================================
-Total Loss
+Composite Total Loss
 =========================================================
 
-Composite loss function for the Physics-Informed
-3D Encoder–Decoder Framework.
-
-The total loss consists of:
-
-    1. Reconstruction Loss (MAE)
-    2. Physics Loss
-    3. Predictive Uncertainty Loss
-    4. Structural Similarity Loss
-
-Author: Ormin Joseph
+Physics-Informed 3D Encoder–Decoder Framework
 =========================================================
 """
 
+import torch
 import torch.nn as nn
 
 from losses.mae_loss import MAELoss
 from losses.physics_loss import PhysicsLoss
-from losses.uncertainty_loss import UncertaintyLoss
 from losses.ssim_loss import SSIMLoss
+from losses.uncertainty_loss import UncertaintyLoss
+
+from utils.config import LOSS_WEIGHTS
 
 
 class TotalLoss(nn.Module):
+
     """
     Composite loss function.
-
-    L_total =
-
-        λ₁ L_MAE
-      + λ₂ L_Physics
-      + λ₃ L_Uncertainty
-      + λ₄ L_SSIM
     """
 
-    def __init__(
-            self,
-            mae_weight=1.0,
-            physics_weight=1e-4,
-            uncertainty_weight=0.10,
-            ssim_weight=0.10
-    ):
+    def __init__(self):
 
         super().__init__()
-
-        # ------------------------------------------
-        # Loss Weights
-        # ------------------------------------------
-
-        self.mae_weight = mae_weight
-        self.physics_weight = physics_weight
-        self.uncertainty_weight = uncertainty_weight
-        self.ssim_weight = ssim_weight
-
-        # ------------------------------------------
-        # Individual Losses
-        # ------------------------------------------
 
         self.mae_loss = MAELoss()
 
         self.physics_loss = PhysicsLoss()
 
-        self.uncertainty_loss = UncertaintyLoss()
-
         self.ssim_loss = SSIMLoss()
 
-    # --------------------------------------------------
+        self.uncertainty_loss = UncertaintyLoss()
 
     def forward(
             self,
-            reconstruction,
+            prediction,
             target,
-            log_variance,
-            velocity_model=None
+            velocity_model,
+            log_variance
     ):
-        """
-        Compute the composite loss.
 
-        Parameters
-        ----------
-        reconstruction : torch.Tensor
-            Predicted seismic cube.
-
-        target : torch.Tensor
-            Ground-truth seismic cube.
-
-        log_variance : torch.Tensor
-            Predicted uncertainty.
-
-        velocity_model : torch.Tensor, optional
-            Spatial velocity model.
-            If None, PhysicsLoss uses a constant velocity.
-        """
-
-        # ------------------------------------------
-        # Reconstruction Loss
-        # ------------------------------------------
 
         mae = self.mae_loss(
-            reconstruction,
-            target
-        )
 
-        # ------------------------------------------
-        # Physics Loss
-        # ------------------------------------------
+            prediction,
+
+            target
+
+        )
 
         physics = self.physics_loss(
-            prediction=reconstruction,
-            target=target,
-            velocity_model=velocity_model
-        )
 
-        # ------------------------------------------
-        # Predictive Uncertainty Loss
-        # ------------------------------------------
+            prediction,
 
-        uncertainty = self.uncertainty_loss(
-            reconstruction,
             target,
-            log_variance
+
+            velocity_model
+
         )
 
-        # ------------------------------------------
-        # Structural Similarity Loss
-        # ------------------------------------------
 
         ssim = self.ssim_loss(
-            reconstruction,
+
+            prediction,
+
             target
+
         )
 
-        # ------------------------------------------
-        # Composite Loss
-        # ------------------------------------------
+        uncertainty = self.uncertainty_loss(
+
+            prediction,
+
+            target,
+
+            log_variance
+
+        )
 
         total = (
 
-            self.mae_weight * mae
+            LOSS_WEIGHTS["mae"] * mae
 
             +
 
-            self.physics_weight * physics
+            LOSS_WEIGHTS["physics"] * physics
 
             +
 
-            self.uncertainty_weight * uncertainty
+            LOSS_WEIGHTS["uncertainty"] * uncertainty
 
             +
 
-            self.ssim_weight * ssim
+            LOSS_WEIGHTS["ssim"] * ssim
 
         )
 
-        # ------------------------------------------
-        # Logging Dictionary
-        # ------------------------------------------
+        return {
 
-        losses = {
+            "mae": mae,
 
-            "mae": float(mae.detach()),
+            "physics": physics,
 
-            "physics": float(physics.detach()),
+            "uncertainty": uncertainty,
 
-            "uncertainty": float(uncertainty.detach()),
+            "ssim": ssim,
 
-            "ssim": float(ssim.detach()),
-
-            "total": float(total.detach())
+            "total": total
 
         }
-
-        return total, losses
