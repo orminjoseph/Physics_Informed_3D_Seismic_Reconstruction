@@ -215,6 +215,57 @@ class Trainer:
 
             )
 
+    def load_checkpoint(
+
+            self,
+
+            checkpoint_path
+
+    ):
+
+        checkpoint = torch.load(
+
+            checkpoint_path,
+
+            map_location=self.device
+
+        )
+
+        self.model.load_state_dict(
+
+            checkpoint["model_state_dict"]
+
+        )
+
+        self.optimizer.load_state_dict(
+
+            checkpoint["optimizer_state_dict"]
+
+        )
+
+        self.best_loss = checkpoint["loss"]
+
+        start_epoch = checkpoint["epoch"]
+
+        print(
+
+            f"Checkpoint loaded successfully."
+
+        )
+
+        print(
+
+            f"Resuming from Epoch {start_epoch}"
+
+        )
+
+        print(
+
+            f"Best Loss = {self.best_loss:.6f}"
+
+        )
+
+        return start_epoch
 
     def fit(
 

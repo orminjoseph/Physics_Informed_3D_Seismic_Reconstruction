@@ -1,36 +1,69 @@
-import test.setup_path
+"""
+============================================================
+Testing Checkpoint Loading
+============================================================
+"""
 
-from test.test_factory import (
-    create_trainer
-)
+import torch
 
-# -------------------------------------------------------
-# Create Trainer
-# -------------------------------------------------------
+from models.network import Network3D
+from losses.total_loss import TotalLoss
+from trainer.trainer import Trainer
 
-trainer = create_trainer()
 
-# -------------------------------------------------------
-# Load checkpoint
-# -------------------------------------------------------
+def test_load_checkpoint():
 
-trainer.load_checkpoint(
-    "checkpoints/checkpoint_epoch_3.pth"
-)
+    print()
+    print("=" * 60)
+    print("Testing Checkpoint Loading")
+    print("=" * 60)
 
-# -------------------------------------------------------
-# Display history
-# -------------------------------------------------------
+    device = torch.device("cpu")
 
-print("\n")
-print("=" * 60)
-print("Loaded Training History")
-print("=" * 60)
+    model = Network3D()
 
-for key, values in trainer.history.items():
+    criterion = TotalLoss()
 
-    print(
-        f"{key:<15}: {values}"
+    optimizer = torch.optim.Adam(
+
+        model.parameters(),
+
+        lr=1e-3
+
     )
 
-print("=" * 60)
+    trainer = Trainer(
+
+        model,
+
+        criterion,
+
+        optimizer,
+
+        device
+
+    )
+
+    epoch = trainer.load_checkpoint(
+
+        "checkpoints/latest_checkpoint.pth"
+
+    )
+
+    print()
+
+    print(f"Loaded Epoch : {epoch}")
+
+    print()
+
+    print("Checkpoint Loading Test: PASSED")
+
+
+def main():
+
+    test_load_checkpoint()
+
+
+if __name__ == "__main__":
+
+    main()
