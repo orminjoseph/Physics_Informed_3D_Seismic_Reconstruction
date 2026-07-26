@@ -7,7 +7,7 @@ def main():
 
         output_directory="datasets",
 
-        number_of_samples=5,
+        number_of_samples=100,
 
         cube_size=(64, 64, 64),
 

@@ -38,11 +38,22 @@ class UncertaintyLoss(nn.Module):
 
         ) ** 2
 
+        log_variance = torch.clamp(
+
+            log_variance,
+
+            min=-10.0,
+
+            max=10.0
+
+        )
+
         precision = torch.exp(
 
             -log_variance
 
         )
+
 
         loss = (
 

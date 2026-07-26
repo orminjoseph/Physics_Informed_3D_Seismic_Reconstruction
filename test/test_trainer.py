@@ -26,8 +26,16 @@ def test_trainer():
         dataset_directory="datasets"
     )
 
+    train_dataloader = DataLoader(
 
-    dataloader = DataLoader(
+        dataset,
+
+        batch_size=2,
+
+        shuffle=True
+
+    )
+    validation_dataloader = DataLoader(
 
         dataset,
 
@@ -36,6 +44,7 @@ def test_trainer():
         shuffle=False
 
     )
+
 
     model = Network3D()
 
@@ -63,11 +72,14 @@ def test_trainer():
 
     trainer.fit(
 
-        dataloader,
+        train_dataloader,
+
+        validation_dataloader,
 
         epochs=2
 
     )
+
 
     print()
 

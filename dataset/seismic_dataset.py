@@ -188,12 +188,14 @@ class SeismicDataset(Dataset):
         # Return sample
         # ------------------------------------------
 
-        return (
+        return {
 
-            ground_truth,
+            "ground_truth": ground_truth,
 
-            corrupted,
+            "corrupted": corrupted,
 
-            mask
-        )
+            "mask": mask
+
+        }
+  
 

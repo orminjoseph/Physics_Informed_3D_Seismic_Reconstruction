@@ -1312,6 +1312,12 @@ class SyntheticGenerator:
         seismic = self.add_noise(
             seismic
         )
+
+        maximum = np.max(np.abs(seismic))
+
+        if maximum > 0:
+            seismic = seismic / maximum
+            
         return seismic
 
     def generate_training_sample(
