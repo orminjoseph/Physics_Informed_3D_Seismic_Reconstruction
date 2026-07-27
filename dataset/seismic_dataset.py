@@ -27,6 +27,8 @@ Author: Ormin Joseph
 import numpy as np
 import torch
 
+from dataset.segy_loader import SegyLoader
+
 from torch.utils.data import Dataset
 
 from dataset.patch_extractor import PatchExtractor
@@ -46,14 +48,29 @@ class SeismicDataset(Dataset):
 
             cube=None,
 
+            segy_file=None,
+
             synthetic=False
 
     ):
+
 
         if synthetic:
             generator = GeologicalGenerator()
 
             cube = generator.generate()
+        if segy_file is not None:
+            loader = SegyLoader(
+
+                segy_file
+
+            )
+
+            cube = loader.load()
+
+            self.metadata = loader.get_metadata()
+        if segy_file is None:
+            self.metadata = {}
 
         self.cube = cube
 
@@ -127,4 +144,8 @@ class SeismicDataset(Dataset):
             "mask": mask
 
         }
+
+    def get_metadata(self):
+
+        return self.metadata
 

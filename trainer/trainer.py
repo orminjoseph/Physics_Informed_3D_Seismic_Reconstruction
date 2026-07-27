@@ -14,6 +14,8 @@ import time
 
 import csv
 
+from utils.experiment_manager import ExperimentManager
+
 import matplotlib.pyplot as plt
 
 from torch.utils.tensorboard import SummaryWriter
@@ -51,9 +53,6 @@ class Trainer:
         # TensorBoard
         # ------------------------------------------
 
-        self.writer = SummaryWriter(
-            log_dir="runs/physics_informed_seismic"
-        )
 
         self.model = model
 
@@ -63,33 +62,31 @@ class Trainer:
 
         self.device = device
 
-        self.model.to(device)
+        self.experiment = ExperimentManager()
 
-        self.checkpoint_directory = "checkpoints"
+        self.writer = SummaryWriter(
 
-        self.best_validation_loss = float("inf")
-
-
-        os.makedirs(
-
-            self.checkpoint_directory,
-
-            exist_ok=True
+            log_dir=self.experiment.tensorboard
 
         )
-        self.best_loss = float("inf")
+
+        self.model.to(device)
+
+        self.checkpoint_directory = self.experiment.checkpoints
+
 
         # ------------------------------------------
         # Experiment Logger
         # ------------------------------------------
 
+        self.log_file = os.path.join(
 
-        os.makedirs(
-            "outputs/logs",
-            exist_ok=True
+            self.experiment.logs,
+
+            "training_history.csv"
+
         )
 
-        self.log_file = "outputs/logs/training_history.csv"
         if not os.path.exists(self.log_file):
             with open(
 
@@ -151,6 +148,8 @@ class Trainer:
             patience=5,
 
         )
+
+
         self.best_epoch = 0
 
         self.best_metrics = {
@@ -961,11 +960,13 @@ class Trainer:
             training_time
 
     ):
-        os.makedirs(
-            "outputs/reports",
-            exist_ok=True
+        report_file = os.path.join(
+
+            self.experiment.reports,
+
+            "training_summary.txt"
+
         )
-        report_file = "outputs/reports/training_summary.txt"
 
         with open(report_file, "w") as file:
 
