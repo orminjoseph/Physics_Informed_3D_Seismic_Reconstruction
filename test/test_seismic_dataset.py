@@ -1,46 +1,59 @@
-"""
-=========================================================
-Test Seismic Dataset
-=========================================================
-
-Verifies that the PyTorch SeismicDataset correctly
-
-• Loads the generated dataset
-• Returns the correct number of samples
-• Loads one sample
-• Converts arrays to tensors
-
-=========================================================
-"""
+import numpy as np
 
 from dataset.seismic_dataset import SeismicDataset
 
 
 def main():
 
-    dataset = SeismicDataset()
+    cube = np.random.randn(
+
+        128,
+
+        128,
+
+        128
+
+    ).astype(np.float32)
+
+    dataset = SeismicDataset(
+
+        cube=cube
+
+    )
+
+    sample = dataset[0]
 
     print()
 
-    print("Number of Samples :", len(dataset))
+    print("=" * 60)
+
+    print("Unified Dataset Test")
+
+    print("=" * 60)
 
     print()
 
-    ground_truth, corrupted, mask = dataset[0]
+    print("Input Shape")
 
-    print("Ground Truth Shape :", ground_truth.shape)
-
-    print("Corrupted Shape    :", corrupted.shape)
-
-    print("Mask Shape         :", mask.shape)
+    print(sample["input"].shape)
 
     print()
 
-    print("Ground Truth Type :", ground_truth.dtype)
+    print("Target Shape")
 
-    print("Corrupted Type    :", corrupted.dtype)
+    print(sample["target"].shape)
 
-    print("Mask Type         :", mask.dtype)
+    print()
+
+    print("Mask Shape")
+
+    print(sample["mask"].shape)
+
+    print()
+
+    print("Dataset Size")
+
+    print(len(dataset))
 
 
 if __name__ == "__main__":

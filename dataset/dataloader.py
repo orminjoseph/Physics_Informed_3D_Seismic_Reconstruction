@@ -17,7 +17,7 @@ Author: Ormin Joseph
 """
 from torch.utils.data import DataLoader
 
-from dataset.seismic_dataset import SeismicDataset
+from dataset.generated_dataset import SeismicDataset
 def create_dataloader(
         dataset_directory="datasets",
         batch_size=2,

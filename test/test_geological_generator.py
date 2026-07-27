@@ -1,4 +1,4 @@
-from datasets.geological_generator import GeologicalGenerator
+from dataset.geological_generator import GeologicalGenerator
 
 generator = GeologicalGenerator()
 

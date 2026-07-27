@@ -1,4 +1,4 @@
-from datasets.synthetic_dataset import SyntheticSeismicDataset
+from dataset.synthetic_dataset import SyntheticSeismicDataset
 
 dataset = SyntheticSeismicDataset(
     num_samples=5

@@ -9,13 +9,11 @@ Author: Ormin Joseph
 =========================================================
 """
 
-import test.setup_path
-
 import torch
 from torch.utils.data import DataLoader
 
 from models.network import PhysicsInformed3DUNet
-from datasets.synthetic_dataset import SyntheticSeismicDataset
+from dataset.synthetic_dataset import SyntheticSeismicDataset
 from losses.total_loss import TotalLoss
 from trainer.trainer import Trainer
 from utils.config import DEVICE

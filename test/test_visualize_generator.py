@@ -1,6 +1,6 @@
 import matplotlib.pyplot as plt
 
-from datasets.geological_generator import GeologicalGenerator
+from dataset.geological_generator import GeologicalGenerator
 from utils.plotting import save_figure
 
 generator = GeologicalGenerator()

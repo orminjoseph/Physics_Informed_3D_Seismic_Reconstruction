@@ -2,7 +2,7 @@ import torch
 
 from models.network import Network3D
 from inference.predictor import Predictor
-from dataset.seismic_dataset import SeismicDataset
+from dataset.generated_dataset import SeismicDataset
 
 
 def main():

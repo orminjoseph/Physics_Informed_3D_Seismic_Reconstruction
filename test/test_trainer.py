@@ -6,7 +6,7 @@ Test Trainer
 
 import torch
 
-from dataset.seismic_dataset import SeismicDataset
+from dataset.generated_dataset import SeismicDataset
 from torch.utils.data import DataLoader
 
 from models.network import Network3D

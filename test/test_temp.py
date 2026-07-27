@@ -1,4 +1,4 @@
-from dataset.seismic_dataset import SeismicDataset
+from dataset.generated_dataset import SeismicDataset
 
 dataset = SeismicDataset("datasets")
 
