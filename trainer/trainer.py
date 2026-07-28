@@ -535,7 +535,33 @@ class Trainer:
 
             )
 
+
         )
+
+        # ----------------------------------------
+        # Save periodic checkpoint
+        # ----------------------------------------
+
+        if epoch % 10 == 0:
+            torch.save(
+
+                checkpoint,
+
+                os.path.join(
+
+                    self.checkpoint_directory,
+
+                    f"epoch_{epoch:04d}.pth"
+
+                )
+
+            )
+
+            print(
+
+                f"Archived checkpoint saved (Epoch {epoch})"
+
+            )
 
         print(
 
@@ -547,8 +573,8 @@ class Trainer:
         # Save best model
         # ----------------------------------------
 
-        if loss < self.best_loss:
-            self.best_loss = loss
+        if loss < self.best_validation_loss:
+            self.best_validation_loss = loss
 
             torch.save(
 
