@@ -194,38 +194,41 @@ class Trainer:
         # ----------------------------------------
 
         for batch_index, batch in enumerate(dataloader):
+            inputs, targets, mask, velocity_model = batch
 
-            ground_truth = batch["ground_truth"].to(self.device)
+            inputs = inputs.to(self.device)
 
-            corrupted = batch["corrupted"].to(self.device)
+            targets = targets.to(self.device)
 
-            mask = batch["mask"].to(self.device)
+            mask = mask.to(self.device)
 
+            velocity_model = velocity_model.to(self.device)
 
-            # Temporary normalized velocity model
-            # (will later come from the dataset)
-
-            velocity_model = torch.ones_like(
-                ground_truth
-            )
             self.optimizer.zero_grad()
+
             reconstruction, log_variance = self.model(
-                corrupted
+                inputs
             )
             losses = self.criterion(
 
                 reconstruction,
 
-                ground_truth,
+                targets,
 
                 velocity_model,
 
                 log_variance
 
             )
+
             loss = losses["total"]
 
             loss.backward()
+
+            torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(),
+                max_norm=1.0
+            )
 
             self.optimizer.step()
 
@@ -279,18 +282,20 @@ class Trainer:
 
             for batch_index, batch in enumerate(dataloader):
 
-                ground_truth = batch["ground_truth"].to(self.device)
+                inputs, targets, mask, velocity_model = batch
 
-                corrupted = batch["corrupted"].to(self.device)
+                inputs = inputs.to(self.device)
 
-                mask = batch["mask"].to(self.device)
+                targets = targets.to(self.device)
 
-                velocity_model = torch.ones_like(
-                    ground_truth
-                )
+                mask = mask.to(self.device)
+
+                velocity_model = velocity_model.to(self.device)
 
                 reconstruction, log_variance = self.model(
-                    corrupted
+
+                    inputs
+
                 )
 
                 # Print only occasionally
@@ -309,9 +314,9 @@ class Trainer:
 
                     print(
                         f"Ground Truth : "
-                        f"min={ground_truth.min().item():.4f}, "
-                        f"max={ground_truth.max().item():.4f}, "
-                        f"mean={ground_truth.mean().item():.4f}"
+                        f"min={targets.min().item():.4f}, "
+                        f"max={targets.max().item():.4f}, "
+                        f"mean={targets.mean().item():.4f}"
                     )
 
                     print(
@@ -326,7 +331,7 @@ class Trainer:
 
                     reconstruction,
 
-                    ground_truth,
+                    targets,
 
                     velocity_model,
 
@@ -340,9 +345,9 @@ class Trainer:
 
                     self.save_validation_visualization(
 
-                        corrupted,
+                        inputs,
 
-                        ground_truth,
+                        targets,
 
                         reconstruction,
 
@@ -352,15 +357,15 @@ class Trainer:
 
                     )
 
-                metric_mae = mae(reconstruction, ground_truth)
+                metric_mae = mae(reconstruction, targets)
 
-                metric_rmse = rmse(reconstruction, ground_truth)
+                metric_rmse = rmse(reconstruction, targets)
 
-                metric_psnr = psnr(reconstruction, ground_truth)
+                metric_psnr = psnr(reconstruction, targets)
 
-                metric_snr = snr(reconstruction, ground_truth)
+                metric_snr = snr(reconstruction, targets)
 
-                metric_ssim = ssim(reconstruction, ground_truth)
+                metric_ssim = ssim(reconstruction, targets)
 
                 running_total += losses["total"].item()
 
@@ -414,9 +419,9 @@ class Trainer:
 
             self,
 
-            corrupted,
+            inputs,
 
-            ground_truth,
+            targets,
 
             reconstruction,
 
@@ -436,9 +441,9 @@ class Trainer:
             exist_ok=True
         )
 
-        corrupted = corrupted[0, 0].cpu().numpy()
+        inputs = inputs[0, 0].cpu().numpy()
 
-        ground_truth = ground_truth[0, 0].cpu().numpy()
+        targets = targets[0, 0].cpu().numpy()
 
         reconstruction = reconstruction[0, 0].detach().cpu().numpy()
 
@@ -446,7 +451,7 @@ class Trainer:
 
         # Middle slice
 
-        middle = corrupted.shape[0] // 2
+        middle = inputs.shape[0] // 2
 
         fig, axes = plt.subplots(
             2,
@@ -455,16 +460,16 @@ class Trainer:
         )
 
         axes[0, 0].imshow(
-            corrupted[middle],
+            inputs[middle],
             cmap="gray"
         )
-        axes[0, 0].set_title("Corrupted")
+        axes[0, 0].set_title("inputs")
 
         axes[0, 1].imshow(
-            ground_truth[middle],
+            targets[middle],
             cmap="gray"
         )
-        axes[0, 1].set_title("Ground Truth")
+        axes[0, 1].set_title("targets")
 
         axes[1, 0].imshow(
             reconstruction[middle],
@@ -472,11 +477,19 @@ class Trainer:
         )
         axes[1, 0].set_title("Reconstruction")
 
-        axes[1, 1].imshow(
+        im = axes[1, 1].imshow(
             uncertainty[middle],
             cmap="hot"
         )
+
         axes[1, 1].set_title("Uncertainty")
+
+        fig.colorbar(
+            im,
+            ax=axes[1, 1],
+            fraction=0.046,
+            pad=0.04
+        )
 
         for ax in axes.flat:
             ax.axis("off")
@@ -574,7 +587,6 @@ class Trainer:
         # ----------------------------------------
 
         if loss < self.best_validation_loss:
-            self.best_validation_loss = loss
 
             torch.save(
 
@@ -600,9 +612,32 @@ class Trainer:
 
             self,
 
-            checkpoint_path
+            checkpoint_path=None
 
     ):
+        if checkpoint_path is None:
+
+            checkpoint_path = os.path.join(
+
+                self.checkpoint_directory,
+
+                "latest_checkpoint.pth"
+
+            )
+
+            if not os.path.exists(checkpoint_path):
+                print()
+
+                print("=" * 60)
+
+                print("No checkpoint found.")
+
+                print("Starting training from scratch.")
+
+                print("=" * 60)
+
+                return 0
+
 
         checkpoint = torch.load(
 
@@ -720,7 +755,10 @@ class Trainer:
 
         start_epoch = 0
 
-        latest_checkpoint = "checkpoints/latest_checkpoint.pth"
+        latest_checkpoint = os.path.join(
+            self.checkpoint_directory,
+            "latest_checkpoint.pth"
+        )
 
         if resume and os.path.exists(latest_checkpoint):
             start_epoch = self.load_checkpoint(
@@ -935,6 +973,14 @@ class Trainer:
 
                 self.wait = 0
 
+                print()
+                print("NEW BEST MODEL FOUND")
+                print("Best Epoch :", self.best_epoch)
+                print("Best Loss  :", self.best_validation_loss)
+                print("Best SSIM  :", self.best_metrics["SSIM"])
+                print()
+
+
             else:
 
                 self.wait += 1
@@ -954,6 +1000,8 @@ class Trainer:
                     print("=" * 60)
 
                     break
+
+
 
         training_time = time.time() - start_time
 

@@ -27,11 +27,11 @@ DEVICE = (
 # Training
 # =========================================================
 
-BATCH_SIZE = 2
+BATCH_SIZE = 1
 
-NUM_EPOCHS = 100
+NUM_EPOCHS = 20
 
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 5e-5
 
 
 # =========================================================

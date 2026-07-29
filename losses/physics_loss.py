@@ -118,7 +118,6 @@ class PhysicsLoss(nn.Module):
             prediction,
             velocity_model
     ):
-
         laplace = self.laplacian3d(prediction)
 
         velocity = velocity_model[
@@ -128,6 +127,8 @@ class PhysicsLoss(nn.Module):
             1:-1,
             1:-1
         ]
+
+        velocity = velocity / 3500.0
 
         residual = velocity.pow(2) * laplace
 

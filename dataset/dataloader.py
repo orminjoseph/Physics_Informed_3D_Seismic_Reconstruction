@@ -15,50 +15,27 @@ mini-batches for efficient deep learning training.
 Author: Ormin Joseph
 =========================================================
 """
+
 from torch.utils.data import DataLoader
 
-from dataset.generated_dataset import SeismicDataset
+
 def create_dataloader(
-        dataset_directory="datasets",
+
+        dataset,
+
         batch_size=2,
+
         shuffle=True,
+
         num_workers=0
+
 ):
     """
-    Create a PyTorch DataLoader.
-
-    Parameters
-    ----------
-    dataset_directory : str
-        Folder containing the dataset.
-
-    batch_size : int
-        Number of samples per mini-batch.
-
-    shuffle : bool
-        Shuffle dataset before each epoch.
-
-    num_workers : int
-        Number of worker processes.
-
-    Returns
-    -------
-    DataLoader
+    Create a PyTorch DataLoader
+    from an already-created Dataset.
     """
-    # ------------------------------------------
-    # Create dataset
-    # ------------------------------------------
 
-    dataset = SeismicDataset(
-
-        dataset_directory=dataset_directory
-
-    )
-    # ------------------------------------------
-    # Create DataLoader
-    # ------------------------------------------
-
-    dataloader = DataLoader(
+    return DataLoader(
 
         dataset,
 
@@ -71,8 +48,3 @@ def create_dataloader(
         pin_memory=True
 
     )
-    # ------------------------------------------
-    # Return DataLoader
-    # ------------------------------------------
-
-    return dataloader
