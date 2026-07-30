@@ -116,6 +116,10 @@ class ResidualBlock3D(nn.Module):
 
             self.relu = nn.ReLU(inplace=True)
 
+            self.dropout = nn.Dropout3d(
+                p=0.20
+            )
+
             self.conv2 = nn.Conv3d(
                 channels,
                 channels,
@@ -134,6 +138,8 @@ class ResidualBlock3D(nn.Module):
             out = self.bn1(out)
 
             out = self.relu(out)
+
+            out = self.dropout(out)
 
             out = self.conv2(out)
 
