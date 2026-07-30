@@ -22,21 +22,7 @@ from models.attention import AttentionGate3D
 
 
 class DoubleConv3D(nn.Module):
-    """
-    Double 3D Convolution Block
 
-    Conv3D
-        ↓
-    BatchNorm3D
-        ↓
-    ReLU
-        ↓
-    Conv3D
-        ↓
-    BatchNorm3D
-        ↓
-    ReLU
-    """
 
     def __init__(self, in_channels, out_channels):
         super().__init__()
