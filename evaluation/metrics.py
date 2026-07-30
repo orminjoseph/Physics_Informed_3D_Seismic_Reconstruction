@@ -11,8 +11,8 @@ Author: Ormin Joseph
 
 import torch
 import torch.nn.functional as F
-
-
+from pytorch_msssim import ssim
+import torch.nn.functional as F
 class EvaluationMetrics:
     """
     Computes reconstruction quality metrics.
@@ -98,6 +98,19 @@ class EvaluationMetrics:
             max_value
         ) - 10 * torch.log10(
             mse + 1e-8
+        )
+
+    @staticmethod
+    def ssim(prediction, target):
+        """
+        Structural Similarity Index
+        """
+
+        return ssim(
+            prediction,
+            target,
+            data_range=1.0,
+            size_average=True
         )
 
     @staticmethod

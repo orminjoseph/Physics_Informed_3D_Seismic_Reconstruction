@@ -37,6 +37,7 @@ class Evaluator:
             "relative_error": 0.0,
             "snr": 0.0,
             "psnr": 0.0,
+            "ssim": 0.0,
             "uncertainty": 0.0
 
         }
@@ -45,11 +46,18 @@ class Evaluator:
 
         with torch.no_grad():
 
-            for input_cube, target_cube, _ in dataloader:
+            for batch in dataloader:
+                input_cube = batch["input"].unsqueeze(1).to(
+                    self.device
+                )
 
-                input_cube = input_cube.to(self.device)
+                target_cube = batch["target"].unsqueeze(1).to(
+                    self.device
+                )
 
-                target_cube = target_cube.to(self.device)
+                mask = batch["mask"].unsqueeze(1).to(
+                    self.device
+                )
 
                 prediction, log_variance = self.model(
                     input_cube
@@ -70,10 +78,12 @@ class Evaluator:
                     target_cube
                 ).item()
 
-                results["relative_error"] += EvaluationMetrics.relative_error(
-                    prediction,
-                    target_cube
-                ).item()
+                results["relative_error"] += (
+                    EvaluationMetrics.relative_error(
+                        prediction,
+                        target_cube
+                    ).item()
+                )
 
                 results["snr"] += EvaluationMetrics.snr(
                     prediction,
@@ -85,9 +95,16 @@ class Evaluator:
                     target_cube
                 ).item()
 
-                results["uncertainty"] += EvaluationMetrics.uncertainty(
-                    log_variance
+                results["ssim"] += EvaluationMetrics.ssim(
+                    prediction,
+                    target_cube
                 ).item()
+
+                results["uncertainty"] += (
+                    EvaluationMetrics.uncertainty(
+                        log_variance
+                    ).item()
+                )
 
         for key in results:
 
