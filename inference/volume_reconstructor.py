@@ -41,11 +41,21 @@ class VolumeReconstructor:
             stride=self.stride
         )
 
+        depth, height, width = volume.shape
+
+        reconstructed_volume = np.zeros(
+            (depth, height, width),
+            dtype=np.float32
+        )
+
+        counter_volume = np.zeros(
+            (depth, height, width),
+            dtype=np.float32
+        )
+
         patches = extractor.extract(volume)
 
-        reconstructed_patches = []
-
-        for patch in patches:
+        for patch, z, y, x in patches:
 
             patch_tensor = (
                 torch.from_numpy(patch)
@@ -59,8 +69,32 @@ class VolumeReconstructor:
                 )
             )
 
-            reconstructed_patches.append(
-                reconstruction.squeeze().numpy()
+            reconstructed_patch = (
+                reconstruction.squeeze()
+                .cpu()
+                .numpy()
             )
 
-        return reconstructed_patches
+            pd, ph, pw = reconstructed_patch.shape
+
+            reconstructed_volume[
+                z:z + pd,
+                y:y + ph,
+                x:x + pw
+            ] += reconstructed_patch
+
+            counter_volume[
+                z:z + pd,
+                y:y + ph,
+                x:x + pw
+            ] += 1
+
+        counter_volume[
+
+            counter_volume == 0
+
+        ] = 1
+
+        reconstructed_volume /= counter_volume
+
+        return reconstructed_volume

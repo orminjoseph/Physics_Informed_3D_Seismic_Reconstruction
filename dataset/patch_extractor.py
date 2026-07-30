@@ -53,6 +53,14 @@ class PatchExtractor:
 
                     ]
 
-                    patches.append(patch)
+                    patches.append(
+                        (
+                            patch,
+                            z,
+                            y,
+                            x
+                        )
+                    )
 
-        return np.array(patches)
+
+        return patches
