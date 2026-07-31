@@ -172,3 +172,110 @@ class Visualizer:
 
         plt.close()
 
+    def save_comparison(
+
+            self,
+
+            corrupted,
+
+            target,
+
+            reconstruction,
+
+            uncertainty,
+
+            filename="f3_comparison.png"
+
+    ):
+        """
+        Save publication-style comparison figure.
+        """
+
+        import numpy as np
+
+        if hasattr(corrupted, "detach"):
+            corrupted = corrupted.detach().cpu().numpy()
+
+        if hasattr(target, "detach"):
+            target = target.detach().cpu().numpy()
+
+        if hasattr(reconstruction, "detach"):
+            reconstruction = reconstruction.detach().cpu().numpy()
+
+        if hasattr(uncertainty, "detach"):
+            uncertainty = uncertainty.detach().cpu().numpy()
+
+        corrupted = np.squeeze(corrupted)
+        target = np.squeeze(target)
+        reconstruction = np.squeeze(reconstruction)
+        uncertainty = np.squeeze(uncertainty)
+
+        slice_index = corrupted.shape[0] // 2
+
+        corrupted_slice = corrupted[slice_index]
+        target_slice = target[slice_index]
+        reconstruction_slice = reconstruction[slice_index]
+        uncertainty_slice = uncertainty[slice_index]
+
+        difference_slice = np.abs(
+            target_slice - reconstruction_slice
+        )
+
+        fig, axes = plt.subplots(
+            2,
+            3,
+            figsize=(15, 10)
+        )
+
+        axes[0, 0].imshow(
+            corrupted_slice,
+            cmap="gray",
+            aspect="auto"
+        )
+        axes[0, 0].set_title("Corrupted Input")
+
+        axes[0, 1].imshow(
+            target_slice,
+            cmap="gray",
+            aspect="auto"
+        )
+        axes[0, 1].set_title("Ground Truth")
+
+        axes[0, 2].imshow(
+            reconstruction_slice,
+            cmap="gray",
+            aspect="auto"
+        )
+        axes[0, 2].set_title("Reconstruction")
+
+        axes[1, 0].imshow(
+            difference_slice,
+            cmap="hot",
+            aspect="auto"
+        )
+        axes[1, 0].set_title("Difference")
+
+        axes[1, 1].imshow(
+            uncertainty_slice,
+            cmap="viridis",
+            aspect="auto"
+        )
+        axes[1, 1].set_title("Uncertainty")
+
+        axes[1, 2].axis("off")
+
+        plt.tight_layout()
+
+        save_path = os.path.join(
+            self.comparison_directory,
+            filename
+        )
+
+        plt.savefig(
+            save_path,
+            dpi=300,
+            bbox_inches="tight"
+        )
+
+        plt.close()
+

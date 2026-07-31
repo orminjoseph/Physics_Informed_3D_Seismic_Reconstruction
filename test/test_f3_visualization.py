@@ -88,6 +88,20 @@ def main():
         "Predictive Uncertainty"
     )
 
+    visualizer.save_comparison(
+
+        corrupted,
+
+        target,
+
+        reconstruction,
+
+        uncertainty,
+
+        "f3_comparison.png"
+
+    )
+
     print()
     print("Images Saved Successfully")
 
