@@ -36,7 +36,7 @@ def test_f3_dataset():
         len(dataset)
     )
 
-    corrupted, target, mask = dataset[0]
+    corrupted, target, mask, velocity = dataset[0]
 
     print()
     print(
@@ -53,6 +53,8 @@ def test_f3_dataset():
         "Mask Shape      :",
         mask.shape
     )
+
+    print("Velocity Shape :", velocity.shape)
 
     print()
     print(

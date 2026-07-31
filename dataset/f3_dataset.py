@@ -231,9 +231,7 @@ class F3Dataset(Dataset):
 
     def __getitem__(self, idx):
 
-        patch, z, y, x = (
-            self.patches[idx]
-        )
+        patch, z, y, x = self.patches[idx]
 
         patch = torch.tensor(
             patch,
@@ -249,8 +247,14 @@ class F3Dataset(Dataset):
 
         corrupted = patch * mask
 
+        velocity_model = torch.full_like(
+            patch,
+            2500.0
+        )
+
         return (
             corrupted.unsqueeze(0),
             patch.unsqueeze(0),
-            mask.unsqueeze(0)
+            mask.unsqueeze(0),
+            velocity_model.unsqueeze(0)
         )
