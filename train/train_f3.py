@@ -88,10 +88,9 @@ def main():
     trainer.fit(
         train_dataloader=train_loader,
         validation_dataloader=validation_loader,
-        epochs=1,
+        epochs=NUM_EPOCHS,
         resume=False
     )
-
 
 if __name__ == "__main__":
     main()
