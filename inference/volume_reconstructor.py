@@ -53,6 +53,16 @@ class VolumeReconstructor:
             dtype=np.float32
         )
 
+        uncertainty_volume = np.zeros(
+            (depth, height, width),
+            dtype=np.float32
+        )
+
+        uncertainty_counter = np.zeros(
+            (depth, height, width),
+            dtype=np.float32
+        )
+
         patches = extractor.extract(volume)
 
         for patch, z, y, x in patches:
@@ -75,6 +85,12 @@ class VolumeReconstructor:
                 .numpy()
             )
 
+            uncertainty_patch = (
+                uncertainty.squeeze()
+                .cpu()
+                .numpy()
+            )
+
             pd, ph, pw = reconstructed_patch.shape
 
             reconstructed_volume[
@@ -89,12 +105,32 @@ class VolumeReconstructor:
                 x:x + pw
             ] += 1
 
+            uncertainty_volume[
+                z:z + pd,
+                y:y + ph,
+                x:x + pw
+            ] += uncertainty_patch
+
+            uncertainty_counter[
+                z:z + pd,
+                y:y + ph,
+                x:x + pw
+            ] += 1
+
         counter_volume[
-
             counter_volume == 0
+            ] = 1
 
-        ] = 1
+        uncertainty_counter[
+            uncertainty_counter == 0
+            ] = 1
 
         reconstructed_volume /= counter_volume
 
-        return reconstructed_volume
+        uncertainty_volume /= uncertainty_counter
+
+        return (
+            reconstructed_volume,
+            uncertainty_volume
+        )
+ 
