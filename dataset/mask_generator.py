@@ -24,7 +24,7 @@ class MaskGenerator:
 
     ):
 
-        inline, crossline, samples = cube.shape
+        inline, crossline, samples = cube
 
         # -------------------------------------
         # Random Trace Mask
