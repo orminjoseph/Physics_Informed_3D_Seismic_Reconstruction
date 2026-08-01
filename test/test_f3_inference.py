@@ -52,6 +52,17 @@ reconstruction, uncertainty = predictor.predict(
     corrupted.unsqueeze(0)
 )
 
+print()
+print("=" * 60)
+print("DATA RANGE CHECK")
+print("=" * 60)
+
+print("Target Min :", target.min().item())
+print("Target Max :", target.max().item())
+
+print("Prediction Min :", reconstruction.min().item())
+print("Prediction Max :", reconstruction.max().item())
+
 target_batch = target.unsqueeze(0)
 
 metric_mae = EvaluationMetrics.mae(
