@@ -28,7 +28,7 @@ class SSIMLoss(nn.Module):
 
     def __init__(
         self,
-        data_range=1.0
+        data_range=8.0
     ):
 
         super().__init__()

@@ -109,7 +109,7 @@ class EvaluationMetrics:
         return ssim(
             prediction,
             target,
-            data_range=1.0,
+            data_range=8.0,
             size_average=True
         )
 
