@@ -49,6 +49,18 @@ def main():
         missing_probability=0.30
     )
 
+    from torch.utils.data import Subset
+
+    dataset = Subset(
+        dataset,
+        range(100)
+    )
+    print()
+    print("=" * 60)
+    print("DEVELOPMENT DATASET")
+    print("=" * 60)
+    print("Number of Patches :", len(dataset))
+
     train_size = int(0.8 * len(dataset))
     validation_size = len(dataset) - train_size
 
