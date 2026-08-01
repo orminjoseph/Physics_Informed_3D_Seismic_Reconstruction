@@ -247,10 +247,14 @@ class F3Dataset(Dataset):
 
         corrupted = patch * mask
 
-        velocity_model = torch.full_like(
-            patch,
-            2500.0
-        )
+        velocity_model = torch.zeros_like(patch)
+
+        nz = patch.shape[0]
+
+        velocity_model[: nz // 4] = 1800
+        velocity_model[nz // 4: nz // 2] = 2200
+        velocity_model[nz // 2: 3 * nz // 4] = 3000
+        velocity_model[3 * nz // 4:] = 420
 
         return (
             corrupted.unsqueeze(0),
