@@ -76,6 +76,8 @@ class ExperimentManager:
 
         )
 
+        self.global_checkpoints = "checkpoints"
+
         self.create()
 
     def create(self):
@@ -94,12 +96,13 @@ class ExperimentManager:
 
             self.reconstructions,
 
-            self.tensorboard
+            self.tensorboard,
+
+            self.global_checkpoints
 
         ]
 
         for folder in folders:
-
             os.makedirs(
 
                 folder,

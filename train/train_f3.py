@@ -17,8 +17,12 @@ from losses.total_loss import TotalLoss
 
 from trainer.trainer import Trainer
 
-from utils.config import *
-
+from utils.config import (
+    NUM_EPOCHS,
+    BATCH_SIZE,
+    LEARNING_RATE,
+    RESUME_TRAINING
+)
 
 F3_PATH = (
     r"C:\Users\ormin\Desktop"
@@ -101,7 +105,7 @@ def main():
         train_dataloader=train_loader,
         validation_dataloader=validation_loader,
         epochs=NUM_EPOCHS,
-        resume=False
+        resume=RESUME_TRAINING
     )
 
 if __name__ == "__main__":

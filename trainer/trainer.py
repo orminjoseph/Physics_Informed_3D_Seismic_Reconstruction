@@ -72,7 +72,9 @@ class Trainer:
 
         self.model.to(device)
 
-        self.checkpoint_directory = self.experiment.checkpoints
+        self.checkpoint_directory = (
+            self.experiment.global_checkpoints
+        )
 
 
         # ------------------------------------------
@@ -527,9 +529,34 @@ class Trainer:
 
             "best_validation_loss": self.best_validation_loss,
 
+            "best_epoch": self.best_epoch,
+
+            "best_metrics": self.best_metrics,
+
             "loss": loss
 
         }
+
+        state_file = os.path.join(
+            self.checkpoint_directory,
+            "training_state.json"
+        )
+
+        import json
+
+        with open(state_file, "w") as file:
+            json.dump(
+                {
+                    "current_epoch": int(epoch),
+                    "best_epoch": int(self.best_epoch),
+                    "best_validation_loss": float(
+                        self.best_validation_loss
+                    ),
+                    "best_metrics": self.best_metrics
+                },
+                file,
+                indent=4
+            )
 
 
         # ----------------------------------------
@@ -552,61 +579,33 @@ class Trainer:
         )
 
         # ----------------------------------------
-        # Save periodic checkpoint
+        # Save epoch-sensitivity checkpoints
         # ----------------------------------------
 
-        if epoch % 10 == 0:
-            torch.save(
+        epoch_directory = os.path.join(
+            self.checkpoint_directory,
+            "epoch_sensitivity"
+        )
 
-                checkpoint,
+        os.makedirs(epoch_directory, exist_ok=True)
 
-                os.path.join(
-
-                    self.checkpoint_directory,
-
-                    f"epoch_{epoch:04d}.pth"
-
-                )
-
+        torch.save(
+            checkpoint,
+            os.path.join(
+                epoch_directory,
+                f"epoch_{epoch:04d}.pth"
             )
+        )
 
-            print(
-
-                f"Archived checkpoint saved (Epoch {epoch})"
-
-            )
+        print(
+            f"Epoch checkpoint saved: epoch_{epoch:04d}.pth"
+        )
 
         print(
 
             f"Latest checkpoint saved (Epoch {epoch})"
 
         )
-
-        # ----------------------------------------
-        # Save best model
-        # ----------------------------------------
-
-        if loss < self.best_validation_loss:
-
-            torch.save(
-
-                checkpoint,
-
-                os.path.join(
-
-                    self.checkpoint_directory,
-
-                    "best_model.pth"
-
-                )
-
-            )
-
-            print(
-
-                f"New best model saved! Loss = {loss:.6f}"
-
-            )
 
     def load_checkpoint(
 
@@ -646,6 +645,22 @@ class Trainer:
             map_location=self.device
 
         )
+
+        print()
+        print("=" * 60)
+        print("CHECKPOINT CONTENTS")
+        print("=" * 60)
+
+        print("Stored Epoch:",
+              checkpoint["epoch"])
+
+        print("Stored Best Epoch:",
+              checkpoint.get(
+                  "best_epoch",
+                  "MISSING"
+              ))
+
+        print("=" * 60)
 
         self.model.load_state_dict(
 
@@ -719,7 +734,13 @@ class Trainer:
 
             }
 
-        start_epoch = checkpoint["epoch"]
+        # ------------------------------------------
+        # Resume from NEXT epoch
+        # ------------------------------------------
+
+        last_completed_epoch = checkpoint["epoch"]
+
+        start_epoch = int(last_completed_epoch) + 1
 
         print()
 
@@ -728,6 +749,8 @@ class Trainer:
         print("Checkpoint loaded successfully.")
 
         print(f"Resuming from Epoch {start_epoch}")
+
+        print(f"Last Completed Epoch : {last_completed_epoch}")
 
         print(f"Best Epoch            : {self.best_epoch}")
 
@@ -759,6 +782,22 @@ class Trainer:
             self.checkpoint_directory,
             "latest_checkpoint.pth"
         )
+
+        print()
+        print("=" * 60)
+        print("RESUME DEBUG")
+        print("=" * 60)
+
+        print("Checkpoint Path:")
+        print(latest_checkpoint)
+
+        print("Exists:")
+        print(os.path.exists(latest_checkpoint))
+
+        print("Resume Flag:")
+        print(resume)
+
+        print("=" * 60)
 
         if resume and os.path.exists(latest_checkpoint):
             start_epoch = self.load_checkpoint(
@@ -850,7 +889,7 @@ class Trainer:
 
             print("=" * 60)
 
-            print(f"Epoch {epoch + 1}/{epochs}")
+            print(f"Epoch {epoch}/{epochs}")
 
             print("=" * 60)
 
@@ -938,17 +977,8 @@ class Trainer:
 
                 ])
 
-
-            self.save_checkpoint(
-
-                epoch=epoch + 1,
-
-                loss=validation_losses["total"]
-
-            )
-
             # ------------------------------------------
-            # Early Stopping
+            # Early Stopping / Best Model Update
             # ------------------------------------------
 
             if validation_losses["total"] < self.best_validation_loss:
@@ -958,20 +988,48 @@ class Trainer:
                 self.best_epoch = epoch + 1
 
                 self.best_metrics = {
-
                     "MAE": validation_losses["metric_mae"],
-
                     "RMSE": validation_losses["metric_rmse"],
-
                     "PSNR": validation_losses["metric_psnr"],
-
                     "SNR": validation_losses["metric_snr"],
-
                     "SSIM": validation_losses["metric_ssim"]
-
                 }
 
                 self.wait = 0
+
+                best_checkpoint = {
+
+                    "epoch": epoch + 1,
+
+                    "model_state_dict": self.model.state_dict(),
+
+                    "optimizer_state_dict": self.optimizer.state_dict(),
+
+                    "scheduler_state_dict": self.scheduler.state_dict(),
+
+                    "best_validation_loss": self.best_validation_loss,
+
+                    "best_epoch": self.best_epoch,
+
+                    "best_metrics": self.best_metrics,
+
+                    "loss": validation_losses["total"]
+
+                }
+
+                torch.save(
+
+                    best_checkpoint,
+
+                    os.path.join(
+
+                        self.checkpoint_directory,
+
+                        "best_model.pth"
+
+                    )
+
+                )
 
                 print()
                 print("NEW BEST MODEL FOUND")
@@ -979,7 +1037,6 @@ class Trainer:
                 print("Best Loss  :", self.best_validation_loss)
                 print("Best SSIM  :", self.best_metrics["SSIM"])
                 print()
-
 
             else:
 
@@ -990,17 +1047,26 @@ class Trainer:
                     f"{self.wait}/{self.patience}"
                 )
 
-                if self.wait >= self.patience:
-                    print()
+            # ------------------------------------------
+            # Save checkpoint AFTER updating best values
+            # ------------------------------------------
 
-                    print("=" * 60)
+            self.save_checkpoint(
+                epoch=epoch + 1,
+                loss=validation_losses["total"]
+            )
 
-                    print("Early stopping triggered.")
+            # ------------------------------------------
+            # Stop if patience exceeded
+            # ------------------------------------------
 
-                    print("=" * 60)
+            if self.wait >= self.patience:
+                print()
+                print("=" * 60)
+                print("Early stopping triggered.")
+                print("=" * 60)
 
-                    break
-
+                break
 
 
         training_time = time.time() - start_time

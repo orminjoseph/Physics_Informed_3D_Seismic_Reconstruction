@@ -33,7 +33,7 @@ NUM_EPOCHS = 5
 
 LEARNING_RATE = 5e-5
 
-
+RESUME_TRAINING = True
 # =========================================================
 # Dataset
 # =========================================================
@@ -112,3 +112,4 @@ PATCH_STRIDE = (
 MASK_TYPE = "random_trace"
 
 MISSING_PROBABILITY = 0.30
+
