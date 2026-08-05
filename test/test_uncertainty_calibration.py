@@ -9,9 +9,13 @@ with reconstruction error.
 Author: Ormin Joseph
 =========================================================
 """
+import csv
+import os
 
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
+
 
 from dataset.f3_dataset import F3Dataset
 from models.network import Network3D
@@ -27,12 +31,7 @@ F3_PATH = (
     r"\Seismic_data.sgy"
 )
 
-CHECKPOINT = (
-    r"outputs"
-    r"\experiment_20260731_040411"
-    r"\checkpoints"
-    r"\best_model.pth"
-)
+CHECKPOINT = "checkpoints/best_model.pth"
 
 
 print()
@@ -102,6 +101,86 @@ correlation = np.corrcoef(
     uncertainty_flat
 )[0, 1]
 
+# --------------------------------------
+# Save CSV
+# --------------------------------------
+
+os.makedirs(
+    "outputs/reports",
+    exist_ok=True
+)
+
+csv_file = (
+    "outputs/reports/"
+    "uncertainty_calibration.csv"
+)
+
+with open(
+        csv_file,
+        "w",
+        newline=""
+) as file:
+
+    writer = csv.writer(file)
+
+    writer.writerow(
+        ["Error", "Uncertainty"]
+    )
+
+    for err, unc in zip(
+            error_flat,
+            uncertainty_flat
+    ):
+        writer.writerow(
+            [err, unc]
+        )
+    # --------------------------------------
+    # Scatter Plot
+    # --------------------------------------
+
+    os.makedirs(
+        "outputs/figures",
+        exist_ok=True
+    )
+
+    plt.figure(
+        figsize=(8, 6)
+    )
+
+    plt.scatter(
+        uncertainty_flat,
+        error_flat,
+        s=2,
+        alpha=0.25
+    )
+
+    plt.xlabel(
+        "Predictive Uncertainty"
+    )
+
+    plt.ylabel(
+        "Absolute Reconstruction Error"
+    )
+
+    plt.title(
+        "Uncertainty Calibration"
+    )
+
+    plt.grid(True)
+
+    plot_file = (
+        "outputs/figures/"
+        "uncertainty_calibration.png"
+    )
+
+    plt.savefig(
+        plot_file,
+        dpi=300,
+        bbox_inches="tight"
+    )
+
+    plt.close()
+
 print()
 print("=" * 60)
 print("UNCERTAINTY CALIBRATION")
@@ -123,3 +202,11 @@ elif correlation > 0.00:
 
 else:
     print("Poor uncertainty calibration")
+
+print()
+print("CSV saved to:")
+print(csv_file)
+
+print()
+print("Plot saved to:")
+print(plot_file)
