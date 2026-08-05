@@ -1,12 +1,12 @@
 """
 ============================================================
-PATCH SIZE SENSITIVITY TEST
+MISSING DATA SENSITIVITY TEST
 ============================================================
 """
 
-import torch
 import csv
 import os
+import torch
 import matplotlib.pyplot as plt
 from dataset.f3_dataset import F3Dataset
 
@@ -27,18 +27,19 @@ F3_PATH = (
 
 CHECKPOINT = "checkpoints/best_model.pth"
 
-PATCH_SIZES = [
-    (32, 32, 32),
-    (64, 64, 64),
-    (96, 96, 96),
-    (128, 128, 128)
+MISSING_LEVELS = [
+    0.10,
+    0.20,
+    0.30,
+    0.40,
+    0.50
 ]
 
 
 def main():
 
     print("=" * 60)
-    print("PATCH SIZE SENSITIVITY TEST")
+    print("MISSING DATA SENSITIVITY TEST")
     print("=" * 60)
 
     results = []
@@ -59,7 +60,7 @@ def main():
 
     print(
         "{:<15} {:<10} {:<10} {:<10} {:<10} {:<10}".format(
-            "Patch Size",
+            "Missing %",
             "MAE",
             "RMSE",
             "PSNR",
@@ -70,13 +71,12 @@ def main():
 
     print("-" * 70)
 
-    for patch_size in PATCH_SIZES:
-
+    for missing_level in MISSING_LEVELS:
         dataset = F3Dataset(
             segy_path=F3_PATH,
-            patch_size=patch_size,
-            stride=patch_size,
-            missing_probability=0.30
+            patch_size=(64, 64, 64),
+            stride=(64, 64, 64),
+            missing_probability=missing_level
         )
 
         corrupted, target, mask, velocity = dataset[0]
@@ -114,7 +114,7 @@ def main():
 
         print(
             "{:<15} {:<10.4f} {:<10.4f} {:<10.2f} {:<10.2f} {:<10.4f}".format(
-                str(patch_size),
+                f"{int(missing_level * 100)}%",
                 mae,
                 rmse,
                 psnr,
@@ -123,7 +123,7 @@ def main():
             )
         )
         results.append([
-            patch_size,
+            int(missing_level * 100),
             mae,
             rmse,
             psnr,
@@ -134,14 +134,14 @@ def main():
     os.makedirs("outputs/reports", exist_ok=True)
 
     with open(
-            "outputs/reports/patch_size_sensitivity.csv",
+            "outputs/reports/missing_data_sensitivity.csv",
             "w",
             newline=""
     ) as file:
         writer = csv.writer(file)
 
         writer.writerow([
-            "Patch_Size",
+            "Missing_Percentage",
             "MAE",
             "RMSE",
             "PSNR",
@@ -153,9 +153,9 @@ def main():
 
     print()
     print("CSV saved to:")
-    print("outputs/reports/patch_size_sensitivity.csv")
+    print("outputs/reports/missing_data_sensitivity.csv")
 
-    patch_labels = [str(r[0]) for r in results]
+    missing_labels = [f"{r[0]}%" for r in results]
 
     mae_values = [r[1] for r in results]
 
@@ -179,63 +179,64 @@ def main():
     )
 
     axes[0, 0].plot(
-        patch_labels,
+        missing_labels,
         mae_values,
         marker="o"
     )
-    axes[0, 0].set_title("MAE vs Patch Size")
+    axes[0, 0].set_title("MAE vs Missing Data")
     axes[0, 0].set_ylabel("MAE")
     axes[0, 0].grid(True)
 
     axes[0, 1].plot(
-        patch_labels,
+        missing_labels,
         rmse_values,
         marker="s"
     )
-    axes[0, 1].set_title("RMSE vs Patch Size")
+    axes[0, 1].set_title("RMSE vs Missing Data")
     axes[0, 1].set_ylabel("RMSE")
     axes[0, 1].grid(True)
 
     axes[1, 0].plot(
-        patch_labels,
+        missing_labels,
         psnr_values,
         marker="^"
     )
-    axes[1, 0].set_title("PSNR vs Patch Size")
+    axes[1, 0].set_title("PSNR vs Missing Data")
     axes[1, 0].set_ylabel("PSNR (dB)")
     axes[1, 0].grid(True)
 
+    axes[1, 1].plot(
+        missing_labels,
+        ssim_values,
+        marker="d"
+    )
+
     axes[2, 0].plot(
-        patch_labels,
+        missing_labels,
         snr_values,
         marker="o"
     )
 
-    axes[2, 0].set_title("SNR vs Patch Size")
+    axes[2, 0].set_title("SNR vs Missing Data")
 
     axes[2, 0].set_ylabel("SNR (dB)")
 
     axes[2, 0].grid(True)
-
     axes[2, 1].axis("off")
 
-    axes[1, 1].plot(
-        patch_labels,
-        ssim_values,
-        marker="d"
-    )
-    axes[1, 1].set_title("SSIM vs Patch Size")
+    axes[1, 1].set_title("SSIM vs Missing Data")
     axes[1, 1].set_ylabel("SSIM")
     axes[1, 1].grid(True)
 
     for ax in axes.flat:
-        ax.set_xlabel("Patch Size")
+        if ax != axes[2, 1]:
+            ax.set_xlabel("Missing Data (%)")
 
     plt.tight_layout()
 
     plot_file = (
         "outputs/figures/"
-        "patch_size_sensitivity.png"
+        "missing_data_sensitivity.png"
     )
 
     plt.savefig(
