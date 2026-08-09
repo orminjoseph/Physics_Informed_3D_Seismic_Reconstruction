@@ -82,22 +82,30 @@ class TotalLoss(nn.Module):
 
         )
 
+        weighted_mae = (
+                LOSS_WEIGHTS["mae"] * mae
+        )
+
+        weighted_physics = (
+                LOSS_WEIGHTS["physics"] * physics
+        )
+
+        weighted_uncertainty = (
+                LOSS_WEIGHTS["uncertainty"] * uncertainty
+        )
+
+        weighted_ssim = (
+                LOSS_WEIGHTS["ssim"] * ssim
+        )
+
         total = (
-
-            LOSS_WEIGHTS["mae"] * mae
-
-            +
-
-            LOSS_WEIGHTS["physics"] * physics
-
-            +
-
-            LOSS_WEIGHTS["uncertainty"] * uncertainty
-
-            +
-
-            LOSS_WEIGHTS["ssim"] * ssim
-
+                weighted_mae
+                +
+                weighted_physics
+                +
+                weighted_uncertainty
+                +
+                weighted_ssim
         )
 
         return {
@@ -109,6 +117,14 @@ class TotalLoss(nn.Module):
             "uncertainty": uncertainty,
 
             "ssim": ssim,
+
+            "weighted_mae": weighted_mae,
+
+            "weighted_physics": weighted_physics,
+
+            "weighted_uncertainty": weighted_uncertainty,
+
+            "weighted_ssim": weighted_ssim,
 
             "total": total
 

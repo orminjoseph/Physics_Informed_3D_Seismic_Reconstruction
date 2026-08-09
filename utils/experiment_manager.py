@@ -3,7 +3,7 @@
 Experiment Manager
 =========================================================
 
-Creates unique folders for every experiment.
+Persistent experiment workspace
 
 Author: Ormin Joseph
 =========================================================
@@ -11,72 +11,47 @@ Author: Ormin Joseph
 
 import os
 
-from datetime import datetime
-
 
 class ExperimentManager:
 
     def __init__(self):
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
         self.root = os.path.join(
-
             "outputs",
-
-            f"experiment_{timestamp}"
-
+            "current_experiment"
         )
 
         self.checkpoints = os.path.join(
-
             self.root,
-
             "checkpoints"
-
         )
 
         self.logs = os.path.join(
-
             self.root,
-
             "logs"
-
         )
 
         self.reports = os.path.join(
-
             self.root,
-
             "reports"
-
         )
 
         self.plots = os.path.join(
-
             self.root,
-
             "plots"
-
         )
 
         self.reconstructions = os.path.join(
-
             self.root,
-
             "reconstructions"
-
         )
 
         self.tensorboard = os.path.join(
-
             self.root,
-
             "tensorboard"
-
         )
 
-        self.global_checkpoints = "checkpoints"
+        self.global_checkpoints = self.checkpoints
 
         self.create()
 
@@ -96,17 +71,13 @@ class ExperimentManager:
 
             self.reconstructions,
 
-            self.tensorboard,
-
-            self.global_checkpoints
+            self.tensorboard
 
         ]
 
         for folder in folders:
+
             os.makedirs(
-
                 folder,
-
                 exist_ok=True
-
             )

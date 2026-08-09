@@ -8,6 +8,8 @@ import torch
 
 from torch.optim import Adam
 
+from utils.config import LOSS_WEIGHTS
+
 from dataset.f3_dataset import F3Dataset
 from dataset.dataloader import create_dataloader
 
@@ -45,6 +47,14 @@ def main():
     print("TRAINING DEVICE")
     print("=" * 60)
     print(DEVICE)
+
+    print()
+    print("=" * 60)
+    print("LOSS WEIGHTS")
+    print("=" * 60)
+
+    for key, value in LOSS_WEIGHTS.items():
+        print(f"{key}: {value}")
 
     dataset = F3Dataset(
         segy_path=F3_PATH,

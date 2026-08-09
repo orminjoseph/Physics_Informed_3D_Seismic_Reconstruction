@@ -191,6 +191,11 @@ class Trainer:
         running_uncertainty = 0.0
         running_ssim = 0.0
 
+        running_weighted_mae = 0.0
+        running_weighted_physics = 0.0
+        running_weighted_uncertainty = 0.0
+        running_weighted_ssim = 0.0
+
         # ----------------------------------------
         # Iterate over batches
         # ----------------------------------------
@@ -244,6 +249,26 @@ class Trainer:
 
             running_ssim += losses["ssim"].item()
 
+            # ----------------------------------------
+            # Weighted contributions
+            # ----------------------------------------
+
+            running_weighted_mae += (
+                losses["weighted_mae"].item()
+            )
+
+            running_weighted_physics += (
+                losses["weighted_physics"].item()
+            )
+
+            running_weighted_uncertainty += (
+                losses["weighted_uncertainty"].item()
+            )
+
+            running_weighted_ssim += (
+                losses["weighted_ssim"].item()
+            )
+
         num_batches = len(dataloader)
         return {
 
@@ -255,7 +280,23 @@ class Trainer:
 
             "uncertainty": running_uncertainty / num_batches,
 
-            "ssim": running_ssim / num_batches
+            "ssim": running_ssim / num_batches,
+
+            # ----------------------------------------
+            # Weighted contributions
+            # ----------------------------------------
+
+            "weighted_mae":
+                running_weighted_mae / num_batches,
+
+            "weighted_physics":
+                running_weighted_physics / num_batches,
+
+            "weighted_uncertainty":
+                running_weighted_uncertainty / num_batches,
+
+            "weighted_ssim":
+                running_weighted_ssim / num_batches
 
         }
 
@@ -501,7 +542,7 @@ class Trainer:
         plt.savefig(
 
             f"outputs/training_progress/"
-            f"Epoch_{epoch + 1:03d}.png"
+            f"Epoch_{epoch:03d}.png"
 
         )
 
@@ -804,7 +845,7 @@ class Trainer:
                 latest_checkpoint
             )
 
-        for epoch in range(start_epoch, epochs):
+        for epoch in range(start_epoch, epochs +1):
 
             train_losses = self.train_epoch(
 
@@ -925,6 +966,29 @@ class Trainer:
             print(f"SSIM Loss        : {validation_losses['ssim']:.6f}")
 
             print()
+            print("Weighted Contributions")
+            print("-" * 30)
+
+            print(
+                f"Weighted MAE         : "
+                f"{train_losses['weighted_mae']:.6f}"
+            )
+
+            print(
+                f"Weighted Physics     : "
+                f"{train_losses['weighted_physics']:.6f}"
+            )
+
+            print(
+                f"Weighted Uncertainty : "
+                f"{train_losses['weighted_uncertainty']:.6f}"
+            )
+
+            print(
+                f"Weighted SSIM        : "
+                f"{train_losses['weighted_ssim']:.6f}"
+            )
+            print()
 
             print("Reconstruction Metrics")
             print("-" * 30)
@@ -955,7 +1019,7 @@ class Trainer:
 
                 writer.writerow([
 
-                    epoch + 1,
+                    epoch,
 
                     train_losses["total"],
 
@@ -985,7 +1049,7 @@ class Trainer:
 
                 self.best_validation_loss = validation_losses["total"]
 
-                self.best_epoch = epoch + 1
+                self.best_epoch = epoch
 
                 self.best_metrics = {
                     "MAE": validation_losses["metric_mae"],
@@ -999,7 +1063,7 @@ class Trainer:
 
                 best_checkpoint = {
 
-                    "epoch": epoch + 1,
+                    "epoch": epoch,
 
                     "model_state_dict": self.model.state_dict(),
 
@@ -1052,7 +1116,7 @@ class Trainer:
             # ------------------------------------------
 
             self.save_checkpoint(
-                epoch=epoch + 1,
+                epoch=epoch,
                 loss=validation_losses["total"]
             )
 

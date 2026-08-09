@@ -29,7 +29,7 @@ DEVICE = (
 
 BATCH_SIZE = 1
 
-NUM_EPOCHS = 5
+NUM_EPOCHS = 22
 
 LEARNING_RATE = 5e-5
 
@@ -82,7 +82,7 @@ LOSS_WEIGHTS = {
 
     "mae": 1.0,
 
-    "physics": 1e-10,
+    "physics": 1e-14,
 
     "uncertainty": 0.05,
 

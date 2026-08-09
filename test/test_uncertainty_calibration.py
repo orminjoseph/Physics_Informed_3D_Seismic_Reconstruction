@@ -120,20 +120,15 @@ with open(
         "w",
         newline=""
 ) as file:
-
     writer = csv.writer(file)
 
     writer.writerow(
-        ["Error", "Uncertainty"]
+        ["Correlation"]
     )
 
-    for err, unc in zip(
-            error_flat,
-            uncertainty_flat
-    ):
-        writer.writerow(
-            [err, unc]
-        )
+    writer.writerow(
+        [correlation]
+    )
     # --------------------------------------
     # Scatter Plot
     # --------------------------------------
