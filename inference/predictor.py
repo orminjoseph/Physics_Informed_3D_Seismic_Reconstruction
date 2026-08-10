@@ -71,7 +71,25 @@ class Predictor:
 
             reconstruction, log_variance = self.model(corrupted_cube)
 
-            uncertainty = torch.exp(0.5 * log_variance)
+            print(
+                "LogVar Min:",
+                log_variance.min().item()
+            )
+
+            print(
+                "LogVar Max:",
+                log_variance.max().item()
+            )
+
+            log_variance = torch.clamp(
+                log_variance,
+                min=-10.0,
+                max=10.0
+            )
+
+            uncertainty = torch.exp(
+                0.5 * log_variance
+            )
 
         return reconstruction.cpu(), uncertainty.cpu()
 
