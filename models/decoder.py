@@ -1,8 +1,7 @@
-"""
-=========================================================
-3D Decoder
-=========================================================
-"""
+
+# """
+# 3D Decoder
+# """
 
 import torch
 import torch.nn as nn
@@ -15,41 +14,56 @@ class Decoder3D(nn.Module):
     Attention-guided 3D Decoder
     """
 
-    def __init__(self):
+    def __init__(
+            self,
+            use_attention=True,
+            use_residual=True
+    ):
 
         super().__init__()
+
+        self.use_attention = use_attention
+        self.use_residual = use_residual
 
         self.up4 = UpBlock3D(
             512,
             256,
-            256
+            256,
+            use_attention=use_attention,
+            use_residual=use_residual
         )
 
         self.up3 = UpBlock3D(
             256,
             128,
-            128
+            128,
+            use_attention=use_attention,
+            use_residual=use_residual
         )
 
         self.up2 = UpBlock3D(
             128,
             64,
-            64
+            64,
+            use_attention=use_attention,
+            use_residual=use_residual
         )
 
         self.up1 = UpBlock3D(
             64,
             32,
-            32
+            32,
+            use_attention=use_attention,
+            use_residual=use_residual
         )
 
     def forward(
-        self,
-        x1,
-        x2,
-        x3,
-        x4,
-        bottleneck_output
+            self,
+            x1,
+            x2,
+            x3,
+            x4,
+            bottleneck_output
     ):
 
         d4 = self.up4(

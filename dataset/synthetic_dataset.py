@@ -12,6 +12,7 @@ Author: Ormin Joseph
 
 import torch
 from torch.utils.data import Dataset
+import numpy as np
 
 from dataset.geological_generator import GeologicalGenerator
 from dataset.velocity_generator import VelocityGenerator
@@ -23,14 +24,26 @@ class SyntheticSeismicDataset(Dataset):
             self,
             num_samples=100,
             cube_size=(64, 128, 128),
-            missing_probability=0.30
+            missing_probability=0.30,
+            geological_mode="random"
     ):
+        super().__init__()
 
+        self.num_samples = num_samples
+        self.cube_size = cube_size
+        self.missing_probability = missing_probability
+        self.geological_mode = geological_mode
+
+        self.generator = GeologicalGenerator(
+            cube_size=cube_size
+        )
         self.num_samples = num_samples
 
         self.cube_size = cube_size
 
         self.missing_probability = missing_probability
+
+        self.geological_mode = geological_mode
 
         # ------------------------------------------
         # Geological model generator
@@ -66,12 +79,29 @@ class SyntheticSeismicDataset(Dataset):
 
         for _ in range(num_samples):
 
-            # ------------------------------
-            # Ground-truth seismic cube
-            # ------------------------------
+            if self.geological_mode == "random":
+
+                mode = np.random.choice([
+
+                    "horizontal",
+
+                    "dipping",
+
+                    "faulted",
+
+                    "folded",
+
+                    "complex",
+
+                    "highly_complex"
+                ])
+
+            else:
+
+                mode = self.geological_mode
 
             target = self.generator.generate(
-                dipping=True
+                mode=mode
             )
 
             # ------------------------------

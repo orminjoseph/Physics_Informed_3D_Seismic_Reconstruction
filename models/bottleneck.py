@@ -1,10 +1,7 @@
 """
-=========================================================
 3D Bottleneck
-=========================================================
 
 Physics-Informed 3D Encoder–Decoder Framework
-=========================================================
 """
 
 import torch
@@ -20,40 +17,38 @@ class Bottleneck3D(nn.Module):
     """
     =====================================================
     Bottleneck Block
-
-    DoubleConv3D
-         ↓
-    ResidualBlock3D
-         ↓
-    Dilated Conv3D
-         ↓
-    BatchNorm3D
-         ↓
-    ReLU
-         ↓
-    ResidualBlock3D
-         ↓
-    Dropout3D
     =====================================================
     """
 
     def __init__(
             self,
             channels=512,
-            dropout_probability=0.20
+            dropout_probability=0.20,
+            use_residual=True
     ):
 
         super().__init__()
 
+        self.use_residual = use_residual
+
+        # Feature extraction
         self.double_conv = DoubleConv3D(
             channels,
             channels
         )
 
-        self.residual1 = ResidualBlock3D(
-            channels
-        )
+        # Residual refinement
+        if self.use_residual:
 
+            self.residual1 = ResidualBlock3D(
+                channels
+            )
+
+            self.residual2 = ResidualBlock3D(
+                channels
+            )
+
+        # Dilated convolution
         self.dilated_conv = nn.Sequential(
 
             nn.Conv3d(
@@ -73,10 +68,7 @@ class Bottleneck3D(nn.Module):
 
         )
 
-        self.residual2 = ResidualBlock3D(
-            channels
-        )
-
+        # Regularization
         self.dropout = nn.Dropout3d(
             p=dropout_probability
         )
@@ -85,11 +77,13 @@ class Bottleneck3D(nn.Module):
 
         x = self.double_conv(x)
 
-        x = self.residual1(x)
+        if self.use_residual:
+            x = self.residual1(x)
 
         x = self.dilated_conv(x)
 
-        x = self.residual2(x)
+        if self.use_residual:
+            x = self.residual2(x)
 
         x = self.dropout(x)
 

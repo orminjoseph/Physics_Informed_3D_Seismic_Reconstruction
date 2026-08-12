@@ -1,24 +1,27 @@
 """
-=========================================================
 Experiment Manager
-=========================================================
 
-Persistent experiment workspace
+Dataset-specific experiment workspace
 
 Author: Ormin Joseph
-=========================================================
 """
 
 import os
+
+from utils.config import DATASET_MODE
 
 
 class ExperimentManager:
 
     def __init__(self):
 
+        # ------------------------------------------
+        # Dataset-specific root folder
+        # ------------------------------------------
+
         self.root = os.path.join(
             "outputs",
-            "current_experiment"
+            DATASET_MODE.lower()
         )
 
         self.checkpoints = os.path.join(
@@ -51,6 +54,11 @@ class ExperimentManager:
             "tensorboard"
         )
 
+        self.training_progress = os.path.join(
+            self.root,
+            "training_progress"
+        )
+
         self.global_checkpoints = self.checkpoints
 
         self.create()
@@ -71,7 +79,9 @@ class ExperimentManager:
 
             self.reconstructions,
 
-            self.tensorboard
+            self.tensorboard,
+
+            self.training_progress
 
         ]
 

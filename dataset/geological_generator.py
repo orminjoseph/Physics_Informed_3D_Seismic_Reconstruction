@@ -408,33 +408,39 @@ class GeologicalGenerator:
             fault1:
         ]
 
-        # Fault 2
-        fault2 = int(
-            self.width * 0.60
-        )
+        # Salt dome deformation
 
-        throw2 = 15
+        center_x = int(self.width * 0.50)
+        center_z = int(self.depth * 0.50)
 
-        cube[
-            throw2:,
-            :,
-            fault2:
-        ] = cube[
-            :-throw2,
-            :,
-            fault2:
-        ]
+        radius = 15
 
-        # Salt dome
-        center_x = int(
-            self.width * 0.50
-        )
+        for x in range(self.width):
 
-        center_z = int(
-            self.depth * 0.50
-        )
+            distance = abs(x - center_x)
 
-        radius = 10
+            if distance < radius:
+
+                uplift = int(
+                    12 * (
+                            1 - distance / radius
+                    )
+                )
+
+                if uplift > 0:
+                    column = cube[:, :, x].clone()
+
+                    cube[:, :, x] = 0
+
+                    cube[
+                        uplift:,
+                        :,
+                        x
+                    ] = column[
+                        :-uplift,
+                        :
+                    ]
+        # Salt body
 
         for z in range(self.depth):
 
@@ -450,5 +456,24 @@ class GeologicalGenerator:
                         :,
                         x
                     ] = 0.35
+        # Fault 2
+
+        fault2 = int(
+            self.width * 0.65
+        )
+
+        throw2 = 15
+
+        cube[
+            throw2:,
+            :,
+            fault2:
+        ] = cube[
+            :-throw2,
+            :,
+            fault2:
+        ]
+
+
 
         return cube.unsqueeze(0)

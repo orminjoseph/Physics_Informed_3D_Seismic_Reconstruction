@@ -22,23 +22,39 @@ class Encoder3D(nn.Module):
     3D Encoder
     """
 
-    def __init__(self, in_channels=1):
+    def __init__(
+            self,
+            in_channels=1,
+            use_residual=True
+    ):
 
         super().__init__()
 
         # Initial feature extraction
 
-        self.initial = nn.Sequential(
+        if use_residual:
 
-            DoubleConv3D(
-                in_channels,
-                32
-            ),
+            self.initial = nn.Sequential(
 
-            ResidualBlock3D(
-                32
+                DoubleConv3D(
+                    in_channels,
+                    32
+                ),
+
+                ResidualBlock3D(
+                    32
+                )
             )
-        )
+
+        else:
+
+            self.initial = nn.Sequential(
+
+                DoubleConv3D(
+                    in_channels,
+                    32
+                )
+            )
 
         # Encoder stages
 

@@ -150,12 +150,20 @@ class DownBlock3D(nn.Module):
          ↓
     DoubleConv3D
          ↓
-    ResidualBlock3D
+    ResidualBlock3D (optional)
     =====================================================
     """
 
-    def __init__(self, in_channels, out_channels):
+    def __init__(
+            self,
+            in_channels,
+            out_channels,
+            use_residual=True
+    ):
+
         super().__init__()
+
+        self.use_residual = use_residual
 
         self.pool = nn.MaxPool3d(
             kernel_size=2,
@@ -167,9 +175,11 @@ class DownBlock3D(nn.Module):
             out_channels
         )
 
-        self.residual = ResidualBlock3D(
-            out_channels
-        )
+        if self.use_residual:
+
+            self.residual = ResidualBlock3D(
+                out_channels
+            )
 
     def forward(self, x):
 
@@ -177,42 +187,32 @@ class DownBlock3D(nn.Module):
 
         x = self.conv(x)
 
-        x = self.residual(x)
+        if self.use_residual:
+
+            x = self.residual(x)
 
         return x
-
-
-
 
 class UpBlock3D(nn.Module):
     """
     =========================================================
     Attention-guided Up-sampling Block
     =========================================================
-
-    Decoder Feature
-            │
-    Transposed Convolution
-            │
-    Attention Gate
-            │
-    Concatenate
-            │
-    DoubleConv3D
-            │
-    ResidualBlock3D
-
-    =========================================================
     """
 
     def __init__(
-        self,
-        in_channels: int,
-        skip_channels: int,
-        out_channels: int
+            self,
+            in_channels,
+            skip_channels,
+            out_channels,
+            use_attention=True,
+            use_residual=True
     ):
 
         super().__init__()
+
+        self.use_attention = use_attention
+        self.use_residual = use_residual
 
         self.up = nn.ConvTranspose3d(
             in_channels,
@@ -221,33 +221,41 @@ class UpBlock3D(nn.Module):
             stride=2
         )
 
-        self.attention = AttentionGate3D(
-            encoder_channels=skip_channels,
-            decoder_channels=out_channels,
-            inter_channels=out_channels // 2
-        )
+        if self.use_attention:
+
+            self.attention = AttentionGate3D(
+                encoder_channels=skip_channels,
+                decoder_channels=out_channels,
+                inter_channels=out_channels // 2
+            )
 
         self.conv = DoubleConv3D(
             out_channels + skip_channels,
             out_channels
         )
 
-        self.residual = ResidualBlock3D(
-            out_channels
-        )
+        if self.use_residual:
+
+            self.residual = ResidualBlock3D(
+                out_channels
+            )
 
     def forward(
-        self,
-        decoder_feature: torch.Tensor,
-        encoder_feature: torch.Tensor
-    ) -> torch.Tensor:
+            self,
+            decoder_feature,
+            encoder_feature
+    ):
 
-        decoder_feature = self.up(decoder_feature)
-
-        encoder_feature = self.attention(
-            encoder_feature,
+        decoder_feature = self.up(
             decoder_feature
         )
+
+        if self.use_attention:
+
+            encoder_feature = self.attention(
+                encoder_feature,
+                decoder_feature
+            )
 
         x = torch.cat(
             [encoder_feature, decoder_feature],
@@ -256,6 +264,8 @@ class UpBlock3D(nn.Module):
 
         x = self.conv(x)
 
-        x = self.residual(x)
+        if self.use_residual:
+
+            x = self.residual(x)
 
         return x

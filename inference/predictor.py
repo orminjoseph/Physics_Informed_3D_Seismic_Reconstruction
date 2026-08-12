@@ -34,25 +34,31 @@ class Predictor:
 
         )
 
+        print(
+            "Checkpoint Type:",
+            type(checkpoint_data)
+        )
+
         self.model.load_state_dict(
 
-            checkpoint_data["model_state_dict"]
+            checkpoint_data["model_state_dict"],
+
+            strict=False
 
         )
 
         self.model.eval()
 
-    def predict(self, corrupted_cube):
+    def predict(
+            self,
+            corrupted_cube
+    ):
         """
         Perform inference on one corrupted seismic cube.
 
         Parameters
         ----------
         corrupted_cube : torch.Tensor
-            Shape:
-            (1, D, H, W)
-            or
-            (B, 1, D, H, W)
 
         Returns
         -------
@@ -63,13 +69,20 @@ class Predictor:
         self.model.eval()
 
         with torch.no_grad():
-            # If channel dimension is missing
+
             if corrupted_cube.dim() == 4:
-                corrupted_cube = corrupted_cube.unsqueeze(0)
 
-            corrupted_cube = corrupted_cube.to(self.device)
+                corrupted_cube = (
+                    corrupted_cube.unsqueeze(0)
+                )
 
-            reconstruction, log_variance = self.model(corrupted_cube)
+            corrupted_cube = (
+                corrupted_cube.to(self.device)
+            )
+
+            reconstruction, log_variance = (
+                self.model(corrupted_cube)
+            )
 
             print(
                 "LogVar Min:",
@@ -82,8 +95,11 @@ class Predictor:
             )
 
             log_variance = torch.clamp(
+
                 log_variance,
+
                 min=-10.0,
+
                 max=10.0
             )
 
@@ -91,5 +107,7 @@ class Predictor:
                 0.5 * log_variance
             )
 
-        return reconstruction.cpu(), uncertainty.cpu()
-
+        return (
+            reconstruction.cpu(),
+            uncertainty.cpu()
+        )

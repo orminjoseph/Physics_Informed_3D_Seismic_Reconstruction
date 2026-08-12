@@ -1,274 +1,98 @@
-import os
-import pandas as pd
+"""
+FINAL REPORT GENERATOR
+"""
 
-from reportlab.platypus import (
-    SimpleDocTemplate,
-    Paragraph,
-    Spacer,
-    Image,
-    PageBreak
+from evaluation.evaluate_model import evaluate
+
+from evaluation.reconstruction_gallery import (
+    generate_gallery
 )
 
-from reportlab.lib.styles import (
-    getSampleStyleSheet
+from evaluation.uncertainty_analysis import (
+    analyze_uncertainty
 )
 
-
-REPORT_DIR = "outputs/reports"
-
-PDF_FILE = os.path.join(
-    REPORT_DIR,
-    "final_evaluation_report.pdf"
+from evaluation.compare_with_baselines import (
+    main as compare_baselines
 )
 
-BASELINE_FILE = os.path.join(
-    REPORT_DIR,
-    "baseline_comparison.csv"
+from evaluation.statistical_significance import (
+    run_significance_test
 )
 
-UNCERTAINTY_FILE = os.path.join(
-    REPORT_DIR,
-    "uncertainty_evaluation.csv"
+from evaluation.final_thesis_tables import (
+    generate_thesis_tables
 )
 
-
-def main():
-
-    baseline_df = pd.read_csv(
-        BASELINE_FILE
-    )
-
-    uncertainty_df = pd.read_csv(
-        UNCERTAINTY_FILE
-    )
-
-    mean_uncertainty = (
-        uncertainty_df["Mean_Uncertainty"]
-        .mean()
-    )
-
-    max_uncertainty = (
-        uncertainty_df["Mean_Uncertainty"]
-        .max()
-    )
-
-    mean_mae = (
-        uncertainty_df["MAE"]
-        .mean()
-    )
-
-    mean_ssim = (
-        uncertainty_df["SSIM"]
-        .mean()
-    )
-
-    correlation = (
-        uncertainty_df[
-            "Mean_Uncertainty"
-        ].corr(
-            uncertainty_df["MAE"]
-        )
-    )
-
-    doc = SimpleDocTemplate(
-        PDF_FILE
-    )
-
-    styles = getSampleStyleSheet()
-
-    elements = []
-
-    elements.append(
-        Paragraph(
-            "Physics-Informed 3D Seismic Reconstruction Report",
-            styles["Title"]
-        )
-    )
-
-    elements.append(
-        Spacer(1, 12)
-    )
-
-    elements.append(
-        Paragraph(
-            "Dataset: F3 Netherlands",
-            styles["Heading2"]
-        )
-    )
-
-    elements.append(
-        Paragraph(
-            "Missing traces: 30%",
-            styles["BodyText"]
-        )
-    )
-
-    elements.append(
-        Spacer(1, 12)
-    )
-
-    elements.append(
-        Paragraph(
-            "Baseline Comparison",
-            styles["Heading2"]
-        )
-    )
-
-    for _, row in baseline_df.iterrows():
-
-        text = (
-            f"{row['Method']} | "
-            f"MAE={row['MAE']:.4f} | "
-            f"RMSE={row['RMSE']:.4f} | "
-            f"PSNR={row['PSNR']:.2f} | "
-            f"SNR={row['SNR']:.2f} | "
-            f"SSIM={row['SSIM']:.4f}"
-        )
-
-        elements.append(
-            Paragraph(
-                text,
-                styles["BodyText"]
-            )
-        )
-
-    elements.append(
-        Spacer(1, 12)
-    )
-
-    elements.append(
-        Paragraph(
-            "Uncertainty Evaluation",
-            styles["Heading2"]
-        )
-    )
-
-    elements.append(
-        Paragraph(
-            f"Mean Uncertainty: {mean_uncertainty:.6f}",
-            styles["BodyText"]
-        )
-    )
-
-    elements.append(
-        Paragraph(
-            f"Maximum Uncertainty: {max_uncertainty:.6f}",
-            styles["BodyText"]
-        )
-    )
-
-    elements.append(
-        Paragraph(
-            f"Mean MAE: {mean_mae:.6f}",
-            styles["BodyText"]
-        )
-    )
-
-    elements.append(
-        Paragraph(
-            f"Mean SSIM: {mean_ssim:.6f}",
-            styles["BodyText"]
-        )
-    )
-
-    elements.append(
-        Paragraph(
-            f"Correlation(Uncertainty, MAE): {correlation:.4f}",
-            styles["BodyText"]
-        )
-    )
-
-    def add_figure(
-        filename,
-        caption
-    ):
-
-        path = os.path.join(
-            REPORT_DIR,
-            filename
-        )
-
-        if os.path.exists(path):
-
-            elements.append(
-                PageBreak()
-            )
-
-            elements.append(
-                Paragraph(
-                    caption,
-                    styles["Heading2"]
-                )
-            )
-
-            elements.append(
-                Image(
-                    path,
-                    width=450,
-                    height=300
-                )
-            )
-
-    add_figure(
-        "best_patch.png",
-        "Best Reconstruction Patch"
-    )
-
-    add_figure(
-        "average_patch.png",
-        "Average Reconstruction Patch"
-    )
-
-    add_figure(
-        "worst_patch.png",
-        "Worst Reconstruction Patch"
-    )
-
-    add_figure(
-        "highest_uncertainty_patch.png",
-        "Highest Uncertainty Patch"
-    )
-
-    add_figure(
-        "uncertainty_vs_error.png",
-        "Uncertainty versus Error"
-    )
-
-    elements.append(
-        PageBreak()
-    )
-
-    elements.append(
-        Paragraph(
-            "Interpretation",
-            styles["Heading2"]
-        )
-    )
-
-    elements.append(
-        Paragraph(
-            (
-                "Predictive uncertainty is positively "
-                "correlated with reconstruction error. "
-                "Regions exhibiting large reconstruction "
-                "errors are generally associated with "
-                "higher uncertainty values, indicating "
-                "that the uncertainty framework is "
-                "successfully identifying unreliable "
-                "reconstruction zones."
-            ),
-            styles["BodyText"]
-        )
-    )
-
-    doc.build(
-        elements
-    )
+def generate_final_report():
 
     print()
-    print("Report generated:")
-    print(PDF_FILE)
+    print("=" * 70)
+    print("GENERATING FINAL REPORT")
+    print("=" * 70)
+
+    # --------------------------------------------------
+    # 1. Evaluation Metrics
+    # --------------------------------------------------
+
+    print()
+    print("STEP 1: EVALUATION METRICS")
+
+    evaluate()
+
+    # --------------------------------------------------
+    # 2. Reconstruction Gallery
+    # --------------------------------------------------
+
+    print()
+    print("STEP 2: RECONSTRUCTION GALLERY")
+
+    generate_gallery(
+        number_of_samples=5
+    )
+
+    # --------------------------------------------------
+    # 3. Uncertainty Analysis
+    # --------------------------------------------------
+
+    print()
+    print("STEP 3: UNCERTAINTY ANALYSIS")
+
+    analyze_uncertainty()
+
+    # --------------------------------------------------
+    # 4. Baseline Comparison
+    # --------------------------------------------------
+
+    print()
+    print("STEP 4: BASELINE COMPARISON")
+
+    compare_baselines()
+
+    # --------------------------------------------------
+    # 5. Statistical Significance
+    # --------------------------------------------------
+
+    print()
+    print("STEP 5: STATISTICAL SIGNIFICANCE")
+
+    run_significance_test()
+
+    # --------------------------------------------------
+    # 6. Thesis Tables
+    # --------------------------------------------------
+
+    print()
+    print("STEP 6: THESIS TABLES")
+
+    generate_thesis_tables()
+
+    print()
+    print("=" * 70)
+    print("FINAL REPORT COMPLETE")
+    print("=" * 70)
 
 
 if __name__ == "__main__":
-    main()
+
+    generate_final_report()
