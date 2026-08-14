@@ -16,6 +16,22 @@ class MaskGenerator:
 
         self.mask_type = mask_type
 
+    def generate_mask(self, shape):
+        """
+        Standard API used by all datasets.
+
+        Parameters
+        ----------
+        shape : tuple
+            (inline, crossline, samples)
+
+        Returns
+        -------
+        numpy.ndarray
+            Generated mask volume.
+        """
+        return self.generate(shape)
+
     def generate(
 
             self,

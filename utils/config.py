@@ -7,16 +7,18 @@
 # DATASET MODE
 # =====================================================
 
-DATASET_MODE = "synthetic"
+#DATASET_MODE = "synthetic"
 # DATASET_MODE = "f3"
+DATASET_MODE = "marmousi2"
 
 # =====================================================
 # EXPERIMENT NAME
 # =====================================================
 
-EXPERIMENT_NAME = (
-    "synthetic_pretraining"
-)
+#EXPERIMENT_NAME = ("synthetic_pretraining")
+
+EXPERIMENT_NAME = "marmousi2_training"
+#EXPERIMENT_NAME = "f3_training"
 
 # Examples:
 # "synthetic_pretraining"
@@ -65,13 +67,32 @@ F3_STRIDE = (
 
 F3_MISSING_PROBABILITY = 0.30
 
+# ==================================================
+# MARMOUSI2 DATASET
+# ==================================================
+
+MARMOUSI2_PATH = (
+    r"C:\Users\ormin\Desktop\SEG_FILES"
+    r"\elastic-marmousi-model"
+    r"\elastic-marmousi-model"
+    r"\model"
+    r"\MODEL_P-WAVE_VELOCITY_1.25m.segy"
+    r"\MODEL_P-WAVE_VELOCITY_1.25m.segy"
+)
+
+MARMOUSI2_PATCH_SIZE = (128, 128)
+
+MARMOUSI2_MISSING_PROBABILITY = 0.30
+
+MARMOUSI2_MASK_TYPE = "random_trace"
+
 # =====================================================
 # TRAINING
 # =====================================================
 
-BATCH_SIZE = 2
+BATCH_SIZE = 4
 
-NUM_EPOCHS = 10
+NUM_EPOCHS = 50
 
 LEARNING_RATE = 1e-4
 

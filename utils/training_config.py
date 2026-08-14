@@ -6,9 +6,9 @@ Training Configuration
 # Training
 # ======================================
 
-BATCH_SIZE = 2
+BATCH_SIZE = 4
 
-NUM_EPOCHS = 10
+NUM_EPOCHS = 50
 
 LEARNING_RATE = 1e-4
 
@@ -42,4 +42,12 @@ DEVICE = "cpu"
 # Experiment
 # ======================================
 
-EXPERIMENT_NAME = "synthetic_training"
+#EXPERIMENT_NAME = "synthetic_training"
+EXPERIMENT_NAME = "marmousi2_training"
+#EXPERIMENT_NAME = "f3_training"
+
+# Examples:
+# "synthetic_pretraining"
+# "f3_finetuning"
+# "ablation_study"
+# "uncertainty_analysis"

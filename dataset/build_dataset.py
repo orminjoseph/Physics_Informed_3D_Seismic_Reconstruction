@@ -17,7 +17,9 @@ from dataset.synthetic_dataset import (
 from dataset.f3_dataset import (
     F3Dataset
 )
-
+from dataset.marmousi2_patch_dataset import (
+    Marmousi2PatchDataset
+)
 
 def build_dataset():
 
@@ -69,6 +71,29 @@ def build_dataset():
 
             missing_probability=
             F3_MISSING_PROBABILITY
+        )
+
+        return dataset
+
+    # ----------------------------------
+    # Marmousi2 Dataset
+    # ----------------------------------
+
+    elif DATASET_MODE.lower() == "marmousi2":
+
+        dataset = Marmousi2PatchDataset(
+
+            segy_path=
+            MARMOUSI2_PATH,
+
+            patch_size=
+            MARMOUSI2_PATCH_SIZE,
+
+            missing_rate=
+            MARMOUSI2_MISSING_PROBABILITY,
+
+            mask_type=
+            MARMOUSI2_MASK_TYPE
         )
 
         return dataset

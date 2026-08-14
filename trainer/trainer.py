@@ -480,7 +480,7 @@ class Trainer:
         import os
 
         os.makedirs(
-            "outputs/training_progress",
+            self.experiment.training_progress,
             exist_ok=True
         )
 
@@ -541,8 +541,13 @@ class Trainer:
 
         plt.savefig(
 
-            f"outputs/training_progress/"
-            f"Epoch_{epoch:03d}.png"
+            os.path.join(
+
+                self.experiment.training_progress,
+
+                f"epoch_{epoch:03d}.png"
+
+            )
 
         )
 
@@ -845,7 +850,7 @@ class Trainer:
                 latest_checkpoint
             )
 
-        for epoch in range(start_epoch, epochs +1):
+        for epoch in range(start_epoch, epochs):
 
             train_losses = self.train_epoch(
 
