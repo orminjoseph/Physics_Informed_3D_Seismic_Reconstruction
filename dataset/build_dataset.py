@@ -56,11 +56,6 @@ from dataset.synthetic_dataset import (
     SyntheticSeismicDataset
 )
 
-from dataset.f3_dataset import (
-    F3Dataset
-)
-
-
 # =========================================================
 # DATASET BUILDER
 # =========================================================
@@ -113,6 +108,9 @@ def build_dataset():
     # =====================================================
 
     elif mode == "f3":
+        from dataset.f3_dataset import (
+            F3Dataset
+        )
 
         dataset = F3Dataset(
 
