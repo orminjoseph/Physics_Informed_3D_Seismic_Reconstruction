@@ -10,10 +10,6 @@ import time
 
 from train.train_model import main as train_model
 
-from evaluation.run_full_evaluation import (
-    run_full_evaluation
-)
-
 
 def run_project():
 
@@ -39,6 +35,10 @@ def run_project():
 
     print()
     print("STEP 2 : FULL EVALUATION")
+
+    from evaluation.run_full_evaluation import (
+        run_full_evaluation
+    )
 
     run_full_evaluation()
 
