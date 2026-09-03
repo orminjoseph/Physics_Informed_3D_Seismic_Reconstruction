@@ -10,10 +10,20 @@ from losses.total_loss import TotalLoss
 
 from trainer.trainer import Trainer
 
-from utils.training_config import (
+from utils.config import (
     BATCH_SIZE,
     NUM_EPOCHS,
     LEARNING_RATE
+)
+from utils.config import (
+    DEVICE,
+    BATCH_SIZE,
+    NUM_EPOCHS,
+    LEARNING_RATE,
+    WEIGHT_DECAY,
+    DX,
+    DY,
+    DZ
 )
 
 
@@ -50,7 +60,11 @@ def main():
         use_uncertainty=True
     )
 
-    criterion = TotalLoss()
+    criterion = TotalLoss(
+        dx=DX,
+        dy=DY,
+        dz=DZ
+    )
 
     optimizer = torch.optim.Adam(
         model.parameters(),

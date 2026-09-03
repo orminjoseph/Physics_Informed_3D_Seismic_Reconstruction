@@ -1,14 +1,56 @@
 """
+=========================================================
 Dataset Builder
+=========================================================
 
-Switch between:
-1. Synthetic dataset
-2. Full F3 dataset
+Physics-Informed 3D Encoder–Decoder Framework
+with Predictive Uncertainty for Seismic Data Reconstruction.
 
-using DATASET_MODE in config.py
+Supported dataset modes
+-----------------------
+
+1. synthetic
+2. f3
+Configuration
+-------------
+
+General configuration:
+    utils/config.py
+
+Training configuration:
+    utils/config.py
+
+Tensor convention:
+    [B, C, D, H, W]
+
+Author: Ormin Joseph
+=========================================================
 """
 
-from utils.config import *
+# =========================================================
+# GENERAL CONFIGURATION
+# =========================================================
+
+from utils.config import (
+    DATASET_MODE,
+
+    # Synthetic dataset
+    SYNTHETIC_NUM_SAMPLES,
+    SYNTHETIC_PATCH_SIZE,
+    SYNTHETIC_MISSING_PROBABILITY,
+
+    # F3 dataset
+    F3_PATH,
+    F3_PATCH_SIZE,
+    F3_STRIDE,
+    F3_MISSING_PROBABILITY,
+)
+
+
+
+# =========================================================
+# DATASET CLASSES
+# =========================================================
 
 from dataset.synthetic_dataset import (
     SyntheticSeismicDataset
@@ -17,11 +59,21 @@ from dataset.synthetic_dataset import (
 from dataset.f3_dataset import (
     F3Dataset
 )
-from dataset.marmousi2_patch_dataset import (
-    Marmousi2PatchDataset
-)
+
+
+# =========================================================
+# DATASET BUILDER
+# =========================================================
 
 def build_dataset():
+    """
+    Construct the dataset selected by DATASET_MODE.
+
+    Returns
+    -------
+    Dataset
+        Selected seismic dataset.
+    """
 
     print()
     print("=" * 60)
@@ -32,11 +84,14 @@ def build_dataset():
         f"Dataset Mode: {DATASET_MODE}"
     )
 
-    # ----------------------------------
-    # Synthetic Dataset
-    # ----------------------------------
+    mode = DATASET_MODE.lower()
 
-    if DATASET_MODE.lower() == "synthetic":
+
+    # =====================================================
+    # 1. SYNTHETIC DATASET
+    # =====================================================
+
+    if mode == "synthetic":
 
         dataset = SyntheticSeismicDataset(
 
@@ -52,11 +107,12 @@ def build_dataset():
 
         return dataset
 
-    # ----------------------------------
-    # F3 Dataset
-    # ----------------------------------
 
-    elif DATASET_MODE.lower() == "f3":
+    # =====================================================
+    # 2. F3 DATASET
+    # =====================================================
+
+    elif mode == "f3":
 
         dataset = F3Dataset(
 
@@ -75,31 +131,14 @@ def build_dataset():
 
         return dataset
 
-    # ----------------------------------
-    # Marmousi2 Dataset
-    # ----------------------------------
-
-    elif DATASET_MODE.lower() == "marmousi2":
-
-        dataset = Marmousi2PatchDataset(
-
-            segy_path=
-            MARMOUSI2_PATH,
-
-            patch_size=
-            MARMOUSI2_PATCH_SIZE,
-
-            missing_rate=
-            MARMOUSI2_MISSING_PROBABILITY,
-
-            mask_type=
-            MARMOUSI2_MASK_TYPE
-        )
-
-        return dataset
+    # =====================================================
+    # UNKNOWN DATASET MODE
+    # =====================================================
 
     else:
 
         raise ValueError(
-            f"Unknown DATASET_MODE: {DATASET_MODE}"
+            f"Unknown DATASET_MODE: {DATASET_MODE}. "
+            f"Expected one of: "
+            f"synthetic, f3."
         )

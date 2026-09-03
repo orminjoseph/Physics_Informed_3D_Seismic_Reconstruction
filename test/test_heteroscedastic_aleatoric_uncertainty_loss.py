@@ -6,7 +6,7 @@ Test Predictive Uncertainty Loss
 
 import torch
 
-from losses.uncertainty_loss import UncertaintyLoss
+from losses.Heteroscedastic_Aleatoric_uncertainty_loss import UncertaintyLoss
 
 
 def test_uncertainty_loss():

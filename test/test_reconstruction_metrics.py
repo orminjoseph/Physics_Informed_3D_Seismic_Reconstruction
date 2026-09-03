@@ -10,39 +10,115 @@ from metrics.reconstruction_metrics import (
 )
 
 
-def main():
+def create_test_volumes():
 
-    # ---------------------------------------
-    # Create simple synthetic tensors
-    # ---------------------------------------
+    target = torch.rand(
+        1,
+        1,
+        64,
+        64,
+        64
+    )
 
-    target = torch.rand(1, 1, 64, 64, 64)
+    prediction = (
+        target
+        + 0.05 * torch.randn_like(target)
+    )
 
-    prediction = target + 0.05 * torch.randn_like(target)
+    return prediction, target
+
+
+def test_reconstruction_metrics():
+
+    prediction, target = create_test_volumes()
 
     print()
     print("=" * 60)
-    print("Testing Reconstruction Metrics")
+    print("TEST - RECONSTRUCTION METRICS")
     print("=" * 60)
 
+    mae_value = mae(
+        prediction,
+        target
+    )
+
+    mse_value = mse(
+        prediction,
+        target
+    )
+
+    rmse_value = rmse(
+        prediction,
+        target
+    )
+
+    psnr_value = psnr(
+        prediction,
+        target
+    )
+
+    snr_value = snr(
+        prediction,
+        target
+    )
+
+    ssim_value = ssim(
+        prediction,
+        target
+    )
+
     print()
+    print(f"MAE  : {mae_value.item():.6f}")
+    print(f"MSE  : {mse_value.item():.6f}")
+    print(f"RMSE : {rmse_value.item():.6f}")
+    print(f"PSNR : {psnr_value.item():.3f} dB")
+    print(f"SNR  : {snr_value.item():.3f} dB")
+    print(f"SSIM : {ssim_value.item():.6f}")
 
-    print(f"MAE  : {mae(prediction, target).item():.6f}")
+    # ---------------------------------------------------
+    # Basic validity checks
+    # ---------------------------------------------------
 
-    print(f"MSE  : {mse(prediction, target).item():.6f}")
+    assert torch.isfinite(
+        mae_value
+    )
 
-    print(f"RMSE : {rmse(prediction, target).item():.6f}")
+    assert torch.isfinite(
+        mse_value
+    )
 
-    print(f"PSNR : {psnr(prediction, target).item():.3f} dB")
+    assert torch.isfinite(
+        rmse_value
+    )
 
-    print(f"SNR  : {snr(prediction, target).item():.3f} dB")
+    assert torch.isfinite(
+        psnr_value
+    )
 
-    print(f"SSIM : {ssim(prediction, target).item():.6f}")
+    assert torch.isfinite(
+        snr_value
+    )
+
+    assert torch.isfinite(
+        ssim_value
+    )
+
+    # ---------------------------------------------------
+    # Mathematical consistency
+    # ---------------------------------------------------
+
+    assert mae_value >= 0
+
+    assert mse_value >= 0
+
+    assert rmse_value >= 0
+
+    # RMSE must equal sqrt(MSE)
+    assert torch.allclose(
+        rmse_value,
+        torch.sqrt(mse_value),
+        atol=1e-6
+    )
 
     print()
-
     print("Reconstruction Metrics Test: PASSED")
-
-
-if __name__ == "__main__":
-    main()

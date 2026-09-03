@@ -3,7 +3,8 @@
 Test Factory
 =========================================================
 
-Creates reusable objects for testing.
+Creates reusable objects for testing the
+Physics-Informed 3D Encoder-Decoder Framework.
 
 Author: Ormin Joseph
 =========================================================
@@ -12,20 +13,28 @@ Author: Ormin Joseph
 import torch
 from torch.utils.data import DataLoader
 
-from models.network import PhysicsInformed3DUNet
+from models.network import Network3D
 from dataset.synthetic_dataset import SyntheticSeismicDataset
 from losses.total_loss import TotalLoss
 from trainer.trainer import Trainer
 from utils.config import DEVICE
 
 
+# =========================================================
+# MODEL
+# =========================================================
+
 def create_model():
     """
-    Create a Physics-Informed 3D U-Net.
+    Create the Physics-Informed 3D Encoder-Decoder model.
     """
 
-    return PhysicsInformed3DUNet()
+    return Network3D()
 
+
+# =========================================================
+# OPTIMIZER
+# =========================================================
 
 def create_optimizer(model):
     """
@@ -38,32 +47,63 @@ def create_optimizer(model):
     )
 
 
+# =========================================================
+# LOSS
+# =========================================================
+
 def create_loss():
     """
     Create the hybrid loss function.
+
+    The synthetic test dataset uses unit spatial
+    sampling intervals for the physics-loss test.
     """
 
-    return TotalLoss()
+    dx = 1.0   # Inline spacing [m]
+    dy = 1.0   # Crossline spacing [m]
+    dz = 1.0   # Depth spacing [m]
 
+    return TotalLoss(
+        dx=dx,
+        dy=dy,
+        dz=dz
+    )
+
+# =========================================================
+# TRAINER
+# =========================================================
 
 def create_trainer():
     """
-    Create a complete trainer.
+    Create a complete Trainer object.
+
+    Trainer expects:
+
+        model
+        criterion
+        optimizer
+        device
     """
 
     model = create_model()
 
-    optimizer = create_optimizer(model)
+    optimizer = create_optimizer(
+        model
+    )
 
     loss_function = create_loss()
 
     return Trainer(
-        model,
-        optimizer,
-        loss_function,
-        DEVICE
+        model=model,
+        criterion=loss_function,
+        optimizer=optimizer,
+        device=DEVICE
     )
 
+
+# =========================================================
+# DATASET
+# =========================================================
 
 def create_dataset(
     num_samples=8,
@@ -71,7 +111,7 @@ def create_dataset(
     missing_probability=0.30
 ):
     """
-    Create a synthetic dataset.
+    Create a synthetic seismic dataset.
     """
 
     return SyntheticSeismicDataset(
@@ -81,13 +121,25 @@ def create_dataset(
     )
 
 
+# =========================================================
+# DATALOADERS
+# =========================================================
+
 def create_dataloader(
-        batch_size=2,
-        train_samples=8,
-        validation_samples=4
+    batch_size=2,
+    train_samples=8,
+    validation_samples=4
 ):
     """
     Create training and validation DataLoaders.
+
+    Returns
+    -------
+    train_loader
+        Training DataLoader.
+
+    validation_loader
+        Validation DataLoader.
     """
 
     train_dataset = create_dataset(
@@ -110,6 +162,7 @@ def create_dataloader(
         shuffle=False
     )
 
-    return train_loader, validation_loader
-
-
+    return (
+        train_loader,
+        validation_loader
+    )

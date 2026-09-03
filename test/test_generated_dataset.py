@@ -1,48 +1,87 @@
-"""
-=========================================================
-Test Seismic Dataset
-=========================================================
+import os
 
-Verifies that the PyTorch SeismicDataset correctly
-
-• Loads the generated dataset
-• Returns the correct number of samples
-• Loads one sample
-• Converts arrays to tensors
-
-=========================================================
-"""
-
+from dataset.dataset_generator import DatasetGenerator
 from dataset.generated_dataset import SeismicDataset
 
 
-def main():
+def test_generated_dataset(tmp_path):
 
-    dataset = SeismicDataset()
+    # ------------------------------------------
+    # Generate a small synthetic dataset
+    # ------------------------------------------
 
-    print()
+    dataset_directory = tmp_path / "datasets"
 
-    print("Number of Samples :", len(dataset))
+    generator = DatasetGenerator(
+        output_directory=str(dataset_directory),
+        number_of_samples=5,
+        cube_size=(64, 64, 64),
+        random_seed=42
+    )
 
-    print()
+    generator.generate_dataset()
 
-    ground_truth, corrupted, mask = dataset[0]
+    # ------------------------------------------
+    # Load generated dataset
+    # ------------------------------------------
 
-    print("Ground Truth Shape :", ground_truth.shape)
+    dataset = SeismicDataset(
+        dataset_directory=str(dataset_directory)
+    )
 
-    print("Corrupted Shape    :", corrupted.shape)
+    # ------------------------------------------
+    # Basic dataset validation
+    # ------------------------------------------
 
-    print("Mask Shape         :", mask.shape)
+    assert len(dataset) == 5
 
-    print()
+    # ------------------------------------------
+    # Load first sample
+    # ------------------------------------------
 
-    print("Ground Truth Type :", ground_truth.dtype)
+    sample = dataset[0]
 
-    print("Corrupted Type    :", corrupted.dtype)
+    # ------------------------------------------
+    # Validate dictionary structure
+    # ------------------------------------------
 
-    print("Mask Type         :", mask.dtype)
+    assert "ground_truth" in sample
+    assert "corrupted" in sample
+    assert "mask" in sample
 
+    # ------------------------------------------
+    # Validate tensor types
+    # ------------------------------------------
 
-if __name__ == "__main__":
+    assert sample["ground_truth"].dtype.is_floating_point
+    assert sample["corrupted"].dtype.is_floating_point
+    assert sample["mask"].dtype.is_floating_point
 
-    main()
+    # ------------------------------------------
+    # Validate shapes
+    # ------------------------------------------
+
+    expected_shape = (1, 64, 64, 64)
+
+    assert sample["ground_truth"].shape == expected_shape
+    assert sample["corrupted"].shape == expected_shape
+    assert sample["mask"].shape == expected_shape
+
+    # ------------------------------------------
+    # Validate finite values
+    # ------------------------------------------
+
+    assert sample["ground_truth"].isfinite().all()
+    assert sample["corrupted"].isfinite().all()
+    assert sample["mask"].isfinite().all()
+
+    # ------------------------------------------
+    # Validate mask
+    # ------------------------------------------
+
+    unique_mask_values = sample["mask"].unique()
+
+    assert all(
+        value.item() in (0.0, 1.0)
+        for value in unique_mask_values
+    )

@@ -1,71 +1,149 @@
 """
+=========================================================
 Experiment Manager
+=========================================================
 
-Dataset-specific experiment workspace
+Manages directories and output locations for experiments.
 
-Author: Ormin Joseph
+Default behavior:
+    outputs/<EXPERIMENT_NAME>/
+
+Optional behavior:
+    A custom root directory can be supplied for isolated
+    experiments such as ablation studies.
+
+=========================================================
 """
 
 import os
 
-from utils.config import DATASET_MODE
+from utils.config import (
+    OUTPUT_ROOT,
+    EXPERIMENT_NAME
+)
 
 
 class ExperimentManager:
+    """
+    Manage directories and output locations for one experiment.
+    """
 
-    def __init__(self):
+    def __init__(
+        self,
+        root=None
+    ):
+        """
+        Parameters
+        ----------
+        root : str or None
+            Optional custom experiment root.
 
-        # ------------------------------------------
-        # Dataset-specific root folder
-        # ------------------------------------------
+            If None:
+                outputs/<EXPERIMENT_NAME>/
 
-        self.root = os.path.join(
-            "outputs",
-            DATASET_MODE.lower()
-        )
+            If supplied:
+                the supplied directory is used directly.
+        """
+
+        # =================================================
+        # EXPERIMENT ROOT
+        # =================================================
+
+        if root is None:
+
+            self.root = os.path.join(
+                OUTPUT_ROOT,
+                EXPERIMENT_NAME
+            )
+
+        else:
+
+            self.root = root
+
+        # =================================================
+        # CHECKPOINTS
+        # =================================================
 
         self.checkpoints = os.path.join(
             self.root,
             "checkpoints"
         )
 
+        # =================================================
+        # LOGS
+        # =================================================
+
         self.logs = os.path.join(
             self.root,
             "logs"
         )
+
+        # =================================================
+        # REPORTS
+        # =================================================
 
         self.reports = os.path.join(
             self.root,
             "reports"
         )
 
+        # =================================================
+        # PLOTS
+        # =================================================
+
         self.plots = os.path.join(
             self.root,
             "plots"
         )
+
+        # =================================================
+        # RECONSTRUCTIONS
+        # =================================================
 
         self.reconstructions = os.path.join(
             self.root,
             "reconstructions"
         )
 
+        # =================================================
+        # TENSORBOARD
+        # =================================================
+
         self.tensorboard = os.path.join(
             self.root,
             "tensorboard"
         )
+
+        # =================================================
+        # TRAINING PROGRESS
+        # =================================================
 
         self.training_progress = os.path.join(
             self.root,
             "training_progress"
         )
 
-        self.global_checkpoints = self.checkpoints
+        # =================================================
+        # GLOBAL CHECKPOINT REFERENCE
+        # =================================================
+
+        self.global_checkpoints = (
+            self.checkpoints
+        )
+
+        # =================================================
+        # CREATE DIRECTORIES
+        # =================================================
 
         self.create()
 
+    # =====================================================
+    # CREATE DIRECTORIES
+    # =====================================================
+
     def create(self):
 
-        folders = [
+        directories = [
 
             self.root,
 
@@ -85,9 +163,9 @@ class ExperimentManager:
 
         ]
 
-        for folder in folders:
+        for directory in directories:
 
             os.makedirs(
-                folder,
+                directory,
                 exist_ok=True
             )
