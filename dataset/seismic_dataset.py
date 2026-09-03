@@ -39,7 +39,7 @@ from torch.utils.data import Dataset
 
 from dataset.segy_loader import SegyLoader
 from dataset.patch_extractor import PatchExtractor
-from dataset.mask_generator import MaskGenerator
+from dataset.mask_generator import SeismicMaskGenerator
 from dataset.geological_generator import GeologicalGenerator
 from dataset.velocity_generator import VelocityGenerator
 
@@ -355,11 +355,11 @@ class SeismicDataset(Dataset):
         # MASK GENERATOR
         # =================================================
 
-        self.mask_generator = MaskGenerator(
+        self.mask_generator = SeismicMaskGenerator(
 
-            missing_probability=missing_probability,
+            cube_size=patch_size,
 
-            mask_type="random_trace"
+            missing_probability=missing_probability
 
         )
 
@@ -441,8 +441,8 @@ class SeismicDataset(Dataset):
         # Generate sampling mask
         # --------------------------------------------------
 
-        mask = self.mask_generator.generate_mask(
-            target_patch.shape
+        mask = self.mask_generator.generate(
+            mask_type="random"
         )
 
         # --------------------------------------------------

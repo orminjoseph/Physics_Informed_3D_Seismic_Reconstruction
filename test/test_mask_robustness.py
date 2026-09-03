@@ -9,7 +9,7 @@ import csv
 import os
 import matplotlib.pyplot as plt
 from dataset.f3_dataset import F3Dataset
-from dataset.mask_generator import MaskGenerator
+from dataset.mask_generator import SeismicMaskGenerator
 
 from inference.predictor import Predictor
 from models.network import Network3D
@@ -93,7 +93,7 @@ def main():
 
     for mask_type in MASK_TYPES:
 
-        generator = MaskGenerator(
+        generator = SeismicMaskGenerator(
             mask_type=mask_type,
             missing_probability=0.30
         )

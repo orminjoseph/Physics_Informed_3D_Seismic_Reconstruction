@@ -17,7 +17,7 @@ import segyio
 from torch.utils.data import Dataset
 
 from dataset.patch_extractor import PatchExtractor
-from dataset.mask_generator import MaskGenerator
+from dataset.mask_generator import SeismicMaskGenerator
 
 
 class F3Dataset(Dataset):
@@ -47,10 +47,9 @@ class F3Dataset(Dataset):
             stride=stride
         )
 
-        self.mask_generator = (
-            MaskGenerator(
-                missing_probability
-            )
+        self.mask_generator = SeismicMaskGenerator(
+            cube_size=self.patch_size,
+            missing_probability=self.missing_probability
         )
 
         self.patches = (
@@ -240,7 +239,7 @@ class F3Dataset(Dataset):
 
         mask = torch.tensor(
             self.mask_generator.generate(
-                patch.shape
+                mask_type="random"
             ),
             dtype=torch.float32
         )
