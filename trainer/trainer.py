@@ -370,11 +370,30 @@ class Trainer:
                 "a tuple or list."
             )
 
-        if len(batch) != 4:
+        # =================================================
+        # DATASET BATCH STRUCTURE
+        # =================================================
 
+        # SyntheticSeismicDataset returns:
+        #
+        #     inputs,
+        #     targets,
+        #     mask,
+        #     velocity_model,
+        #     mask_type,
+        #     geological_mode
+        #
+        # The Trainer currently requires only the first
+        # four tensor components for loss computation.
+        #
+        # The metadata fields are deliberately retained by
+        # the dataset for later evaluation and stratified
+        # analysis.
+
+        if len(batch) < 4:
             raise ValueError(
                 f"Expected {batch_name} batch to contain "
-                "four tensors: "
+                "at least four elements: "
                 "(inputs, targets, mask, velocity_model)."
             )
 
@@ -383,7 +402,7 @@ class Trainer:
             targets,
             mask,
             velocity_model
-        ) = batch
+        ) = batch[:4]
 
         # -------------------------------------------------
         # Validate tensors
