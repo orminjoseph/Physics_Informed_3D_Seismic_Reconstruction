@@ -11,7 +11,7 @@ Figure layout:
     Ground Truth
     Reconstruction
     Absolute Error
-    Uncertainty
+    Aleatoric Uncertainty
 
 The gallery uses the CURRENT EXPERIMENT_NAME so that
 different experiments remain completely independent.
@@ -33,6 +33,7 @@ Example:
 
 import os
 
+import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
@@ -60,6 +61,26 @@ def generate_gallery(
     number_of_samples : int
         Maximum number of samples to visualize.
     """
+
+    # =====================================================
+    # VALIDATE NUMBER OF SAMPLES
+    # =====================================================
+
+    if not isinstance(number_of_samples, int):
+
+        raise TypeError(
+            "number_of_samples must be an integer."
+        )
+
+    if number_of_samples <= 0:
+
+        raise ValueError(
+            "number_of_samples must be greater than zero."
+        )
+
+    # =====================================================
+    # HEADER
+    # =====================================================
 
     print()
     print("=" * 60)
@@ -93,6 +114,7 @@ def generate_gallery(
 
     dataset = build_dataset()
 
+    print()
     print(
         "Dataset Length:",
         len(dataset)
@@ -108,7 +130,11 @@ def generate_gallery(
     # BUILD MODEL
     # =====================================================
 
-    model = Network3D()
+    model = Network3D(
+        use_attention=True,
+        use_residual=True,
+        use_uncertainty=True
+    )
 
     # =====================================================
     # CHECKPOINT
@@ -125,7 +151,7 @@ def generate_gallery(
         checkpoint
     )
 
-    if not os.path.exists(checkpoint):
+    if not os.path.isfile(checkpoint):
 
         raise FileNotFoundError(
             "\nBest model checkpoint not found:\n"
@@ -173,6 +199,12 @@ def generate_gallery(
         len(dataset)
     )
 
+    print()
+    print(
+        "Samples to generate:",
+        samples_to_generate
+    )
+
     # =====================================================
     # GENERATE FIGURES
     # =====================================================
@@ -181,6 +213,7 @@ def generate_gallery(
         samples_to_generate
     ):
 
+        print()
         print(
             f"Generating sample "
             f"{index + 1}/{samples_to_generate}"
@@ -195,7 +228,7 @@ def generate_gallery(
             target_cube,
             mask,
             velocity_model
-        ) = dataset[index]
+        ) = dataset[index][:4]
 
         # -------------------------------------------------
         # CURRENT PREDICTOR CONVENTION
@@ -204,41 +237,58 @@ def generate_gallery(
         #
         # reconstruction
         # travel_time
-        # uncertainty
+        # log_variance
+        # aleatoric_std
+        #
+        # Only reconstruction and aleatoric_std are
+        # required for this gallery.
         # -------------------------------------------------
 
         (
             reconstruction,
-            travel_time,
-            uncertainty
+            _,
+            _,
+            aleatoric_std
         ) = predictor.predict(
             input_cube
         )
 
         # -------------------------------------------------
-        # REMOVE BATCH / CHANNEL DIMENSIONS
+        # CONVERT TENSORS TO NUMPY ARRAYS
+        #
+        # detach() removes the computation graph.
+        # cpu() ensures compatibility with NumPy.
+        # squeeze() removes batch/channel dimensions.
         # -------------------------------------------------
 
         reconstruction = (
             reconstruction
+            .detach()
+            .cpu()
             .squeeze()
             .numpy()
         )
 
-        uncertainty = (
-            uncertainty
+        aleatoric_std = (
+            aleatoric_std
+            .detach()
+            .cpu()
             .squeeze()
             .numpy()
         )
 
         input_cube = (
             input_cube
+            .detach()
+            .cpu()
             .squeeze()
             .numpy()
         )
 
         target_cube = (
             target_cube
+            .detach()
+            .cpu()
             .squeeze()
             .numpy()
         )
@@ -247,7 +297,7 @@ def generate_gallery(
         # ABSOLUTE ERROR
         # -------------------------------------------------
 
-        error = abs(
+        error = np.abs(
             target_cube -
             reconstruction
         )
@@ -323,16 +373,16 @@ def generate_gallery(
         )
 
         # -------------------------------------------------
-        # UNCERTAINTY
+        # ALEATORIC UNCERTAINTY
         # -------------------------------------------------
 
         axes[4].imshow(
-            uncertainty[middle],
+            aleatoric_std[middle],
             cmap="hot"
         )
 
         axes[4].set_title(
-            "Uncertainty"
+            "Aleatoric Uncertainty"
         )
 
         # -------------------------------------------------
@@ -360,7 +410,7 @@ def generate_gallery(
             bbox_inches="tight"
         )
 
-        plt.close()
+        plt.close(fig)
 
         print(
             "Saved:",

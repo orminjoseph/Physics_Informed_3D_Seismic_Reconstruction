@@ -43,7 +43,7 @@ def main():
         missing_probability=0.30
     )
 
-    corrupted, target, mask, velocity = dataset[0]
+    corrupted, target, mask, velocity = dataset[0][:4]
 
     device = torch.device("cpu")
 

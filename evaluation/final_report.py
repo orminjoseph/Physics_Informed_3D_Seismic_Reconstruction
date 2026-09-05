@@ -4,25 +4,47 @@ FINAL REPORT GENERATOR
 =========================================================
 
 Physics-Informed 3D Encoder-Decoder Framework
+with Predictive Uncertainty for Seismic Data Reconstruction
 
-This script DOES NOT rerun training or evaluation.
+This script DOES NOT:
+    - rerun training
+    - rerun evaluation
+    - retrain ablation models
+    - recompute uncertainty
+    - recompute statistical tests
 
-It collects previously generated results from the
-CURRENT EXPERIMENT and compiles them into a final
-thesis-oriented report.
+It ONLY collects previously generated experimental outputs
+from the CURRENT EXPERIMENT and compiles them into a
+final thesis-oriented report.
 
 Expected experiment structure:
 
     outputs/
         <EXPERIMENT_NAME>/
             checkpoints/
+                best_model.pth
+                latest_checkpoint.pth
+                ...
+
             reports/
                 evaluation_metrics.csv
                 uncertainty_statistics.csv
                 baseline_comparison.csv
                 statistical_significance.csv
+
                 ablation_study.csv
-                thesis_tables/        # if generated
+                ablation_summary.csv
+
+                gallery/
+                    *.png
+
+                uncertainty/
+                    uncertainty_analysis.png
+
+                thesis_tables/
+                    *.csv
+
+                final_report.txt
 
 The active experiment is controlled by:
 
@@ -33,6 +55,8 @@ The active experiment is controlled by:
 """
 
 import os
+from datetime import datetime
+
 import pandas as pd
 
 from utils.config import (
@@ -42,7 +66,28 @@ from utils.config import (
 
 
 # =========================================================
+# REPORT FILE
+# =========================================================
+
+FINAL_REPORT_FILE = os.path.join(
+    REPORT_DIR,
+    "final_report.txt"
+)
+
+
+# =========================================================
 # REQUIRED RESULT FILES
+# =========================================================
+#
+# These files are required for the final analytical report.
+#
+# NOTE:
+# ablation_study.csv is retained because it contains the
+# per-sample ablation results required by the statistical
+# significance analysis.
+#
+# ablation_summary.csv is also required because it provides
+# the model-level summary for the thesis report.
 # =========================================================
 
 REQUIRED_FILES = {
@@ -59,41 +104,109 @@ REQUIRED_FILES = {
     "Statistical Significance":
         "statistical_significance.csv",
 
-    "Ablation Study":
-        "ablation_study.csv"
+    "Ablation Study (Per Sample)":
+        "ablation_study.csv",
+
+    "Ablation Summary":
+        "ablation_summary.csv"
 
 }
 
 
 # =========================================================
-# OPTIONAL RESULT FILES
+# OPTIONAL RESULT DIRECTORIES
 # =========================================================
 
-OPTIONAL_FILES = {
+OPTIONAL_DIRECTORIES = {
+
+    "Reconstruction Gallery":
+        "gallery",
+
+    "Uncertainty Figures":
+        "uncertainty",
 
     "Thesis Tables":
-        "thesis_tables.csv"
+        "thesis_tables"
 
 }
 
 
 # =========================================================
-# REPORT FILE
+# OPTIONAL CHECKPOINT
 # =========================================================
 
-FINAL_REPORT_FILE = os.path.join(
+BEST_CHECKPOINT_FILE = os.path.join(
     REPORT_DIR,
-    "final_report.txt"
+    "..",
+    "checkpoints",
+    "best_model.pth"
+)
+
+BEST_CHECKPOINT_FILE = os.path.normpath(
+    BEST_CHECKPOINT_FILE
 )
 
 
 # =========================================================
-# HELPER FUNCTION
+# HELPER FUNCTIONS
 # =========================================================
 
-def load_csv(
+def get_file_path(filename):
+    """
+    Construct the absolute/relative path of a report file.
+
+    Parameters
+    ----------
+    filename : str
+        Filename located inside REPORT_DIR.
+
+    Returns
+    -------
+    str
+        Full report path.
+    """
+
+    return os.path.join(
+        REPORT_DIR,
         filename
-):
+    )
+
+
+# ---------------------------------------------------------
+# Check whether a file exists and is non-empty
+# ---------------------------------------------------------
+
+def validate_file(filepath):
+    """
+    Check whether a file exists and contains data.
+
+    Parameters
+    ----------
+    filepath : str
+        File path.
+
+    Returns
+    -------
+    bool
+        True if the file exists and is non-empty.
+    """
+
+    if not os.path.exists(filepath):
+
+        return False
+
+    if os.path.getsize(filepath) == 0:
+
+        return False
+
+    return True
+
+
+# ---------------------------------------------------------
+# Load CSV safely
+# ---------------------------------------------------------
+
+def load_csv(filename):
     """
     Load a CSV file from the current experiment's
     report directory.
@@ -108,25 +221,38 @@ def load_csv(
     pandas.DataFrame or None
     """
 
-    filepath = os.path.join(
-        REPORT_DIR,
+    filepath = get_file_path(
         filename
     )
 
-    if not os.path.exists(filepath):
+    if not validate_file(filepath):
+
+        print(
+            f"[WARNING] Missing or empty file: {filepath}"
+        )
 
         return None
 
     try:
 
-        return pd.read_csv(
+        dataframe = pd.read_csv(
             filepath
         )
+
+        if dataframe.empty:
+
+            print(
+                f"[WARNING] CSV contains no rows: {filepath}"
+            )
+
+            return None
+
+        return dataframe
 
     except Exception as error:
 
         print(
-            f"[WARNING] Could not read {filepath}"
+            f"[WARNING] Could not read: {filepath}"
         )
 
         print(
@@ -136,9 +262,67 @@ def load_csv(
         return None
 
 
-# =========================================================
-# REPORT SECTION WRITER
-# =========================================================
+# ---------------------------------------------------------
+# Validate dataframe columns
+# ---------------------------------------------------------
+
+def validate_columns(
+        dataframe,
+        required_columns,
+        dataset_name
+):
+    """
+    Validate that required columns exist.
+
+    Parameters
+    ----------
+    dataframe : pandas.DataFrame
+        Dataframe to validate.
+
+    required_columns : list
+        Required column names.
+
+    dataset_name : str
+        Human-readable dataset name.
+
+    Returns
+    -------
+    bool
+        True if all required columns exist.
+    """
+
+    if dataframe is None:
+
+        return False
+
+    missing_columns = [
+
+        column
+        for column in required_columns
+        if column not in dataframe.columns
+
+    ]
+
+    if missing_columns:
+
+        print(
+            f"[WARNING] {dataset_name} is missing columns:"
+        )
+
+        for column in missing_columns:
+
+            print(
+                f"           - {column}"
+            )
+
+        return False
+
+    return True
+
+
+# ---------------------------------------------------------
+# Report section writer
+# ---------------------------------------------------------
 
 def write_section(
         file,
@@ -155,6 +339,83 @@ def write_section(
     file.write("\n")
     file.write("=" * 80)
     file.write("\n")
+
+
+# ---------------------------------------------------------
+# Write dataframe
+# ---------------------------------------------------------
+
+def write_dataframe(
+        file,
+        dataframe
+):
+    """
+    Write a dataframe into the text report.
+    """
+
+    if dataframe is None:
+
+        file.write(
+            "No valid data available.\n"
+        )
+
+        return
+
+    file.write(
+        dataframe.to_string(
+            index=False
+        )
+    )
+
+    file.write("\n")
+
+
+# ---------------------------------------------------------
+# Count PNG files
+# ---------------------------------------------------------
+
+def get_png_files(directory):
+    """
+    Return sorted PNG files from a directory.
+    """
+
+    if not os.path.isdir(directory):
+
+        return []
+
+    return sorted(
+
+        filename
+
+        for filename in os.listdir(directory)
+
+        if filename.lower().endswith(".png")
+
+    )
+
+
+# ---------------------------------------------------------
+# Count thesis tables
+# ---------------------------------------------------------
+
+def get_thesis_tables(directory):
+    """
+    Return sorted CSV files from the thesis_tables directory.
+    """
+
+    if not os.path.isdir(directory):
+
+        return []
+
+    return sorted(
+
+        filename
+
+        for filename in os.listdir(directory)
+
+        if filename.lower().endswith(".csv")
+
+    )
 
 
 # =========================================================
@@ -183,6 +444,11 @@ def generate_final_report():
         REPORT_DIR
     )
 
+    print(
+        "Report File:",
+        FINAL_REPORT_FILE
+    )
+
     # =====================================================
     # CREATE REPORT DIRECTORY
     # =====================================================
@@ -193,100 +459,339 @@ def generate_final_report():
     )
 
     # =====================================================
-    # CHECK REQUIRED FILES
+    # CHECK REQUIRED RESULT FILES
     # =====================================================
 
     print()
     print("=" * 70)
-    print("CHECKING EXISTING RESULTS")
+    print("CHECKING REQUIRED RESULTS")
     print("=" * 70)
 
     loaded_results = {}
 
     missing_files = []
 
+    invalid_files = []
+
     for name, filename in REQUIRED_FILES.items():
 
-        filepath = os.path.join(
-            REPORT_DIR,
+        filepath = get_file_path(
             filename
         )
 
-        if os.path.exists(filepath):
+        if not validate_file(filepath):
 
             print(
-                f"[FOUND]   {name:<30} {filepath}"
-            )
-
-            loaded_results[name] = load_csv(
-                filename
-            )
-
-        else:
-
-            print(
-                f"[MISSING] {name:<30} {filepath}"
+                f"[MISSING/EMPTY] {name:<30} {filepath}"
             )
 
             missing_files.append(
                 name
             )
 
-    # =====================================================
-    # CHECK OPTIONAL FILES
-    # =====================================================
+            continue
 
-    for name, filename in OPTIONAL_FILES.items():
-
-        filepath = os.path.join(
-            REPORT_DIR,
+        dataframe = load_csv(
             filename
         )
 
-        if os.path.exists(filepath):
+        if dataframe is None:
 
             print(
-                f"[FOUND]   {name:<30} {filepath}"
+                f"[INVALID]       {name:<30} {filepath}"
             )
 
-            loaded_results[name] = load_csv(
-                filename
+            invalid_files.append(
+                name
             )
 
-        else:
+            continue
 
-            print(
-                f"[OPTIONAL] {name:<28} not found"
-            )
+        print(
+            f"[FOUND]         {name:<30} "
+            f"{filepath} "
+            f"({len(dataframe)} rows)"
+        )
+
+        loaded_results[name] = dataframe
 
     # =====================================================
     # STOP IF REQUIRED RESULTS ARE MISSING
     # =====================================================
 
-    if missing_files:
+    if missing_files or invalid_files:
 
         print()
         print("=" * 70)
         print("FINAL REPORT NOT GENERATED")
         print("=" * 70)
 
-        print()
-        print(
-            "The following required result files are missing:"
-        )
+        if missing_files:
 
-        for name in missing_files:
-
+            print()
             print(
-                f"  - {name}"
+                "Missing or empty required files:"
             )
 
+            for name in missing_files:
+
+                print(
+                    f"  - {name}"
+                )
+
+        if invalid_files:
+
+            print()
+            print(
+                "Invalid required files:"
+            )
+
+            for name in invalid_files:
+
+                print(
+                    f"  - {name}"
+                )
+
         print()
         print(
-            "Run the corresponding evaluation step first."
+            "Run or repair the corresponding evaluation "
+            "pipeline before generating the final report."
         )
 
         return None
+
+    # =====================================================
+    # VALIDATE REQUIRED CSV STRUCTURES
+    # =====================================================
+
+    print()
+    print("=" * 70)
+    print("VALIDATING RESULT STRUCTURES")
+    print("=" * 70)
+
+    validation_failed = False
+
+    # -----------------------------------------------------
+    # Evaluation metrics
+    # -----------------------------------------------------
+
+    evaluation_required_columns = [
+
+        "MAE",
+        "RMSE",
+        "PSNR",
+        "SNR",
+        "SSIM"
+
+    ]
+
+    if not validate_columns(
+
+        loaded_results["Evaluation Metrics"],
+
+        evaluation_required_columns,
+
+        "Evaluation Metrics"
+
+    ):
+
+        validation_failed = True
+
+    # -----------------------------------------------------
+    # Baseline comparison
+    # -----------------------------------------------------
+
+    baseline_required_columns = [
+
+        "Model",
+        "MAE",
+        "RMSE",
+        "PSNR",
+        "SNR",
+        "SSIM"
+
+    ]
+
+    if not validate_columns(
+
+        loaded_results["Baseline Comparison"],
+
+        baseline_required_columns,
+
+        "Baseline Comparison"
+
+    ):
+
+        validation_failed = True
+
+    # -----------------------------------------------------
+    # Statistical significance
+    # -----------------------------------------------------
+
+    significance_required_columns = [
+
+        "Comparison",
+        "N_Pairs",
+        "Raw_P_Value",
+        "Holm_Adjusted_P_Value"
+
+    ]
+
+    if not validate_columns(
+
+        loaded_results["Statistical Significance"],
+
+        significance_required_columns,
+
+        "Statistical Significance"
+
+    ):
+
+        validation_failed = True
+
+    # -----------------------------------------------------
+    # Ablation per-sample data
+    # -----------------------------------------------------
+
+    ablation_required_columns = [
+
+        "Model",
+        "Sample_ID",
+        "MAE",
+        "RMSE",
+        "PSNR",
+        "SNR",
+        "SSIM"
+
+    ]
+
+    if not validate_columns(
+
+        loaded_results["Ablation Study (Per Sample)"],
+
+        ablation_required_columns,
+
+        "Ablation Study"
+
+    ):
+
+        validation_failed = True
+
+    # -----------------------------------------------------
+    # Ablation summary
+    # -----------------------------------------------------
+
+    ablation_summary_required_columns = [
+
+        "Model",
+        "MAE",
+        "RMSE",
+        "PSNR",
+        "SNR",
+        "SSIM"
+
+    ]
+
+    if not validate_columns(
+
+        loaded_results["Ablation Summary"],
+
+        ablation_summary_required_columns,
+
+        "Ablation Summary"
+
+    ):
+
+        validation_failed = True
+
+    # -----------------------------------------------------
+    # Uncertainty statistics
+    # -----------------------------------------------------
+
+    if loaded_results["Uncertainty Statistics"].empty:
+
+        print(
+            "[WARNING] Uncertainty Statistics is empty."
+        )
+
+        validation_failed = True
+
+    # =====================================================
+    # STOP IF STRUCTURAL VALIDATION FAILED
+    # =====================================================
+
+    if validation_failed:
+
+        print()
+        print("=" * 70)
+        print("FINAL REPORT NOT GENERATED")
+        print("=" * 70)
+
+        print(
+            "One or more result files failed structural validation."
+        )
+
+        return None
+
+    # =====================================================
+    # CHECK OPTIONAL OUTPUTS
+    # =====================================================
+
+    print()
+    print("=" * 70)
+    print("CHECKING OPTIONAL OUTPUTS")
+    print("=" * 70)
+
+    optional_status = {}
+
+    for name, directory_name in OPTIONAL_DIRECTORIES.items():
+
+        directory = os.path.join(
+            REPORT_DIR,
+            directory_name
+        )
+
+        exists = os.path.isdir(
+            directory
+        )
+
+        optional_status[name] = exists
+
+        if exists:
+
+            print(
+                f"[FOUND]   {name:<30} {directory}"
+            )
+
+        else:
+
+            print(
+                f"[OPTIONAL] {name:<29} not found"
+            )
+
+    # =====================================================
+    # CHECK BEST CHECKPOINT
+    # =====================================================
+
+    checkpoint_available = os.path.exists(
+        BEST_CHECKPOINT_FILE
+    )
+
+    print()
+
+    if checkpoint_available:
+
+        print(
+            "[FOUND]   Best model checkpoint:",
+            BEST_CHECKPOINT_FILE
+        )
+
+    else:
+
+        print(
+            "[WARNING] Best model checkpoint not found:",
+            BEST_CHECKPOINT_FILE
+        )
 
     # =====================================================
     # GENERATE REPORT
@@ -296,6 +801,10 @@ def generate_final_report():
     print("=" * 70)
     print("COMPILING FINAL REPORT")
     print("=" * 70)
+
+    generation_time = datetime.now().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
 
     with open(
         FINAL_REPORT_FILE,
@@ -312,12 +821,15 @@ def generate_final_report():
         )
 
         file.write(
-            "FINAL EXPERIMENT REPORT\n"
+            "WITH PREDICTIVE UNCERTAINTY FOR SEISMIC DATA "
+            "RECONSTRUCTION\n"
         )
 
         file.write(
-            "\n"
+            "FINAL EXPERIMENT REPORT\n"
         )
+
+        file.write("\n")
 
         file.write(
             f"Experiment: {EXPERIMENT_NAME}\n"
@@ -325,6 +837,22 @@ def generate_final_report():
 
         file.write(
             f"Report Directory: {REPORT_DIR}\n"
+        )
+
+        file.write(
+            f"Report Generated: {generation_time}\n"
+        )
+
+        file.write(
+            "\n"
+        )
+
+        file.write(
+            "IMPORTANT: This report generator only compiles "
+            "previously generated outputs. It does not "
+            "perform training, model inference, uncertainty "
+            "estimation, baseline evaluation, ablation "
+            "training, or statistical testing.\n"
         )
 
         # =================================================
@@ -341,17 +869,16 @@ def generate_final_report():
         ]
 
         file.write(
-            evaluation.to_string(
-                index=False
-            )
+            f"Rows: {len(evaluation)}\n\n"
         )
 
-        file.write(
-            "\n"
+        write_dataframe(
+            file,
+            evaluation
         )
 
         # =================================================
-        # 2. UNCERTAINTY ANALYSIS
+        # 2. PREDICTIVE UNCERTAINTY
         # =================================================
 
         write_section(
@@ -364,13 +891,12 @@ def generate_final_report():
         ]
 
         file.write(
-            uncertainty.to_string(
-                index=False
-            )
+            f"Rows: {len(uncertainty)}\n\n"
         )
 
-        file.write(
-            "\n"
+        write_dataframe(
+            file,
+            uncertainty
         )
 
         # =================================================
@@ -387,13 +913,12 @@ def generate_final_report():
         ]
 
         file.write(
-            baseline.to_string(
-                index=False
-            )
+            f"Rows: {len(baseline)}\n\n"
         )
 
-        file.write(
-            "\n"
+        write_dataframe(
+            file,
+            baseline
         )
 
         # =================================================
@@ -410,13 +935,12 @@ def generate_final_report():
         ]
 
         file.write(
-            significance.to_string(
-                index=False
-            )
+            f"Rows: {len(significance)}\n\n"
         )
 
-        file.write(
-            "\n"
+        write_dataframe(
+            file,
+            significance
         )
 
         # =================================================
@@ -429,42 +953,84 @@ def generate_final_report():
         )
 
         ablation = loaded_results[
-            "Ablation Study"
+            "Ablation Study (Per Sample)"
+        ]
+
+        ablation_summary = loaded_results[
+            "Ablation Summary"
         ]
 
         file.write(
-            ablation.to_string(
-                index=False
-            )
+            "Per-sample ablation results:\n\n"
+        )
+
+        file.write(
+            f"Rows: {len(ablation)}\n\n"
+        )
+
+        write_dataframe(
+            file,
+            ablation
         )
 
         file.write(
             "\n"
         )
 
+        file.write(
+            "Ablation model-level summary:\n\n"
+        )
+
+        file.write(
+            f"Rows: {len(ablation_summary)}\n\n"
+        )
+
+        write_dataframe(
+            file,
+            ablation_summary
+        )
+
         # =================================================
         # 6. THESIS TABLES
         # =================================================
 
-        if "Thesis Tables" in loaded_results:
+        write_section(
+            file,
+            "6. THESIS TABLES"
+        )
 
-            write_section(
-                file,
-                "6. THESIS TABLES"
-            )
+        thesis_directory = os.path.join(
+            REPORT_DIR,
+            "thesis_tables"
+        )
 
-            thesis_tables = loaded_results[
-                "Thesis Tables"
-            ]
+        thesis_tables = get_thesis_tables(
+            thesis_directory
+        )
+
+        if thesis_tables:
 
             file.write(
-                thesis_tables.to_string(
-                    index=False
+                f"Thesis table directory: "
+                f"{thesis_directory}\n"
+            )
+
+            file.write(
+                f"Number of thesis tables: "
+                f"{len(thesis_tables)}\n\n"
+            )
+
+            for filename in thesis_tables:
+
+                file.write(
+                    f"  - {filename}\n"
                 )
-            )
+
+        else:
 
             file.write(
-                "\n"
+                "Thesis table directory not found or "
+                "contains no CSV tables.\n"
             )
 
         # =================================================
@@ -476,34 +1042,25 @@ def generate_final_report():
             "7. RECONSTRUCTION GALLERY"
         )
 
-        gallery_dir = os.path.join(
+        gallery_directory = os.path.join(
             REPORT_DIR,
             "gallery"
         )
 
-        if os.path.exists(
-            gallery_dir
-        ):
+        gallery_files = get_png_files(
+            gallery_directory
+        )
 
-            gallery_files = sorted(
-
-                filename
-                for filename in os.listdir(
-                    gallery_dir
-                )
-
-                if filename.lower().endswith(
-                    ".png"
-                )
-            )
+        if gallery_files:
 
             file.write(
-                f"Gallery directory: {gallery_dir}\n"
+                f"Gallery directory: "
+                f"{gallery_directory}\n"
             )
 
             file.write(
                 f"Number of reconstruction figures: "
-                f"{len(gallery_files)}\n"
+                f"{len(gallery_files)}\n\n"
             )
 
             for filename in gallery_files:
@@ -515,11 +1072,12 @@ def generate_final_report():
         else:
 
             file.write(
-                "Reconstruction gallery not found.\n"
+                "Reconstruction gallery not found or "
+                "contains no PNG figures.\n"
             )
 
         # =================================================
-        # 8. UNCERTAINTY FIGURE
+        # 8. UNCERTAINTY FIGURES
         # =================================================
 
         write_section(
@@ -527,52 +1085,81 @@ def generate_final_report():
             "8. UNCERTAINTY FIGURES"
         )
 
-        uncertainty_histogram = os.path.join(
+        uncertainty_directory = os.path.join(
             REPORT_DIR,
-            "uncertainty_histogram.png"
+            "uncertainty"
         )
 
-        if os.path.exists(
-            uncertainty_histogram
-        ):
+        uncertainty_figures = get_png_files(
+            uncertainty_directory
+        )
+
+        if uncertainty_figures:
 
             file.write(
-                "Uncertainty histogram:\n"
+                f"Uncertainty figure directory: "
+                f"{uncertainty_directory}\n"
             )
 
             file.write(
-                f"  {uncertainty_histogram}\n"
+                f"Number of uncertainty figures: "
+                f"{len(uncertainty_figures)}\n\n"
+            )
+
+            for filename in uncertainty_figures:
+
+                file.write(
+                    f"  - {filename}\n"
+                )
+
+        else:
+
+            file.write(
+                "Uncertainty figure directory not found "
+                "or contains no PNG figures.\n"
+            )
+
+        # =================================================
+        # 9. CHECKPOINT
+        # =================================================
+
+        write_section(
+            file,
+            "9. MODEL CHECKPOINT"
+        )
+
+        if checkpoint_available:
+
+            file.write(
+                "Best model checkpoint: AVAILABLE\n"
+            )
+
+            file.write(
+                f"Checkpoint path: "
+                f"{BEST_CHECKPOINT_FILE}\n"
             )
 
         else:
 
             file.write(
-                "Uncertainty histogram not found.\n"
+                "Best model checkpoint: NOT FOUND\n"
             )
 
         # =================================================
-        # 9. REPORT STATUS
+        # 10. EXPERIMENT REPORT STATUS
         # =================================================
 
         write_section(
             file,
-            "9. EXPERIMENT REPORT STATUS"
+            "10. EXPERIMENT REPORT STATUS"
         )
 
         file.write(
-            "Training results: AVAILABLE\n"
+            "Evaluation metrics: AVAILABLE\n"
         )
 
         file.write(
-            "Model evaluation: AVAILABLE\n"
-        )
-
-        file.write(
-            "Reconstruction gallery: AVAILABLE\n"
-        )
-
-        file.write(
-            "Predictive uncertainty analysis: AVAILABLE\n"
+            "Predictive uncertainty statistics: AVAILABLE\n"
         )
 
         file.write(
@@ -584,22 +1171,135 @@ def generate_final_report():
         )
 
         file.write(
-            "Ablation study: AVAILABLE\n"
+            "Ablation per-sample results: AVAILABLE\n"
         )
 
         file.write(
-            "Thesis tables: AVAILABLE/OPTIONAL\n"
+            "Ablation summary: AVAILABLE\n"
         )
 
         file.write(
-            "\n"
+            "Best model checkpoint: "
+            f"{'AVAILABLE' if checkpoint_available else 'NOT FOUND'}\n"
         )
 
         file.write(
-            "This report compiles previously generated "
-            "experimental outputs. No training or model "
-            "evaluation was performed by the final report "
-            "generator.\n"
+            "Reconstruction gallery: "
+            f"{'AVAILABLE' if optional_status['Reconstruction Gallery'] else 'NOT FOUND'}\n"
+        )
+
+        file.write(
+            "Uncertainty figures: "
+            f"{'AVAILABLE' if optional_status['Uncertainty Figures'] else 'NOT FOUND'}\n"
+        )
+
+        file.write(
+            "Thesis tables: "
+            f"{'AVAILABLE' if optional_status['Thesis Tables'] else 'NOT FOUND'}\n"
+        )
+
+        # =================================================
+        # 11. DATASET / EXPERIMENT SUMMARY
+        # =================================================
+
+        write_section(
+            file,
+            "11. EXPERIMENT OUTPUT SUMMARY"
+        )
+
+        file.write(
+            f"Experiment Name: {EXPERIMENT_NAME}\n"
+        )
+
+        file.write(
+            f"Report Directory: {REPORT_DIR}\n"
+        )
+
+        file.write(
+            f"Evaluation rows: "
+            f"{len(evaluation)}\n"
+        )
+
+        file.write(
+            f"Uncertainty rows: "
+            f"{len(uncertainty)}\n"
+        )
+
+        file.write(
+            f"Baseline comparison rows: "
+            f"{len(baseline)}\n"
+        )
+
+        file.write(
+            f"Statistical significance rows: "
+            f"{len(significance)}\n"
+        )
+
+        file.write(
+            f"Ablation per-sample rows: "
+            f"{len(ablation)}\n"
+        )
+
+        file.write(
+            f"Ablation summary rows: "
+            f"{len(ablation_summary)}\n"
+        )
+
+        file.write(
+            f"Gallery figures: "
+            f"{len(gallery_files)}\n"
+        )
+
+        file.write(
+            f"Uncertainty figures: "
+            f"{len(uncertainty_figures)}\n"
+        )
+
+        file.write(
+            f"Thesis tables: "
+            f"{len(thesis_tables)}\n"
+        )
+
+        # =================================================
+        # FINAL NOTE
+        # =================================================
+
+        write_section(
+            file,
+            "12. REPORT GENERATION NOTE"
+        )
+
+        file.write(
+            "This report is a compilation of previously "
+            "generated experimental outputs.\n"
+        )
+
+        file.write(
+            "No training was performed by this script.\n"
+        )
+
+        file.write(
+            "No model inference was performed by this script.\n"
+        )
+
+        file.write(
+            "No uncertainty estimation was performed by "
+            "this script.\n"
+        )
+
+        file.write(
+            "No baseline evaluation was performed by "
+            "this script.\n"
+        )
+
+        file.write(
+            "No ablation experiment was performed by "
+            "this script.\n"
+        )
+
+        file.write(
+            "No statistical significance test was performed "
+            "by this script.\n"
         )
 
     # =====================================================
@@ -627,7 +1327,7 @@ def generate_final_report():
 
     print()
     print(
-        "Existing evaluation outputs were compiled."
+        "Existing experimental outputs were compiled."
     )
 
     print(

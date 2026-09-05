@@ -6,35 +6,72 @@
 Physics-Informed 3D Encoder-Decoder Framework
 with Predictive Uncertainty for Seismic Data Reconstruction.
 
-The final Network3D produces three outputs:
+Purpose
+-------
+This class provides deterministic inference for the final
+Physics-Informed 3D Encoder-Decoder network.
 
-    1. reconstructed_cube
+The network produces three outputs:
+
+    1. reconstruction
     2. travel_time
     3. log_variance
 
-The Predictor exposes:
+The predictor exposes:
 
     reconstruction
     travel_time
-    uncertainty
+    log_variance
+    aleatoric_std
 
-where:
+Important
+---------
+This predictor performs ONE deterministic forward pass.
 
-    uncertainty = exp(0.5 * log_variance)
+Therefore:
 
-Tensor convention:
+    aleatoric_std
+        = sqrt(aleatoric_variance)
+        = exp(0.5 * log_variance)
 
-    Input:
-        [B, C, D, H, W]
+It does NOT calculate epistemic uncertainty.
 
-    Reconstruction:
-        [B, C, D, H, W]
+Epistemic uncertainty requires multiple stochastic
+forward passes, which are handled by the MC Dropout
+component.
 
-    Travel time:
-        [B, C, D, H, W]
+Likewise, total predictive uncertainty is NOT calculated
+here. It is obtained from:
 
-    Uncertainty:
-        [B, C, D, H, W]
+    predictive_variance
+        = aleatoric_variance
+        + epistemic_variance
+
+Tensor convention
+-----------------
+Input:
+
+    [C, D, H, W]
+
+or:
+
+    [B, C, D, H, W]
+
+Reconstruction:
+
+    [B, C, D, H, W]
+
+Travel time:
+
+    [B, C, D, H, W]
+
+Log variance:
+
+    [B, C, D, H, W]
+
+Aleatoric standard deviation:
+
+    [B, C, D, H, W]
 
 =========================================================
 """
@@ -46,8 +83,12 @@ import torch
 
 class Predictor:
     """
-    Inference wrapper for the final Physics-Informed
-    3D Encoder-Decoder network.
+    Deterministic inference wrapper for the final
+    Physics-Informed 3D Encoder-Decoder network.
+
+    This class performs a single forward pass and exposes
+    the raw log-variance prediction together with its
+    corresponding aleatoric standard deviation.
     """
 
     # =====================================================
@@ -64,10 +105,10 @@ class Predictor:
         Parameters
         ----------
         model : torch.nn.Module
-            Network3D model.
+            Physics-Informed 3D Encoder-Decoder model.
 
         checkpoint : str
-            Path to trained checkpoint.
+            Path to the trained model checkpoint.
 
         device : torch.device
             CPU or CUDA device.
@@ -83,7 +124,7 @@ class Predictor:
         # Validate checkpoint path
         # -------------------------------------------------
 
-        if not os.path.exists(self.checkpoint):
+        if not os.path.isfile(self.checkpoint):
 
             raise FileNotFoundError(
                 "\nCheckpoint not found:\n"
@@ -91,7 +132,7 @@ class Predictor:
             )
 
         # -------------------------------------------------
-        # Move model to device
+        # Move model to selected device
         # -------------------------------------------------
 
         self.model = self.model.to(
@@ -105,7 +146,12 @@ class Predictor:
         self._load_checkpoint()
 
         # -------------------------------------------------
-        # Evaluation mode
+        # Use evaluation mode for deterministic inference.
+        #
+        # This keeps Dropout disabled.
+        #
+        # MC Dropout inference is handled separately by
+        # the MC Dropout component.
         # -------------------------------------------------
 
         self.model.eval()
@@ -116,17 +162,21 @@ class Predictor:
 
     def _load_checkpoint(self):
         """
-        Load the trained model parameters.
+        Load model parameters from the checkpoint.
 
-        Supports checkpoints stored either as:
+        Supported checkpoint formats:
 
-            state_dict
+            1. Direct state_dict
 
-        or as dictionaries containing:
+            2. Dictionary containing:
+                   model_state_dict
 
-            model_state_dict
-            state_dict
-            model
+            3. Dictionary containing:
+                   state_dict
+
+            4. Dictionary containing:
+                   model
+               where model is itself a state_dict.
         """
 
         checkpoint = torch.load(
@@ -135,66 +185,69 @@ class Predictor:
         )
 
         # -------------------------------------------------
-        # Case 1:
-        # checkpoint is already a state dictionary
+        # Validate checkpoint type
         # -------------------------------------------------
 
-        if isinstance(
+        if not isinstance(
             checkpoint,
             dict
         ):
 
-            if (
-                "model_state_dict"
-                in checkpoint
-            ):
-
-                state_dict = (
-                    checkpoint[
-                        "model_state_dict"
-                    ]
-                )
-
-            elif (
-                "state_dict"
-                in checkpoint
-            ):
-
-                state_dict = (
-                    checkpoint[
-                        "state_dict"
-                    ]
-                )
-
-            elif (
-                "model"
-                in checkpoint
-                and isinstance(
-                    checkpoint["model"],
-                    dict
-                )
-            ):
-
-                state_dict = (
-                    checkpoint["model"]
-                )
-
-            else:
-
-                # -------------------------------------------------
-                # Assume the dictionary itself is a state_dict.
-                # -------------------------------------------------
-
-                state_dict = checkpoint
-
-        else:
-
             raise TypeError(
-                "Unsupported checkpoint format."
+                "Unsupported checkpoint format. "
+                "Expected a dictionary containing a "
+                "model state_dict."
             )
 
         # -------------------------------------------------
-        # Load model parameters
+        # Extract model state dictionary.
+        # -------------------------------------------------
+
+        if (
+            "model_state_dict"
+            in checkpoint
+        ):
+
+            state_dict = (
+                checkpoint[
+                    "model_state_dict"
+                ]
+            )
+
+        elif (
+            "state_dict"
+            in checkpoint
+        ):
+
+            state_dict = (
+                checkpoint[
+                    "state_dict"
+                ]
+            )
+
+        elif (
+            "model"
+            in checkpoint
+            and isinstance(
+                checkpoint["model"],
+                dict
+            )
+        ):
+
+            state_dict = (
+                checkpoint["model"]
+            )
+
+        else:
+
+            # -------------------------------------------------
+            # Assume the checkpoint itself is a state_dict.
+            # -------------------------------------------------
+
+            state_dict = checkpoint
+
+        # -------------------------------------------------
+        # Load model parameters.
         # -------------------------------------------------
 
         self.model.load_state_dict(
@@ -210,13 +263,13 @@ class Predictor:
         corrupted_cube
     ):
         """
-        Perform inference on one corrupted seismic cube.
+        Perform one deterministic forward pass.
 
         Parameters
         ----------
         corrupted_cube : torch.Tensor
 
-            Shape:
+            Accepted shapes:
 
                 [C, D, H, W]
 
@@ -227,84 +280,128 @@ class Predictor:
         Returns
         -------
         reconstruction : torch.Tensor
-
             Reconstructed seismic volume.
 
         travel_time : torch.Tensor
-
             Predicted seismic travel-time field.
 
-        uncertainty : torch.Tensor
+        log_variance : torch.Tensor
+            Predicted logarithmic aleatoric variance:
 
-            Predictive uncertainty represented as
-            standard deviation:
+                log_variance = log(sigma_a^2)
 
-                sigma = exp(0.5 * log_variance)
+        aleatoric_std : torch.Tensor
+            Aleatoric standard deviation:
+
+                sigma_a = exp(0.5 * log_variance)
+
+        Notes
+        -----
+        This method does NOT estimate epistemic uncertainty.
+
+        It also does NOT calculate total predictive
+        uncertainty.
+
+        Epistemic uncertainty requires MC Dropout samples.
         """
 
         # =================================================
-        # EVALUATION MODE
+        # INPUT VALIDATION
         # =================================================
+
+        if not isinstance(
+            corrupted_cube,
+            torch.Tensor
+        ):
+
+            raise TypeError(
+                "corrupted_cube must be a "
+                "torch.Tensor."
+            )
+
+        # -------------------------------------------------
+        # Validate finite input values.
+        # -------------------------------------------------
+
+        if not torch.isfinite(
+            corrupted_cube
+        ).all():
+
+            raise ValueError(
+                "corrupted_cube contains "
+                "NaN or infinite values."
+            )
+
+        # =================================================
+        # PREPARE INPUT
+        # =================================================
+
+        # -------------------------------------------------
+        # Add batch dimension when input is:
+        #
+        #     [C,D,H,W]
+        #
+        # Network expects:
+        #
+        #     [B,C,D,H,W]
+        # -------------------------------------------------
+
+        if corrupted_cube.dim() == 4:
+
+            corrupted_cube = (
+                corrupted_cube.unsqueeze(0)
+            )
+
+        # -------------------------------------------------
+        # Validate final input dimension.
+        # -------------------------------------------------
+
+        if corrupted_cube.dim() != 5:
+
+            raise ValueError(
+                "Predictor expects input with shape "
+                "[C,D,H,W] or [B,C,D,H,W]. "
+                f"Received: "
+                f"{tuple(corrupted_cube.shape)}"
+            )
+
+        # -------------------------------------------------
+        # Move input to selected device.
+        # -------------------------------------------------
+
+        corrupted_cube = (
+            corrupted_cube.to(
+                self.device
+            )
+        )
+
+        # =================================================
+        # DETERMINISTIC FORWARD PASS
+        # =================================================
+
+        # -------------------------------------------------
+        # Ensure Dropout is disabled.
+        #
+        # MC Dropout must NOT be performed through this
+        # deterministic Predictor.
+        # -------------------------------------------------
 
         self.model.eval()
 
-        # =================================================
-        # DISABLE GRADIENT COMPUTATION
-        # =================================================
+        # -------------------------------------------------
+        # Disable gradient computation because this is
+        # inference rather than training.
+        # -------------------------------------------------
 
-        with torch.no_grad():
-
-            # -------------------------------------------------
-            # Add batch dimension if necessary.
-            #
-            # Dataset sample:
-            #
-            #     [C,D,H,W]
-            #
-            # Network expects:
-            #
-            #     [B,C,D,H,W]
-            # -------------------------------------------------
-
-            if corrupted_cube.dim() == 4:
-
-                corrupted_cube = (
-                    corrupted_cube.unsqueeze(0)
-                )
+        with torch.inference_mode():
 
             # -------------------------------------------------
-            # Validate input dimension.
-            # -------------------------------------------------
-
-            if corrupted_cube.dim() != 5:
-
-                raise ValueError(
-                    "Predictor expects input with shape "
-                    "[C,D,H,W] or [B,C,D,H,W]. "
-                    f"Received: "
-                    f"{tuple(corrupted_cube.shape)}"
-                )
-
-            # -------------------------------------------------
-            # Move input to selected device.
-            # -------------------------------------------------
-
-            corrupted_cube = (
-                corrupted_cube.to(
-                    self.device
-                )
-            )
-
-            # =================================================
-            # FINAL NETWORK INTERFACE
-            # =================================================
-            #
-            # Network3D returns:
+            # Final network interface:
             #
             #     reconstruction
             #     travel_time
             #     log_variance
-            # =================================================
+            # -------------------------------------------------
 
             (
                 reconstruction,
@@ -314,41 +411,149 @@ class Predictor:
                 corrupted_cube
             )
 
-            # =================================================
-            # UNCERTAINTY
-            # =================================================
+        # =================================================
+        # OUTPUT VALIDATION
+        # =================================================
 
-            # -------------------------------------------------
-            # Prevent numerical overflow/underflow.
-            # -------------------------------------------------
+        # -------------------------------------------------
+        # All three network outputs must be finite.
+        # -------------------------------------------------
 
-            log_variance = torch.clamp(
-                log_variance,
-                min=-10.0,
-                max=10.0
+        if not torch.isfinite(
+            reconstruction
+        ).all():
+
+            raise RuntimeError(
+                "Reconstruction contains "
+                "NaN or infinite values."
             )
 
-            # -------------------------------------------------
-            # Convert logarithmic variance to standard
-            # deviation:
-            #
-            #     sigma = exp(0.5 * log(sigma²))
-            #
-            # Therefore:
-            #
-            #     sigma = exp(0.5 * log_variance)
-            # -------------------------------------------------
+        if not torch.isfinite(
+            travel_time
+        ).all():
 
-            uncertainty = torch.exp(
-                0.5 * log_variance
+            raise RuntimeError(
+                "Travel-time prediction contains "
+                "NaN or infinite values."
             )
 
-        # =====================================================
+        if not torch.isfinite(
+            log_variance
+        ).all():
+
+            raise RuntimeError(
+                "Log-variance prediction contains "
+                "NaN or infinite values."
+            )
+
+        # -------------------------------------------------
+        # Validate output shapes.
+        # -------------------------------------------------
+
+        if reconstruction.shape != (
+            corrupted_cube.shape
+        ):
+
+            raise RuntimeError(
+                "Reconstruction shape does not match "
+                "input shape.\n"
+                f"Input: "
+                f"{tuple(corrupted_cube.shape)}\n"
+                f"Reconstruction: "
+                f"{tuple(reconstruction.shape)}"
+            )
+
+        if travel_time.shape != (
+            reconstruction.shape
+        ):
+
+            raise RuntimeError(
+                "Travel-time output shape does not "
+                "match reconstruction shape.\n"
+                f"Reconstruction: "
+                f"{tuple(reconstruction.shape)}\n"
+                f"Travel time: "
+                f"{tuple(travel_time.shape)}"
+            )
+
+        if log_variance.shape != (
+            reconstruction.shape
+        ):
+
+            raise RuntimeError(
+                "Log-variance output shape does not "
+                "match reconstruction shape.\n"
+                f"Reconstruction: "
+                f"{tuple(reconstruction.shape)}\n"
+                f"Log variance: "
+                f"{tuple(log_variance.shape)}"
+            )
+
+        # =================================================
+        # ALEATORIC UNCERTAINTY
+        # =================================================
+
+        # -------------------------------------------------
+        # The network predicts:
+        #
+        #     s = log(sigma_a^2)
+        #
+        # Therefore:
+        #
+        #     sigma_a^2 = exp(s)
+        #
+        # and:
+        #
+        #     sigma_a = exp(0.5s)
+        #
+        # Clamp s to prevent numerical overflow or
+        # underflow.
+        # -------------------------------------------------
+
+        log_variance = torch.clamp(
+            log_variance,
+            min=-10.0,
+            max=10.0
+        )
+
+        # -------------------------------------------------
+        # Convert log variance to aleatoric standard
+        # deviation.
+        # -------------------------------------------------
+
+        aleatoric_std = torch.exp(
+            0.5 * log_variance
+        )
+
+        # -------------------------------------------------
+        # Final numerical validation.
+        # -------------------------------------------------
+
+        if not torch.isfinite(
+            aleatoric_std
+        ).all():
+
+            raise RuntimeError(
+                "Aleatoric standard deviation "
+                "contains NaN or infinite values."
+            )
+
+        if (
+            aleatoric_std < 0
+        ).any():
+
+            raise RuntimeError(
+                "Aleatoric standard deviation "
+                "contains negative values."
+            )
+
+        # =================================================
         # RETURN RESULTS
-        # =====================================================
+        # =================================================
 
         return (
             reconstruction.cpu(),
             travel_time.cpu(),
-            uncertainty.cpu()
+            log_variance.cpu(),
+            aleatoric_std.cpu()
         )

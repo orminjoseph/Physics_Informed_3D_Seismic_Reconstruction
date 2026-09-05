@@ -20,15 +20,19 @@ dataset = F3Dataset(
     missing_probability=0.30
 )
 
-corrupted, target, mask, velocity = dataset[0]
+corrupted, target, mask, velocity = dataset[0][:4]
 
 predictor = Predictor(
     model=Network3D(),
-    checkpoint="checkpoints/best_model.pth",
+    checkpoint=(
+    r"outputs"
+    r"\synthetic_training"
+    r"\checkpoints"
+    r"\best_model.pth"),
     device="cpu"
 )
 
-reconstruction, uncertainty = predictor.predict(
+reconstruction, travel_time, uncertainty = predictor.predict(
     corrupted
 )
 

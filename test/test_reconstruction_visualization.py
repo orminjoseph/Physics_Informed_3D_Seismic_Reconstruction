@@ -22,7 +22,7 @@ dataset = F3Dataset(
     missing_probability=0.30
 )
 
-input_cube, target_cube, mask, velocity_model = dataset[0]
+input_cube, target_cube, mask, velocity_model = dataset[0][:4]
 
 model = Network3D()
 

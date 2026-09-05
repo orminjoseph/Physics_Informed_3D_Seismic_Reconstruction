@@ -25,20 +25,28 @@ Predictor output convention:
 
     reconstruction
     travel_time
-    uncertainty
+    log_variance
+    aleatoric_std
 
-All experiment outputs are controlled by:
-
-    EXPERIMENT_NAME
-
-Therefore:
+Checkpoint convention:
 
     outputs/
         <EXPERIMENT_NAME>/
             checkpoints/
-            reports/
-            figures/
-            ...
+                best_model.pth
+                latest_checkpoint.pth
+
+Evaluation uses:
+
+    best_model.pth
+
+Training resume uses:
+
+    latest_checkpoint.pth
+
+All experiment outputs are controlled by:
+
+    EXPERIMENT_NAME
 
 =========================================================
 """
@@ -113,7 +121,11 @@ def evaluate(model_override=None):
 
     if model_override is None:
 
-        model = Network3D()
+        model = Network3D(
+            use_attention=True,
+            use_residual=True,
+            use_uncertainty=True
+        )
 
     else:
 
@@ -129,6 +141,18 @@ def evaluate(model_override=None):
     # CHECKPOINT
     # =====================================================
 
+    # -----------------------------------------------------
+    # IMPORTANT:
+    #
+    # CHECKPOINT_DIR already contains:
+    #
+    # outputs/<EXPERIMENT_NAME>/checkpoints
+    #
+    # Therefore the evaluation checkpoint is:
+    #
+    # outputs/<EXPERIMENT_NAME>/checkpoints/best_model.pth
+    # -----------------------------------------------------
+
     checkpoint = os.path.join(
         CHECKPOINT_DIR,
         "best_model.pth"
@@ -140,7 +164,7 @@ def evaluate(model_override=None):
         checkpoint
     )
 
-    if not os.path.exists(checkpoint):
+    if not os.path.isfile(checkpoint):
 
         raise FileNotFoundError(
             "\nBest model checkpoint not found:\n"
@@ -191,32 +215,55 @@ def evaluate(model_override=None):
             target_cube,
             mask,
             velocity_model
-        ) = dataset[i]
+        ) = dataset[i][:4]
 
         # -------------------------------------------------
         # PREDICTION
         #
-        # Predictor.predict() returns:
+        # Current Predictor.predict() returns:
         #
-        # reconstruction
-        # travel_time
-        # uncertainty
+        #   reconstruction
+        #   travel_time
+        #   log_variance
+        #   aleatoric_std
+        #
+        # Only reconstruction is required for the
+        # reconstruction metrics calculated here.
         # -------------------------------------------------
 
         (
             reconstruction,
-            travel_time,
-            uncertainty
+            _,
+            _,
+            _
         ) = predictor.predict(
             input_cube
         )
 
         # -------------------------------------------------
         # TARGET BATCH DIMENSION
+        #
+        # Dataset target:
+        #
+        #     [C, D, H, W]
+        #
+        # Predictor reconstruction:
+        #
+        #     [B, C, D, H, W]
+        #
+        # Therefore add the batch dimension to target.
         # -------------------------------------------------
 
         target_batch = (
             target_cube.unsqueeze(0)
+        )
+
+        # -------------------------------------------------
+        # MOVE TARGET TO SAME DEVICE
+        # -------------------------------------------------
+
+        target_batch = target_batch.to(
+            reconstruction.device
         )
 
         # -------------------------------------------------

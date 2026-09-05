@@ -5,7 +5,7 @@ def test_dataset_sample():
 
     dataset = build_dataset()
 
-    input_cube, target_cube, mask, velocity_cube = dataset[0]
+    input_cube, target_cube, mask, velocity_cube = dataset[0][:4]
 
     print()
     print("=" * 60)

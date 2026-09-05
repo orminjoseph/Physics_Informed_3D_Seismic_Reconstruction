@@ -79,7 +79,7 @@ def main():
             missing_probability=missing_level
         )
 
-        corrupted, target, mask, velocity = dataset[0]
+        corrupted, target, mask, velocity = dataset[0][:4]
 
         reconstruction, uncertainty = predictor.predict(
             corrupted

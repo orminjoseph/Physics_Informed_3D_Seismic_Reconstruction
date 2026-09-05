@@ -22,28 +22,104 @@ to estimate total predictive uncertainty.
 Uncertainty decomposition
 -------------------------
 
+For each voxel:
+
     sigma_predictive^2
         =
     sigma_aleatoric^2
         +
     sigma_epistemic^2
 
+Aleatoric uncertainty
+---------------------
+
+The network predicts:
+
+    s = log(sigma_a^2)
+
+Therefore, for one stochastic forward pass:
+
+    sigma_a^2 = exp(s)
+
+When MC Dropout is used, each stochastic forward pass
+produces its own conditional aleatoric variance:
+
+    sigma_a^(2,n) = exp(s_n)
+
+The final aleatoric variance is the mean of these
+conditional variances:
+
+    sigma_a^2
+        =
+    (1/N) sum_n exp(s_n)
+
+IMPORTANT
+---------
+
+The following is NOT used:
+
+    exp(mean(s_n))
+
+because:
+
+    E[exp(s)] != exp(E[s])
+
+Epistemic uncertainty
+---------------------
+
+MC Dropout produces stochastic reconstruction predictions:
+
+    y_hat^(1), ..., y_hat^(N)
+
+The epistemic variance is:
+
+    sigma_e^2
+        =
+    (1/N) sum_n
+        (y_hat^(n) - y_hat_mean)^2
+
 where:
 
+    y_hat_mean
+        =
+    (1/N) sum_n y_hat^(n)
+
+Predictive uncertainty
+----------------------
+
+The total predictive variance is:
+
+    sigma_predictive^2
+        =
     sigma_aleatoric^2
-        = exp(log_variance)
+        +
+    sigma_epistemic^2
 
 and:
 
-    sigma_epistemic^2
-        = variance of MC Dropout predictions.
+    sigma_predictive
+        =
+    sqrt(sigma_predictive^2)
 
-The estimator operates voxel-wise on 3D seismic volumes.
+Tensor conventions
+------------------
 
-Tensor convention
------------------
+Single deterministic tensor:
 
     [B, C, D, H, W]
+
+MC Dropout tensor:
+
+    [N, B, C, D, H, W]
+
+where:
+
+    N = number of MC Dropout samples
+    B = batch size
+    C = seismic channels
+    D = depth
+    H = inline/crossline spatial dimension
+    W = inline/crossline spatial dimension
 
 Author:
 Ormin Joseph
@@ -56,34 +132,25 @@ import torch.nn as nn
 
 class PredictiveUncertaintyEstimator(nn.Module):
     """
-    Estimate total predictive uncertainty by combining
-    aleatoric and epistemic uncertainty.
+    Estimate aleatoric, epistemic, and total predictive
+    uncertainty for 3D seismic reconstruction.
 
-    Aleatoric uncertainty
-    --------------------
+    The estimator does NOT perform MC Dropout itself.
 
-    The network predicts:
+    MC Dropout sampling is handled by:
 
-        log(sigma^2)
+        models/mc_dropout.py
 
-    Therefore:
+    This class receives the resulting stochastic predictions
+    and calculates the uncertainty decomposition.
 
-        sigma^2 = exp(log(sigma^2))
+    Core decomposition:
 
-    Epistemic uncertainty
-    ---------------------
-
-    Epistemic variance is obtained from multiple stochastic
-    forward passes using MC Dropout.
-
-    Predictive uncertainty
-    ----------------------
-
-        sigma_predictive^2
+        predictive_variance
             =
-        sigma_aleatoric^2
+        aleatoric_variance
             +
-        sigma_epistemic^2
+        epistemic_variance
     """
 
     def __init__(
@@ -92,6 +159,19 @@ class PredictiveUncertaintyEstimator(nn.Module):
         max_log_variance=10.0,
         eps=1.0e-8
     ):
+        """
+        Parameters
+        ----------
+        min_log_variance : float
+            Lower numerical bound applied to log variance.
+
+        max_log_variance : float
+            Upper numerical bound applied to log variance.
+
+        eps : float
+            Small positive numerical stability constant.
+        """
+
         super().__init__()
 
         # =================================================
@@ -124,7 +204,7 @@ class PredictiveUncertaintyEstimator(nn.Module):
         self.eps = float(eps)
 
     # =====================================================
-    # INPUT VALIDATION
+    # SINGLE-TENSOR VALIDATION
     # =====================================================
 
     @staticmethod
@@ -133,7 +213,7 @@ class PredictiveUncertaintyEstimator(nn.Module):
         name
     ):
         """
-        Validate a 3D uncertainty tensor.
+        Validate a standard 3D seismic tensor.
 
         Required shape:
 
@@ -155,7 +235,56 @@ class PredictiveUncertaintyEstimator(nn.Module):
                 f"Received {tuple(tensor.shape)}."
             )
 
-        if not torch.isfinite(tensor).all():
+        if not torch.isfinite(
+            tensor
+        ).all():
+            raise ValueError(
+                f"{name} contains NaN or Inf values."
+            )
+
+    # =====================================================
+    # MC-TENSOR VALIDATION
+    # =====================================================
+
+    @staticmethod
+    def _validate_mc_tensor(
+        tensor,
+        name
+    ):
+        """
+        Validate an MC Dropout tensor.
+
+        Required shape:
+
+            [N, B, C, D, H, W]
+
+        where N is the number of stochastic MC samples.
+        """
+
+        if not isinstance(
+            tensor,
+            torch.Tensor
+        ):
+            raise TypeError(
+                f"{name} must be a torch.Tensor."
+            )
+
+        if tensor.ndim != 6:
+            raise ValueError(
+                f"{name} must have shape "
+                "[N,B,C,D,H,W]. "
+                f"Received {tuple(tensor.shape)}."
+            )
+
+        if tensor.shape[0] < 2:
+            raise ValueError(
+                f"{name} requires at least two MC "
+                "samples to estimate epistemic variance."
+            )
+
+        if not torch.isfinite(
+            tensor
+        ).all():
             raise ValueError(
                 f"{name} contains NaN or Inf values."
             )
@@ -169,55 +298,108 @@ class PredictiveUncertaintyEstimator(nn.Module):
         log_variance
     ):
         """
-        Convert predicted logarithmic variance into
-        aleatoric variance.
+        Convert logarithmic variance into aleatoric variance.
 
-        Given:
+        Supports either:
 
-            log_variance = log(sigma^2)
+            [B,C,D,H,W]
 
-        calculate:
+        or:
 
-            sigma_aleatoric^2
+            [N,B,C,D,H,W]
+
+        For a single tensor:
+
+            sigma_a^2 = exp(log_variance)
+
+        For MC samples:
+
+            sigma_a^2
                 =
-            exp(log_variance)
+            mean(exp(log_variance_n), dim=0)
 
-        Returns
-        -------
+        IMPORTANT:
 
-        aleatoric_variance : torch.Tensor
-
-            Shape:
-
-                [B,C,D,H,W]
+        The MC formulation averages the conditional variances,
+        NOT the logarithmic variances.
         """
 
-        self._validate_tensor(
-            log_variance,
-            "log_variance"
-        )
+        # =================================================
+        # SINGLE DETERMINISTIC LOG-VARIANCE
+        # =================================================
 
-        # -------------------------------------------------
-        # Prevent numerically extreme exponential values.
-        # -------------------------------------------------
+        if log_variance.ndim == 5:
 
-        bounded_log_variance = torch.clamp(
-            log_variance,
-            min=self.min_log_variance,
-            max=self.max_log_variance
-        )
+            self._validate_tensor(
+                log_variance,
+                "log_variance"
+            )
 
-        # -------------------------------------------------
-        # Convert log variance to variance.
-        # -------------------------------------------------
+            bounded_log_variance = torch.clamp(
+                log_variance,
+                min=self.min_log_variance,
+                max=self.max_log_variance
+            )
 
-        variance = torch.exp(
-            bounded_log_variance
-        )
+            variance = torch.exp(
+                bounded_log_variance
+            )
 
-        # -------------------------------------------------
-        # Ensure strictly positive variance.
-        # -------------------------------------------------
+        # =================================================
+        # MC LOG-VARIANCE SAMPLES
+        # =================================================
+
+        elif log_variance.ndim == 6:
+
+            self._validate_mc_tensor(
+                log_variance,
+                "log_variance"
+            )
+
+            bounded_log_variance = torch.clamp(
+                log_variance,
+                min=self.min_log_variance,
+                max=self.max_log_variance
+            )
+
+            # ---------------------------------------------
+            # Convert each stochastic log-variance sample
+            # into its corresponding conditional variance.
+            # ---------------------------------------------
+
+            conditional_variances = torch.exp(
+                bounded_log_variance
+            )
+
+            # ---------------------------------------------
+            # Average conditional variances across MC
+            # samples.
+            #
+            # This is:
+            #
+            # E[sigma_a^2 | model sample]
+            #
+            # rather than:
+            #
+            # exp(E[log sigma_a^2])
+            # ---------------------------------------------
+
+            variance = torch.mean(
+                conditional_variances,
+                dim=0
+            )
+
+        else:
+
+            raise ValueError(
+                "log_variance must have shape "
+                "[B,C,D,H,W] or [N,B,C,D,H,W]. "
+                f"Received {tuple(log_variance.shape)}."
+            )
+
+        # =================================================
+        # NUMERICAL STABILITY
+        # =================================================
 
         variance = torch.clamp(
             variance,
@@ -231,98 +413,56 @@ class PredictiveUncertaintyEstimator(nn.Module):
     # =====================================================
 
     def epistemic_variance(
-            self,
-            mc_predictions
+        self,
+        mc_predictions
     ):
         """
         Calculate epistemic variance from MC Dropout
-        predictions.
+        reconstruction predictions.
 
-        Expected input shape:
+        Expected input:
 
-            [N, B, C, D, H, W]
+            [N,B,C,D,H,W]
 
-        where:
+        The variance is calculated across the MC dimension.
 
-            N = number of stochastic MC samples.
+        Population variance is used:
 
-        The variance is calculated across the MC-sample
-        dimension.
+            unbiased=False
 
-        For this project, the MC predictions are treated
-        as the Monte-Carlo samples used to approximate the
-        predictive distribution. Therefore, population
-        variance (unbiased=False) is used.
+        because the MC predictions are treated as samples
+        from the approximate predictive distribution.
 
-        Returns
-        -------
+        IMPORTANT:
 
-        variance : torch.Tensor
+        This function must receive reconstruction predictions,
+        NOT log-variance predictions.
 
-            Shape:
-
-                [B,C,D,H,W]
+        Variance of log-variance is not part of the final
+        epistemic reconstruction uncertainty.
         """
 
         # =================================================
-        # VALIDATE INPUT TYPE
+        # VALIDATE MC PREDICTIONS
         # =================================================
 
-        if not isinstance(
-                mc_predictions,
-                torch.Tensor
-        ):
-            raise TypeError(
-                "mc_predictions must be a torch.Tensor."
-            )
+        self._validate_mc_tensor(
+            mc_predictions,
+            "mc_predictions"
+        )
 
         # =================================================
-        # VALIDATE INPUT DIMENSIONS
-        # =================================================
-
-        if mc_predictions.ndim != 6:
-            raise ValueError(
-                "mc_predictions must have shape "
-                "[N,B,C,D,H,W]. "
-                f"Received "
-                f"{tuple(mc_predictions.shape)}."
-            )
-
-        # =================================================
-        # VALIDATE NUMBER OF MC SAMPLES
-        # =================================================
-
-        if mc_predictions.shape[0] < 2:
-            raise ValueError(
-                "At least two MC predictions are required "
-                "to estimate epistemic variance."
-            )
-
-        # =================================================
-        # VALIDATE NUMERICAL VALUES
-        # =================================================
-
-        if not torch.isfinite(
-                mc_predictions
-        ).all():
-            raise ValueError(
-                "mc_predictions contains NaN or Inf values."
-            )
-
-        # =================================================
-        # MC-DROPOUT EPISTEMIC VARIANCE
+        # EPISTEMIC VARIANCE
         # =================================================
         #
-        # The first dimension contains the stochastic
-        # MC-Dropout predictions:
+        # Shape:
         #
-        #     [N,B,C,D,H,W]
+        # [N,B,C,D,H,W]
         #
-        # Variance is therefore calculated over dimension 0.
+        # ->
         #
-        # unbiased=False is used because these MC predictions
-        # constitute the Monte-Carlo sample set used to
-        # approximate the predictive distribution.
+        # [B,C,D,H,W]
+        #
         # =================================================
 
         variance = torch.var(
@@ -335,16 +475,18 @@ class PredictiveUncertaintyEstimator(nn.Module):
         # NUMERICAL STABILITY
         # =================================================
         #
-        # A zero epistemic variance is mathematically valid
-        # when all stochastic predictions are identical.
+        # Do not force zero epistemic uncertainty to become
+        # mathematically positive.
         #
-        # A small positive floor is retained to avoid numerical
-        # problems in subsequent uncertainty calculations.
+        # Zero variance is valid when all MC predictions
+        # are identical.
+        #
+        # Therefore the variance is clamped only at zero.
         # =================================================
 
         variance = torch.clamp(
             variance,
-            min=self.eps
+            min=0.0
         )
 
         return variance
@@ -361,30 +503,73 @@ class PredictiveUncertaintyEstimator(nn.Module):
         """
         Calculate total predictive variance.
 
-        Decomposition:
+        Parameters
+        ----------
 
-            sigma_predictive^2
+        log_variance:
+            Either:
+
+                [B,C,D,H,W]
+
+            or:
+
+                [N,B,C,D,H,W]
+
+            When MC log-variance samples are supplied,
+            aleatoric variance is averaged correctly across
+            MC samples.
+
+        mc_predictions:
+            MC Dropout reconstruction predictions:
+
+                [N,B,C,D,H,W]
+
+        Returns
+        -------
+
+        predictive_variance:
+            [B,C,D,H,W]
+
+        Formula:
+
+            predictive variance
                 =
-            sigma_aleatoric^2
+            aleatoric variance
                 +
-            sigma_epistemic^2
+            epistemic variance
         """
+
+        # =================================================
+        # CALCULATE ALEATORIC VARIANCE
+        # =================================================
 
         aleatoric = self.aleatoric_variance(
             log_variance
         )
 
+        # =================================================
+        # CALCULATE EPISTEMIC VARIANCE
+        # =================================================
+
         epistemic = self.epistemic_variance(
             mc_predictions
         )
 
+        # =================================================
+        # SHAPE COMPATIBILITY
+        # =================================================
+
         if aleatoric.shape != epistemic.shape:
             raise ValueError(
-                "Aleatoric and epistemic variance "
-                "must have identical shapes. "
+                "Aleatoric and epistemic variance must have "
+                "identical shapes. "
                 f"Aleatoric: {tuple(aleatoric.shape)}, "
                 f"Epistemic: {tuple(epistemic.shape)}."
             )
+
+        # =================================================
+        # TOTAL PREDICTIVE VARIANCE
+        # =================================================
 
         predictive = (
             aleatoric
@@ -392,10 +577,19 @@ class PredictiveUncertaintyEstimator(nn.Module):
             epistemic
         )
 
+        # =================================================
+        # NUMERICAL SAFETY
+        # =================================================
+
+        predictive = torch.clamp(
+            predictive,
+            min=self.eps
+        )
+
         return predictive
 
     # =====================================================
-    # STANDARD DEVIATIONS
+    # STANDARD DEVIATION
     # =====================================================
 
     @staticmethod
@@ -404,6 +598,14 @@ class PredictiveUncertaintyEstimator(nn.Module):
     ):
         """
         Convert variance into standard deviation.
+
+        Input:
+
+            [B,C,D,H,W]
+
+        Output:
+
+            [B,C,D,H,W]
         """
 
         if not isinstance(
@@ -420,6 +622,10 @@ class PredictiveUncertaintyEstimator(nn.Module):
             raise ValueError(
                 "variance contains NaN or Inf values."
             )
+
+        # -------------------------------------------------
+        # Variance cannot physically be negative.
+        # -------------------------------------------------
 
         variance = torch.clamp(
             variance,
@@ -440,8 +646,7 @@ class PredictiveUncertaintyEstimator(nn.Module):
         mc_predictions
     ):
         """
-        Calculate the complete predictive uncertainty
-        decomposition.
+        Calculate the complete uncertainty decomposition.
 
         Parameters
         ----------
@@ -449,21 +654,27 @@ class PredictiveUncertaintyEstimator(nn.Module):
         log_variance:
             Network-predicted logarithmic variance.
 
-            Shape:
+            Preferred MC form:
+
+                [N,B,C,D,H,W]
+
+            A deterministic form:
 
                 [B,C,D,H,W]
 
-        mc_predictions:
-            MC Dropout reconstruction samples.
+            is also accepted.
 
-            Shape:
+        mc_predictions:
+            MC Dropout reconstruction predictions.
+
+            Required shape:
 
                 [N,B,C,D,H,W]
 
         Returns
         -------
 
-        dict containing:
+        Dictionary containing:
 
             aleatoric_variance
             epistemic_variance
@@ -472,6 +683,14 @@ class PredictiveUncertaintyEstimator(nn.Module):
             aleatoric_std
             epistemic_std
             predictive_std
+
+        IMPORTANT:
+
+        The returned epistemic variance is based exclusively
+        on stochastic reconstruction predictions.
+
+        Variance of the predicted log-variance is deliberately
+        excluded from the predictive decomposition.
         """
 
         # =================================================
@@ -491,13 +710,30 @@ class PredictiveUncertaintyEstimator(nn.Module):
         )
 
         # =================================================
-        # PREDICTIVE
+        # VERIFY OUTPUT COMPATIBILITY
+        # =================================================
+
+        if aleatoric.shape != epistemic.shape:
+            raise ValueError(
+                "Aleatoric and epistemic variance must have "
+                "identical shapes. "
+                f"Aleatoric: {tuple(aleatoric.shape)}, "
+                f"Epistemic: {tuple(epistemic.shape)}."
+            )
+
+        # =================================================
+        # PREDICTIVE VARIANCE
         # =================================================
 
         predictive = (
             aleatoric
             +
             epistemic
+        )
+
+        predictive = torch.clamp(
+            predictive,
+            min=self.eps
         )
 
         # =================================================
@@ -517,7 +753,7 @@ class PredictiveUncertaintyEstimator(nn.Module):
         )
 
         # =================================================
-        # RETURN
+        # RETURN COMPLETE DECOMPOSITION
         # =================================================
 
         return {

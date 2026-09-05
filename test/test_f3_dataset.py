@@ -36,7 +36,7 @@ def test_f3_dataset():
         len(dataset)
     )
 
-    corrupted, target, mask, velocity = dataset[0]
+    corrupted, target, mask, velocity = dataset[0][:4]
 
     print()
     print(

@@ -37,14 +37,14 @@ F3_PATH = (
 
 BEST_CHECKPOINT = (
     r"outputs"
-    r"\experiment_20260731_040411"
+    r"\synthetic_training"
     r"\checkpoints"
     r"\best_model.pth"
 )
 
 LATEST_CHECKPOINT = (
     r"outputs"
-    r"\experiment_20260731_040411"
+    r"\synthetic_training"
     r"\checkpoints"
     r"\latest_checkpoint.pth"
 )
@@ -65,11 +65,11 @@ def evaluate_checkpoint(checkpoint_path):
         missing_probability=0.30
     )
 
-    corrupted, target, mask, velocity = dataset[0]
+    corrupted, target, mask, velocity = dataset[0][:4]
 
     target_batch = target.unsqueeze(0)
 
-    reconstruction, uncertainty = predictor.predict(
+    reconstruction, travel_time, uncertainty = predictor.predict(
         corrupted
     )
 

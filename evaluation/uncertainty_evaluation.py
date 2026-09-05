@@ -112,7 +112,7 @@ def main():
 
         corrupted, target, mask, velocity = dataset[
             patch_index
-        ]
+        ][:4]
 
         target_batch = target.unsqueeze(0)
 

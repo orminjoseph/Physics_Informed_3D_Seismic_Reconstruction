@@ -42,7 +42,7 @@ def test_build_dataset():
     # input, target, mask, velocity
     # -------------------------------------------------
 
-    input_cube, target, mask, velocity = dataset[0]
+    input_cube, target, mask, velocity = dataset[0][:4]
 
     print()
     print("Input Shape:")

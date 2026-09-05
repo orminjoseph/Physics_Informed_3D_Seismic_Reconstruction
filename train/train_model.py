@@ -11,11 +11,6 @@ from losses.total_loss import TotalLoss
 from trainer.trainer import Trainer
 
 from utils.config import (
-    BATCH_SIZE,
-    NUM_EPOCHS,
-    LEARNING_RATE
-)
-from utils.config import (
     DEVICE,
     BATCH_SIZE,
     NUM_EPOCHS,
@@ -68,7 +63,8 @@ def main():
 
     optimizer = torch.optim.Adam(
         model.parameters(),
-        lr=LEARNING_RATE
+        lr=LEARNING_RATE,
+        weight_decay=WEIGHT_DECAY
     )
 
     trainer = Trainer(
@@ -82,7 +78,7 @@ def main():
         train_loader,
         val_loader,
         epochs=NUM_EPOCHS,
-        resume=True
+        resume=False
     )
 
 

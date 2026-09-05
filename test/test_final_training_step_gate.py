@@ -133,7 +133,7 @@ def forward_and_loss(model, criterion, batch):
     # -------------------------------------------------
     # 1. Unpack the batch
     # -------------------------------------------------
-    inputs, targets, mask, velocity_model = batch
+    inputs, targets, mask, velocity_model = batch[:4]
 
     # -------------------------------------------------
     # 2. Forward pass
