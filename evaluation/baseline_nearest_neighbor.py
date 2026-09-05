@@ -3,8 +3,7 @@
 Nearest Neighbor Reconstruction Baseline
 =========================================================
 
-Simple spatial nearest-neighbor seismic reconstruction
-baseline.
+Efficient spatial nearest-neighbor seismic reconstruction.
 
 For each missing voxel, the value of the nearest observed
 voxel is used for reconstruction.
@@ -27,6 +26,9 @@ Author: Ormin Joseph
 """
 
 import torch
+import numpy as np
+
+from scipy.ndimage import distance_transform_edt
 
 
 def nearest_neighbor_reconstruction(
@@ -34,8 +36,8 @@ def nearest_neighbor_reconstruction(
         mask
 ):
     """
-    Reconstruct missing seismic voxels using spatial
-    nearest-neighbor interpolation.
+    Reconstruct missing seismic voxels using efficient
+    spatial nearest-neighbor interpolation.
 
     Parameters
     ----------
@@ -44,11 +46,8 @@ def nearest_neighbor_reconstruction(
 
             (C, D, H, W)
 
-        where C is the channel dimension.
-
     mask : torch.Tensor
-        Observation mask with the same shape as
-        corrupted_cube.
+        Observation mask with the same shape.
 
             1 -> observed
             0 -> missing
@@ -56,14 +55,13 @@ def nearest_neighbor_reconstruction(
     Returns
     -------
     torch.Tensor
-        Reconstructed seismic cube with the same shape
-        as corrupted_cube.
+        Reconstructed seismic cube with the same shape.
 
     Notes
     -----
-    The method searches for the nearest observed voxel
-    using Euclidean distance in the 3D spatial domain
-    (D, H, W).
+    The method uses a Euclidean distance transform to
+    identify the nearest observed voxel for each missing
+    voxel.
 
     Observed voxels are left unchanged.
     """
@@ -83,6 +81,12 @@ def nearest_neighbor_reconstruction(
             mask,
             dtype=torch.float32
         )
+
+    # -----------------------------------------------------
+    # Preserve the original device
+    # -----------------------------------------------------
+
+    original_device = corrupted_cube.device
 
     corrupted_cube = corrupted_cube.float()
     mask = mask.float()
@@ -133,11 +137,11 @@ def nearest_neighbor_reconstruction(
 
     reconstructed = corrupted_cube.clone()
 
+    channels, depth, height, width = corrupted_cube.shape
+
     # -----------------------------------------------------
     # Process each channel independently
     # -----------------------------------------------------
-
-    channels, depth, height, width = corrupted_cube.shape
 
     for channel in range(channels):
 
@@ -145,24 +149,23 @@ def nearest_neighbor_reconstruction(
         channel_mask = mask[channel]
 
         # -------------------------------------------------
-        # Locate observed and missing voxels
+        # Convert the observation mask to NumPy.
+        #
+        # The distance-transform operation is performed
+        # on the CPU. The final reconstruction is returned
+        # to the original device.
         # -------------------------------------------------
 
-        observed_positions = torch.nonzero(
-            channel_mask == 1,
-            as_tuple=False
-        )
+        mask_numpy = channel_mask.detach().cpu().numpy()
 
-        missing_positions = torch.nonzero(
-            channel_mask == 0,
-            as_tuple=False
-        )
+        observed = mask_numpy == 1
+        missing = mask_numpy == 0
 
         # -------------------------------------------------
         # If there are no missing voxels, nothing to do.
         # -------------------------------------------------
 
-        if missing_positions.numel() == 0:
+        if not missing.any():
             continue
 
         # -------------------------------------------------
@@ -170,7 +173,7 @@ def nearest_neighbor_reconstruction(
         # is impossible.
         # -------------------------------------------------
 
-        if observed_positions.numel() == 0:
+        if not observed.any():
             raise ValueError(
                 f"Channel {channel} contains no observed "
                 "voxels. Nearest-neighbor reconstruction "
@@ -178,45 +181,60 @@ def nearest_neighbor_reconstruction(
             )
 
         # -------------------------------------------------
-        # Compute nearest observed voxel for each missing
-        # voxel.
+        # Compute the nearest observed voxel.
         #
-        # torch.cdist computes Euclidean distances between:
+        # distance_transform_edt identifies, for every
+        # missing voxel, the nearest zero-valued voxel.
         #
-        #     missing voxel coordinates
+        # Therefore:
         #
-        # and
+        #     observed == True  -> 0
+        #     missing == True   -> 1
         #
-        #     observed voxel coordinates.
+        # The returned indices point to the nearest
+        # observed voxel.
         # -------------------------------------------------
 
-        distances = torch.cdist(
-            missing_positions.float(),
-            observed_positions.float(),
-            p=2
+        _, nearest_indices = distance_transform_edt(
+            missing,
+            return_distances=True,
+            return_indices=True
         )
 
-        nearest_indices = torch.argmin(
-            distances,
-            dim=1
-        )
+        # -------------------------------------------------
+        # Convert nearest-neighbor indices to tensors.
+        # -------------------------------------------------
 
-        nearest_positions = observed_positions[
+        nearest_positions = torch.from_numpy(
             nearest_indices
+        ).long()
+
+        # -------------------------------------------------
+        # Copy the nearest observed values.
+        #
+        # The indices have shape:
+        #
+        #     (3, D, H, W)
+        #
+        # corresponding to:
+        #
+        #     depth, height, width
+        # -------------------------------------------------
+
+        nearest_values = cube[
+            nearest_positions[0],
+            nearest_positions[1],
+            nearest_positions[2]
         ]
 
         # -------------------------------------------------
-        # Copy values from nearest observed voxels.
+        # Replace only missing voxels.
         # -------------------------------------------------
 
-        reconstructed[channel][
-            missing_positions[:, 0],
-            missing_positions[:, 1],
-            missing_positions[:, 2]
-        ] = cube[
-            nearest_positions[:, 0],
-            nearest_positions[:, 1],
-            nearest_positions[:, 2]
-        ]
+        reconstructed[channel][missing] = nearest_values[missing]
 
-    return reconstructed
+    # -----------------------------------------------------
+    # Return reconstruction on the original device.
+    # -----------------------------------------------------
+
+    return reconstructed.to(original_device)
