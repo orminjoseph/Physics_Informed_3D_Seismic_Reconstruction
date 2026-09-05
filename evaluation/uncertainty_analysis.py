@@ -267,10 +267,21 @@ def compute_uncertainty(
     # -----------------------------------------------------
 
     # Generate stochastic predictions.
-    mc_results = MCDropout3D.predict(
-        model,
-        x,
+    # -----------------------------------------------------
+    # Monte Carlo Dropout
+    # -----------------------------------------------------
+
+    # Create the MC Dropout estimator.
+    # The number of stochastic forward passes is supplied
+    # through the constructor, not through predict().
+    mc_dropout = MCDropout3D(
+        model=model,
         num_samples=num_mc_samples,
+    )
+
+    # Generate stochastic predictions.
+    mc_results = mc_dropout.predict(
+        x
     )
 
     # Required outputs from MCDropout3D.
