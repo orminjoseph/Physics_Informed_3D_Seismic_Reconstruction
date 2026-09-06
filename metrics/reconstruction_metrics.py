@@ -150,8 +150,12 @@ def psnr(
 
         data_range = 2.0
 
+    A small numerical floor is applied to MSE so that
+    perfect reconstruction produces a large finite PSNR
+    rather than +inf.
+
     PSNR = 20 log10(data_range)
-           - 10 log10(MSE)
+           - 10 log10(max(MSE, epsilon))
     """
 
     if data_range <= 0:
@@ -165,13 +169,14 @@ def psnr(
         target
     )
 
-    if mse_value.item() == 0:
+    epsilon = torch.finfo(
+        prediction.dtype
+    ).eps
 
-        return torch.tensor(
-            float("inf"),
-            device=prediction.device,
-            dtype=prediction.dtype
-        )
+    mse_safe = torch.clamp(
+        mse_value,
+        min=epsilon
+    )
 
     return (
 
@@ -188,10 +193,9 @@ def psnr(
 
         10.0
         * torch.log10(
-            mse_value
+            mse_safe
         )
     )
-
 
 # =======================================================
 # Signal-to-Noise Ratio
@@ -209,9 +213,11 @@ def snr(prediction, target):
 
         mean((target - prediction)^2)
 
-    Therefore:
+    A small numerical floor is applied to both signal
+    and noise power to prevent NaN/Inf values during
+    automated evaluation.
 
-        SNR = 10 log10(signal_power / noise_power)
+    SNR = 10 log10(signal_power / noise_power)
     """
 
     if not isinstance(prediction, torch.Tensor):
@@ -243,23 +249,29 @@ def snr(prediction, target):
         ) ** 2
     )
 
-    if noise_power.item() == 0:
+    epsilon = torch.finfo(
+        prediction.dtype
+    ).eps
 
-        return torch.tensor(
-            float("inf"),
-            device=prediction.device,
-            dtype=prediction.dtype
-        )
+    signal_power_safe = torch.clamp(
+        signal_power,
+        min=epsilon
+    )
+
+    noise_power_safe = torch.clamp(
+        noise_power,
+        min=epsilon
+    )
 
     return (
 
         10.0
         * torch.log10(
-            signal_power
-            / noise_power
+            signal_power_safe
+            /
+            noise_power_safe
         )
     )
-
 
 # =======================================================
 # Structural Similarity Index
