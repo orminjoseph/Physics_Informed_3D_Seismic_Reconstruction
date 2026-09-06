@@ -103,16 +103,6 @@ from utils.config import (
 # =========================================================
 # DATASET BUILDER
 # =========================================================
-#
-# IMPORTANT:
-# build_dataset() is located in:
-#
-#     dataset/build_dataset.py
-#
-# It does not accept a "mode" argument.
-#
-# It automatically uses DATASET_MODE from utils.config.
-# =========================================================
 
 from dataset.build_dataset import build_dataset
 
@@ -138,19 +128,16 @@ def calculate_metrics(
     """
     Compute reconstruction metrics.
 
-    Parameters
-    ----------
-    prediction : torch.Tensor
-        Reconstructed seismic volume.
-
-    target : torch.Tensor
-        Ground-truth seismic volume.
-
-    Returns
-    -------
-    list
-        [MAE, RMSE, PSNR, SNR, SSIM]
+    Both prediction and target must have identical shapes.
     """
+
+    if prediction.shape != target.shape:
+
+        raise RuntimeError(
+            "Prediction and target shapes do not match:\n"
+            f"Prediction: {tuple(prediction.shape)}\n"
+            f"Target    : {tuple(target.shape)}"
+        )
 
     return [
 
@@ -192,19 +179,6 @@ def validate_metrics(
 ):
     """
     Validate that all calculated metrics are finite.
-
-    Parameters
-    ----------
-    metrics : list
-        Calculated metric values.
-
-    method_name : str
-        Name of reconstruction method.
-
-    Returns
-    -------
-    list
-        Validated metric values.
     """
 
     metrics = np.asarray(
@@ -280,17 +254,7 @@ def ensure_tensor(
     """
     Convert a dataset value to a float32 tensor.
 
-    Parameters
-    ----------
-    value
-        Input value.
-
-    name : str
-        Name used in error messages.
-
-    Returns
-    -------
-    torch.Tensor
+    The returned tensor is always CPU-resident at this stage.
     """
 
     if not isinstance(
@@ -305,7 +269,13 @@ def ensure_tensor(
 
     else:
 
-        value = value.float()
+        value = value.detach().float()
+
+    if value.numel() == 0:
+
+        raise RuntimeError(
+            f"{name} is empty."
+        )
 
     if not torch.isfinite(
         value
@@ -319,6 +289,85 @@ def ensure_tensor(
 
 
 # =========================================================
+# VALIDATE MASK
+# =========================================================
+
+def validate_mask(
+    mask,
+    corrupted,
+    patch_index
+):
+    """
+    Validate the seismic observation mask.
+
+    Convention:
+
+        1.0 -> observed voxel
+        0.0 -> missing voxel
+
+    The mask must contain at least one observed voxel.
+    """
+
+    if mask.shape != corrupted.shape:
+
+        raise RuntimeError(
+            f"Mask shape does not match corrupted input "
+            f"for patch {patch_index + 1}:\n"
+            f"Input: {tuple(corrupted.shape)}\n"
+            f"Mask : {tuple(mask.shape)}"
+        )
+
+    unique_values = torch.unique(mask)
+
+    if unique_values.numel() == 0:
+
+        raise RuntimeError(
+            f"Mask for patch {patch_index + 1} is empty."
+        )
+
+    if not torch.all(
+        (unique_values == 0.0) |
+        (unique_values == 1.0)
+    ):
+
+        raise RuntimeError(
+            f"Mask for patch {patch_index + 1} contains "
+            "values other than 0.0 and 1.0:\n"
+            f"{unique_values.tolist()}"
+        )
+
+    observed = torch.count_nonzero(
+        mask > 0.5
+    ).item()
+
+    missing = torch.count_nonzero(
+        mask <= 0.5
+    ).item()
+
+    total = mask.numel()
+
+    if observed == 0:
+
+        raise RuntimeError(
+            f"Patch {patch_index + 1} contains no observed "
+            "voxels. Nearest-neighbor and linear "
+            "interpolation cannot be performed."
+        )
+
+    if missing == 0:
+
+        print(
+            "  Warning: patch contains no missing voxels."
+        )
+
+    print(
+        f"  Mask voxels : total={total}, "
+        f"observed={observed}, "
+        f"missing={missing}"
+    )
+
+
+# =========================================================
 # ADD BATCH DIMENSION
 # =========================================================
 
@@ -327,7 +376,7 @@ def add_batch_dimension(
     name
 ):
     """
-    Convert a seismic volume from:
+    Convert:
 
         [C, D, H, W]
 
@@ -335,7 +384,7 @@ def add_batch_dimension(
 
         [B, C, D, H, W]
 
-    If the tensor is already 5D, it is returned unchanged.
+    If already 5D, leave unchanged.
     """
 
     if tensor.ndim == 4:
@@ -355,6 +404,41 @@ def add_batch_dimension(
         )
 
     return tensor
+
+
+# =========================================================
+# VALIDATE RECONSTRUCTION
+# =========================================================
+
+def validate_reconstruction(
+    reconstruction,
+    target,
+    method_name
+):
+    """
+    Validate reconstructed seismic volume.
+    """
+
+    reconstruction = ensure_tensor(
+        reconstruction,
+        f"{method_name} prediction"
+    )
+
+    reconstruction = add_batch_dimension(
+        reconstruction,
+        f"{method_name} prediction"
+    )
+
+    if reconstruction.shape != target.shape:
+
+        raise RuntimeError(
+            f"{method_name} reconstruction shape does not "
+            "match target shape:\n"
+            f"Reconstruction: {tuple(reconstruction.shape)}\n"
+            f"Target        : {tuple(target.shape)}"
+        )
+
+    return reconstruction
 
 
 # =========================================================
@@ -423,20 +507,6 @@ def main():
     print("LOADING DATASET")
     print("=" * 70)
 
-    # -----------------------------------------------------
-    # IMPORTANT:
-    #
-    # build_dataset() reads DATASET_MODE internally.
-    #
-    # Therefore:
-    #
-    #     build_dataset()
-    #
-    # NOT:
-    #
-    #     build_dataset(mode=DATASET_MODE)
-    # -----------------------------------------------------
-
     dataset = build_dataset()
 
     print()
@@ -492,13 +562,9 @@ def main():
     )
 
     predictor = Predictor(
-
         model=model,
-
         checkpoint=CHECKPOINT,
-
         device=device
-
     )
 
     print(
@@ -506,7 +572,13 @@ def main():
     )
 
     # =====================================================
-    # EVALUATION
+    # EVALUATION MODE
+    # =====================================================
+
+    model.eval()
+
+    # =====================================================
+    # PATCH LOOP
     # =====================================================
 
     for patch_index in range(
@@ -560,7 +632,7 @@ def main():
         )
 
         # =================================================
-        # CHECK SHAPE CONSISTENCY
+        # SHAPE VALIDATION
         # =================================================
 
         if corrupted.shape != target.shape:
@@ -580,6 +652,16 @@ def main():
                 f"Input: {tuple(corrupted.shape)}\n"
                 f"Mask : {tuple(mask.shape)}"
             )
+
+        # =================================================
+        # MASK VALIDATION
+        # =================================================
+
+        validate_mask(
+            mask,
+            corrupted,
+            patch_index
+        )
 
         # =================================================
         # BATCH DIMENSION
@@ -603,21 +685,29 @@ def main():
             "  -> Nearest Neighbor"
         )
 
-        nn_prediction = (
-            nearest_neighbor_reconstruction(
-                corrupted,
-                mask
+        try:
+
+            nn_prediction = (
+                nearest_neighbor_reconstruction(
+                    corrupted,
+                    mask
+                )
             )
-        )
 
-        nn_prediction = ensure_tensor(
-            nn_prediction,
-            "Nearest Neighbor prediction"
-        )
+        except Exception as exc:
 
-        nn_prediction = add_batch_dimension(
+            raise RuntimeError(
+                f"Nearest Neighbor reconstruction failed "
+                f"on patch {patch_index + 1}.\n"
+                f"Input shape: {tuple(corrupted.shape)}\n"
+                f"Mask shape : {tuple(mask.shape)}\n"
+                f"Original error: {exc}"
+            ) from exc
+
+        nn_prediction = validate_reconstruction(
             nn_prediction,
-            "Nearest Neighbor prediction"
+            target_batch,
+            "Nearest Neighbor"
         )
 
         nn_metrics = calculate_metrics(
@@ -642,21 +732,29 @@ def main():
             "  -> Linear Interpolation"
         )
 
-        linear_prediction = (
-            linear_interpolation_reconstruction(
-                corrupted,
-                mask
+        try:
+
+            linear_prediction = (
+                linear_interpolation_reconstruction(
+                    corrupted,
+                    mask
+                )
             )
-        )
 
-        linear_prediction = ensure_tensor(
-            linear_prediction,
-            "Linear Interpolation prediction"
-        )
+        except Exception as exc:
 
-        linear_prediction = add_batch_dimension(
+            raise RuntimeError(
+                f"Linear interpolation reconstruction "
+                f"failed on patch {patch_index + 1}.\n"
+                f"Input shape: {tuple(corrupted.shape)}\n"
+                f"Mask shape : {tuple(mask.shape)}\n"
+                f"Original error: {exc}"
+            ) from exc
+
+        linear_prediction = validate_reconstruction(
             linear_prediction,
-            "Linear Interpolation prediction"
+            target_batch,
+            "Linear Interpolation"
         )
 
         linear_metrics = calculate_metrics(
@@ -681,40 +779,34 @@ def main():
             "  -> Physics-Informed Network"
         )
 
-        (
-            reconstruction,
-            travel_time,
-            predictive_uncertainty,
-            aleatoric_std
-        ) = predictor.predict(
-            corrupted_input
-        )
+        try:
 
-        reconstruction = ensure_tensor(
-            reconstruction,
-            "Physics-Informed reconstruction"
-        )
+            with torch.no_grad():
 
-        reconstruction = add_batch_dimension(
-            reconstruction,
-            "Physics-Informed reconstruction"
-        )
+                (
+                    reconstruction,
+                    travel_time,
+                    predictive_uncertainty,
+                    aleatoric_std
+                ) = predictor.predict(
+                    corrupted_input
+                )
 
-        # -------------------------------------------------
-        # CHECK NETWORK OUTPUT SHAPE
-        # -------------------------------------------------
-
-        if reconstruction.shape != target_batch.shape:
+        except Exception as exc:
 
             raise RuntimeError(
-                "Physics-Informed Network reconstruction "
-                "shape does not match target shape for "
-                f"patch {patch_index + 1}:\n"
-                f"Reconstruction: "
-                f"{tuple(reconstruction.shape)}\n"
-                f"Target: "
-                f"{tuple(target_batch.shape)}"
-            )
+                f"Physics-Informed Network inference "
+                f"failed on patch {patch_index + 1}.\n"
+                f"Input shape: {tuple(corrupted_input.shape)}\n"
+                f"Device     : {device}\n"
+                f"Original error: {exc}"
+            ) from exc
+
+        reconstruction = validate_reconstruction(
+            reconstruction,
+            target_batch,
+            "Physics-Informed Network"
+        )
 
         network_metrics = calculate_metrics(
             reconstruction,
@@ -792,10 +884,6 @@ def main():
             file
         )
 
-        # -------------------------------------------------
-        # HEADER
-        # -------------------------------------------------
-
         writer.writerow([
             "Method",
             "MAE",
@@ -805,10 +893,6 @@ def main():
             "SSIM"
         ])
 
-        # -------------------------------------------------
-        # NEAREST NEIGHBOR
-        # -------------------------------------------------
-
         writer.writerow(
             [
                 "Nearest_Neighbor"
@@ -816,10 +900,6 @@ def main():
             +
             nn_metrics
         )
-
-        # -------------------------------------------------
-        # LINEAR INTERPOLATION
-        # -------------------------------------------------
 
         writer.writerow(
             [
@@ -829,10 +909,6 @@ def main():
             linear_metrics
         )
 
-        # -------------------------------------------------
-        # PHYSICS-INFORMED NETWORK
-        # -------------------------------------------------
-
         writer.writerow(
             [
                 "Physics_Informed_Network"
@@ -840,10 +916,6 @@ def main():
             +
             network_metrics
         )
-
-        # -------------------------------------------------
-        # NUMBER OF PATCHES
-        # -----------------------------------------------------
 
         writer.writerow([
             "Num_Patches",
@@ -866,14 +938,8 @@ def main():
         f"{DATASET_MODE} patches"
     )
 
-    # =====================================================
-    # NEAREST NEIGHBOR
-    # =====================================================
-
     print()
-    print(
-        "Nearest Neighbor:"
-    )
+    print("Nearest Neighbor:")
 
     print(
         f"  MAE  : {nn_metrics[0]:.6f}"
@@ -895,14 +961,8 @@ def main():
         f"  SSIM : {nn_metrics[4]:.6f}"
     )
 
-    # =====================================================
-    # LINEAR INTERPOLATION
-    # =====================================================
-
     print()
-    print(
-        "Linear Interpolation:"
-    )
+    print("Linear Interpolation:")
 
     print(
         f"  MAE  : {linear_metrics[0]:.6f}"
@@ -924,14 +984,8 @@ def main():
         f"  SSIM : {linear_metrics[4]:.6f}"
     )
 
-    # =====================================================
-    # PHYSICS-INFORMED NETWORK
-    # =====================================================
-
     print()
-    print(
-        "Physics-Informed Network:"
-    )
+    print("Physics-Informed Network:")
 
     print(
         f"  MAE  : {network_metrics[0]:.6f}"
@@ -953,14 +1007,8 @@ def main():
         f"  SSIM : {network_metrics[4]:.6f}"
     )
 
-    # =====================================================
-    # OUTPUT LOCATION
-    # =====================================================
-
     print()
-    print(
-        "Results saved:"
-    )
+    print("Results saved:")
 
     print(
         csv_file
