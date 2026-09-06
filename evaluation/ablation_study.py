@@ -189,22 +189,124 @@ def build_model(settings, device):
 # MODEL DEVICE VALIDATION
 # =========================================================
 
-def validate_model_device(model, device):
-    """
-    Verify that the model parameters are located on the
-    requested device.
+# =========================================================
+# VALIDATE MODEL DEVICE
+# =========================================================
 
-    This provides an early and clear diagnostic instead of
-    allowing a later CUDA/CPU mismatch to occur.
+def validate_model_device(
+        model,
+        device
+):
     """
+    Validate that all model parameters and buffers are on
+    the requested device.
+
+    CUDA device normalization:
+        torch.device("cuda")
+        and
+        torch.device("cuda:0")
+
+    are treated as the same device when CUDA device 0 is
+    the active/default CUDA device.
+    """
+
+    expected_device = torch.device(device)
+
+    # -----------------------------------------------------
+    # Validate model parameters
+    # -----------------------------------------------------
 
     for name, parameter in model.named_parameters():
-        if parameter.device != device:
-            raise RuntimeError(
-                f"Model parameter '{name}' is on "
-                f"{parameter.device}, but the expected device "
-                f"is {device}."
+
+        actual_device = parameter.device
+
+        # -------------------------------------------------
+        # Normalize CUDA device comparison
+        # -------------------------------------------------
+
+        if expected_device.type == "cuda":
+
+            expected_index = (
+                torch.cuda.current_device()
+                if expected_device.index is None
+                else expected_device.index
             )
+
+            actual_index = (
+                torch.cuda.current_device()
+                if actual_device.index is None
+                else actual_device.index
+            )
+
+            device_match = (
+                actual_device.type == "cuda"
+                and actual_index == expected_index
+            )
+
+        else:
+
+            device_match = (
+                actual_device == expected_device
+            )
+
+        if not device_match:
+
+            raise RuntimeError(
+                f"\nModel parameter '{name}' is on "
+                f"{actual_device}, but the expected device "
+                f"is {expected_device}."
+            )
+
+    # -----------------------------------------------------
+    # Validate model buffers
+    # -----------------------------------------------------
+
+    for name, buffer in model.named_buffers():
+
+        actual_device = buffer.device
+
+        # -------------------------------------------------
+        # Normalize CUDA device comparison
+        # -------------------------------------------------
+
+        if expected_device.type == "cuda":
+
+            expected_index = (
+                torch.cuda.current_device()
+                if expected_device.index is None
+                else expected_device.index
+            )
+
+            actual_index = (
+                torch.cuda.current_device()
+                if actual_device.index is None
+                else actual_device.index
+            )
+
+            device_match = (
+                actual_device.type == "cuda"
+                and actual_index == expected_index
+            )
+
+        else:
+
+            device_match = (
+                actual_device == expected_device
+            )
+
+        if not device_match:
+
+            raise RuntimeError(
+                f"\nModel buffer '{name}' is on "
+                f"{actual_device}, but the expected device "
+                f"is {expected_device}."
+            )
+
+    # -----------------------------------------------------
+    # Validation successful
+    # -----------------------------------------------------
+
+    return True
 
 
 # =========================================================
