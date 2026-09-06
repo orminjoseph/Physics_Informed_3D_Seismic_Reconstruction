@@ -441,12 +441,33 @@ def evaluate_checkpoint(
 
         with torch.no_grad():
 
-            reconstruction, uncertainty = (
-                predictor.predict(
-                    input_cube
-                )
+            prediction = predictor.predict(
+                input_cube
             )
 
+            if not isinstance(
+                    prediction,
+                    tuple
+            ):
+                raise TypeError(
+                    "\nPredictor.predict() must return "
+                    "a tuple."
+                )
+
+            if len(prediction) != 4:
+                raise ValueError(
+                    "\nUnexpected Predictor.predict() "
+                    "return signature.\n"
+                    f"Expected 4 values, received "
+                    f"{len(prediction)}."
+                )
+
+            (
+                reconstruction,
+                travel_time,
+                aleatoric_std,
+                epistemic_std
+            ) = prediction
         # -------------------------------------------------
         # Ensure target has batch dimension
         # -------------------------------------------------
