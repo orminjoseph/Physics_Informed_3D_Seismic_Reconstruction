@@ -395,17 +395,38 @@ def evaluate_checkpoint(
             f"{index + 1}/{num_samples}"
         )
 
-        # -------------------------------------------------
-        # Load sample
-        # -------------------------------------------------
+        # -----------------------------------------------------
+        # Dataset sample
+        # -----------------------------------------------------
+
+        sample = dataset[index]
+
+        # -----------------------------------------------------
+        # Validate dataset sample structure
+        #
+        # The dataset may return additional metadata beyond the
+        # four tensors required for reconstruction evaluation.
+        # Only the first four entries are used here:
+        #
+        #   1. input_cube
+        #   2. target_cube
+        #   3. mask
+        #   4. velocity_model
+        # -----------------------------------------------------
+
+        if len(sample) < 4:
+            raise ValueError(
+                "Dataset sample must contain at least "
+                "(input_cube, target_cube, mask, "
+                "velocity_model)."
+            )
 
         (
             input_cube,
             target_cube,
             mask,
-            velocity_model,
-        ) = dataset[index]
-
+            velocity_model
+        ) = sample[:4]
         # -------------------------------------------------
         # Move input to selected device
         # -------------------------------------------------
