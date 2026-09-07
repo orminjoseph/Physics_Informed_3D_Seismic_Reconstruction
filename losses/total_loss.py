@@ -103,12 +103,19 @@ class TotalLoss(nn.Module):
     Composite training loss for the Physics-Informed
     3D Encoder-Decoder framework.
 
-    The loss contains four optimization components:
+    The loss contains four possible optimization components:
 
         1. MAE reconstruction loss
         2. Physics-informed loss
         3. Heteroscedastic aleatoric uncertainty loss
         4. SSIM structural loss
+
+    The aleatoric uncertainty component can be explicitly
+    enabled or disabled using:
+
+        use_uncertainty=True / False
+
+    This is required for controlled ablation experiments.
 
     Epistemic uncertainty is intentionally excluded from
     the training loss because it is estimated from multiple
@@ -127,7 +134,8 @@ class TotalLoss(nn.Module):
         self,
         dx,
         dy,
-        dz
+        dz,
+        use_uncertainty=True
     ):
         """
         Parameters
@@ -140,6 +148,30 @@ class TotalLoss(nn.Module):
 
         dz : float
             Grid spacing along the depth direction.
+
+        use_uncertainty : bool, default=True
+            Controls whether the heteroscedastic aleatoric
+            uncertainty loss is included in the training
+            objective.
+
+            True:
+                Aleatoric uncertainty loss is calculated
+                and included.
+
+            False:
+                Aleatoric uncertainty loss is disabled and
+                contributes exactly zero to the total loss.
+
+        Notes
+        -----
+        The default value True preserves the existing
+        production behavior and existing calls such as:
+
+            TotalLoss(
+                dx=DX,
+                dy=DY,
+                dz=DZ
+            )
         """
 
         super().__init__()
@@ -165,6 +197,24 @@ class TotalLoss(nn.Module):
                 raise ValueError(
                     f"{name} must be greater than zero."
                 )
+
+        # =================================================
+        # VALIDATE UNCERTAINTY SWITCH
+        # =================================================
+
+        if not isinstance(
+            use_uncertainty,
+            bool
+        ):
+            raise TypeError(
+                "use_uncertainty must be a boolean value."
+            )
+
+        # =================================================
+        # STORE UNCERTAINTY SWITCH
+        # =================================================
+
+        self.use_uncertainty = use_uncertainty
 
         # =================================================
         # VALIDATE LOSS WEIGHTS
@@ -292,14 +342,19 @@ class TotalLoss(nn.Module):
         # HETEROSCEDASTIC ALEATORIC UNCERTAINTY LOSS
         # =================================================
         #
-        # This learns the voxel-wise conditional variance:
+        # The loss object is retained even when uncertainty
+        # is disabled.
         #
-        #     log_variance = log(sigma_a^2)
+        # This preserves the existing TotalLoss structure
+        # and allows uncertainty to be switched on/off
+        # without changing the rest of the training code.
         #
-        # It is NOT an epistemic uncertainty estimator.
+        # IMPORTANT:
         #
-        # Epistemic uncertainty is calculated later by
-        # MC Dropout.
+        # The loss is only CALLED during forward() when:
+        #
+        #     self.use_uncertainty == True
+        #
         # =================================================
 
         self.aleatoric_loss = UncertaintyLoss()
@@ -396,6 +451,10 @@ class TotalLoss(nn.Module):
             Shape:
 
                 [B,C,D,H,W]
+
+            When uncertainty is disabled by the network,
+            this is expected to be the zero tensor produced
+            by Network3D.
 
         source_indices : torch.Tensor, optional
             Source coordinates.
@@ -552,26 +611,38 @@ class TotalLoss(nn.Module):
         # 6. HETEROSCEDASTIC ALEATORIC NLL
         # =================================================
         #
-        # The uncertainty loss learns:
+        # IMPORTANT UNCERTAINTY SWITCH
         #
-        #     log(sigma_a^2)
+        # If uncertainty is enabled:
         #
-        # through the Gaussian negative log-likelihood:
-        #
+        #     L_aleatoric =
         #     1/2 exp(-s)(y-y_hat)^2 + 1/2 s
         #
-        # This is ALEATORIC uncertainty only.
+        # If uncertainty is disabled:
         #
-        # No MC-Dropout samples are used here.
+        #     L_aleatoric = 0
         #
-        # No epistemic uncertainty is included here.
+        # This prevents the No_Uncertainty and Plain_UNet
+        # ablation configurations from accidentally receiving
+        # an uncertainty-loss contribution.
+        #
         # =================================================
 
-        aleatoric_nll = self.aleatoric_loss(
-            prediction,
-            target,
-            log_variance
-        )
+        if self.use_uncertainty:
+
+            aleatoric_nll = self.aleatoric_loss(
+                prediction,
+                target,
+                log_variance
+            )
+
+        else:
+
+            aleatoric_nll = torch.zeros(
+                (),
+                device=prediction.device,
+                dtype=prediction.dtype
+            )
 
         # =================================================
         # 7. VALIDATE LOSS VALUES
