@@ -845,28 +845,25 @@ def run_ablation():
         # =================================================
 
         if model_name == "Full_Model":
-
-            checkpoint = os.path.join(
+            experiment_root = os.path.join(
                 "outputs",
                 EXPERIMENT_NAME,
-                "checkpoints",
-                "best_model.pth",
+                "ablation",
+                model_name,
             )
 
-            if not os.path.exists(checkpoint):
+            # ---------------------------------------------
+            # Train Full Model from scratch
+            # ---------------------------------------------
 
-                raise FileNotFoundError(
-                    "Full Model checkpoint not found:\n"
-                    f"{checkpoint}"
-                )
-
-            print()
-            print(
-                "Using existing Full Model checkpoint:"
+            checkpoint = train_ablation_model(
+                model_name=model_name,
+                settings=settings,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                device=device,
+                experiment_root=experiment_root,
             )
-
-            print(checkpoint)
-
             # ---------------------------------------------
             # Build Full Model explicitly on device
             # ---------------------------------------------
