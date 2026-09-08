@@ -81,9 +81,8 @@ class VelocityGenerator:
         cube_size=(64, 128, 128),
         min_velocity=1800.0,
         max_velocity=3500.0,
-        seed=None
+        seed=None,
     ):
-
         # =================================================
         # VALIDATE CUBE SIZE
         # =================================================
@@ -99,6 +98,7 @@ class VelocityGenerator:
 
         if any(
             not isinstance(value, int)
+            or isinstance(value, bool)
             or value <= 0
             for value in cube_size
         ):
@@ -110,6 +110,16 @@ class VelocityGenerator:
         # =================================================
         # VALIDATE VELOCITY RANGE
         # =================================================
+
+        if not isinstance(min_velocity, (int, float)):
+            raise TypeError(
+                "min_velocity must be a real number."
+            )
+
+        if not isinstance(max_velocity, (int, float)):
+            raise TypeError(
+                "max_velocity must be a real number."
+            )
 
         if min_velocity <= 0:
             raise ValueError(
@@ -132,18 +142,18 @@ class VelocityGenerator:
         self.height = cube_size[1]
         self.width = cube_size[2]
 
-        self.min_velocity = float(
-            min_velocity
-        )
-
-        self.max_velocity = float(
-            max_velocity
-        )
+        self.min_velocity = float(min_velocity)
+        self.max_velocity = float(max_velocity)
 
         # =================================================
         # REPRODUCIBILITY
         # =================================================
 
+        self.seed = seed
+
+        # Use an independent random-number generator so
+        # velocity generation does not modify Python's
+        # global random-number state.
         self.rng = random.Random(seed)
 
     # =====================================================
@@ -152,12 +162,18 @@ class VelocityGenerator:
 
     def _validate_number_of_layers(
         self,
-        number_of_layers
+        number_of_layers,
     ):
+        """
+        Validate the requested number of velocity layers.
+        """
 
         if not isinstance(
             number_of_layers,
-            int
+            int,
+        ) or isinstance(
+            number_of_layers,
+            bool,
         ):
             raise TypeError(
                 "number_of_layers must be an integer."
@@ -180,7 +196,7 @@ class VelocityGenerator:
 
     def _generate_layer_boundaries(
         self,
-        number_of_layers
+        number_of_layers,
     ):
         """
         Generate unique layer boundaries.
@@ -188,7 +204,6 @@ class VelocityGenerator:
         Returns
         -------
         list
-
             Sorted boundaries containing:
 
                 0
@@ -205,35 +220,29 @@ class VelocityGenerator:
         # -------------------------------------------------
 
         if number_of_layers == 1:
-
             return [
                 0,
-                self.depth
+                self.depth,
             ]
 
         # -------------------------------------------------
-        # Choose unique internal boundaries.
+        # Select unique internal boundaries.
         #
-        # We use sampling without replacement so that
-        # zero-thickness layers cannot occur.
+        # Sampling without replacement guarantees that
+        # every layer has at least one voxel in depth.
         # -------------------------------------------------
 
         internal_boundaries = self.rng.sample(
-            range(
-                1,
-                self.depth
-            ),
-            number_of_layers - 1
+            range(1, self.depth),
+            number_of_layers - 1,
         )
 
         internal_boundaries.sort()
 
         return (
             [0]
-            +
-            internal_boundaries
-            +
-            [self.depth]
+            + internal_boundaries
+            + [self.depth]
         )
 
     # =====================================================
@@ -243,14 +252,21 @@ class VelocityGenerator:
     def _empty_velocity_cube(self):
         """
         Create an empty single-channel velocity cube.
+
+        Returns
+        -------
+        torch.Tensor
+            Shape [1, D, H, W].
         """
 
         return torch.empty(
-            1,
-            self.depth,
-            self.height,
-            self.width,
-            dtype=torch.float32
+            (
+                1,
+                self.depth,
+                self.height,
+                self.width,
+            ),
+            dtype=torch.float32,
         )
 
     # =====================================================
@@ -259,12 +275,12 @@ class VelocityGenerator:
 
     def generate_layered_model(
         self,
-        number_of_layers=4
+        number_of_layers=4,
     ):
         """
         Generate a horizontally layered velocity model.
 
-        Velocity increases with depth.
+        Velocity increases discretely with depth.
 
         Parameters
         ----------
@@ -274,50 +290,40 @@ class VelocityGenerator:
         Returns
         -------
         torch.Tensor
-
-            Shape:
-
-                [1, D, H, W]
+            Shape [1, D, H, W].
 
             Units:
-
                 m/s
         """
 
-        boundaries = (
-            self._generate_layer_boundaries(
-                number_of_layers
-            )
+        boundaries = self._generate_layer_boundaries(
+            number_of_layers
         )
 
         velocity = self._empty_velocity_cube()
 
         # -------------------------------------------------
-        # Velocity increment between layers.
+        # Calculate velocity increment between layers.
         # -------------------------------------------------
 
         if number_of_layers == 1:
-
             velocity_increment = 0.0
 
         else:
-
             velocity_increment = (
                 self.max_velocity
-                -
-                self.min_velocity
+                - self.min_velocity
             ) / (
                 number_of_layers - 1
             )
 
         # -------------------------------------------------
-        # Assign velocity to each layer.
+        # Assign velocity to each geological layer.
         # -------------------------------------------------
 
         for layer_index in range(
             number_of_layers
         ):
-
             top = boundaries[layer_index]
 
             bottom = boundaries[
@@ -326,17 +332,15 @@ class VelocityGenerator:
 
             layer_velocity = (
                 self.min_velocity
-                +
-                layer_index
-                *
-                velocity_increment
+                + layer_index
+                * velocity_increment
             )
 
             velocity[
                 :,
                 top:bottom,
                 :,
-                :
+                :,
             ] = layer_velocity
 
         return velocity
@@ -353,62 +357,61 @@ class VelocityGenerator:
         Returns
         -------
         torch.Tensor
-
-            Shape:
-
-                [1, D, H, W]
+            Shape [1, D, H, W].
 
             Units:
-
                 m/s
         """
 
         velocity = self._empty_velocity_cube()
 
         # -------------------------------------------------
-        # Avoid division by zero for a one-sample depth.
+        # Handle a single-depth voxel explicitly.
         # -------------------------------------------------
 
         if self.depth == 1:
-
             velocity[
                 :,
                 0,
                 :,
-                :
+                :,
             ] = self.min_velocity
 
             return velocity
 
         # -------------------------------------------------
         # Create normalized depth coordinate.
+        #
+        # First depth sample:
+        #       0.0
+        #
+        # Last depth sample:
+        #       1.0
         # -------------------------------------------------
 
         depth_coordinate = torch.linspace(
             0.0,
             1.0,
             self.depth,
-            dtype=torch.float32
+            dtype=torch.float32,
         )
 
         # -------------------------------------------------
-        # Linear velocity variation.
+        # Calculate the velocity profile.
         # -------------------------------------------------
 
         velocity_profile = (
             self.min_velocity
-            +
-            (
+            + (
                 self.max_velocity
-                -
-                self.min_velocity
+                - self.min_velocity
             )
-            *
-            depth_coordinate
+            * depth_coordinate
         )
 
         # -------------------------------------------------
-        # Expand the 1D velocity profile into a 3D cube.
+        # Expand the 1D velocity profile into
+        # [1, D, H, W].
         # -------------------------------------------------
 
         velocity[:] = (
@@ -417,13 +420,13 @@ class VelocityGenerator:
                 1,
                 self.depth,
                 1,
-                1
+                1,
             )
             .expand(
                 1,
                 self.depth,
                 self.height,
-                self.width
+                self.width,
             )
         )
 
@@ -435,7 +438,7 @@ class VelocityGenerator:
 
     def generate(
         self,
-        number_of_layers=4
+        number_of_layers=4,
     ):
         """
         Randomly generate either a layered or gradient
@@ -444,18 +447,13 @@ class VelocityGenerator:
         Returns
         -------
         torch.Tensor
-
-            Shape:
-
-                [1, D, H, W]
+            Shape [1, D, H, W].
 
             Units:
-
                 m/s
         """
 
         if self.rng.random() < 0.5:
-
             return self.generate_layered_model(
                 number_of_layers=number_of_layers
             )
@@ -468,7 +466,7 @@ class VelocityGenerator:
 
     @staticmethod
     def validate_velocity(
-        velocity
+        velocity,
     ):
         """
         Validate a generated velocity model.
@@ -476,23 +474,31 @@ class VelocityGenerator:
         Parameters
         ----------
         velocity : torch.Tensor
-
             Expected shape:
 
-                [C,D,H,W]
+                [C, D, H, W]
 
         Returns
         -------
         bool
+            True when the velocity model is valid.
         """
+
+        # -------------------------------------------------
+        # Type validation
+        # -------------------------------------------------
 
         if not isinstance(
             velocity,
-            torch.Tensor
+            torch.Tensor,
         ):
             raise TypeError(
                 "velocity must be a torch.Tensor."
             )
+
+        # -------------------------------------------------
+        # Dimension validation
+        # -------------------------------------------------
 
         if velocity.ndim != 4:
             raise ValueError(
@@ -501,12 +507,35 @@ class VelocityGenerator:
                 f"Received: {tuple(velocity.shape)}."
             )
 
+        # -------------------------------------------------
+        # Channel validation
+        #
+        # The current physics-informed framework uses
+        # a single velocity channel.
+        # -------------------------------------------------
+
+        if velocity.shape[0] != 1:
+            raise ValueError(
+                "velocity must contain exactly one "
+                f"channel. Received {velocity.shape[0]}."
+            )
+
+        # -------------------------------------------------
+        # Numerical validation
+        # -------------------------------------------------
+
         if not torch.isfinite(
             velocity
         ).all():
             raise ValueError(
                 "Velocity model contains NaN or Inf."
             )
+
+        # -------------------------------------------------
+        # Physical validity
+        #
+        # Seismic velocity must be strictly positive.
+        # -------------------------------------------------
 
         if torch.any(
             velocity <= 0

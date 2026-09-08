@@ -29,9 +29,15 @@ is NOT predicted by the neural network.
 Mask type and geological mode are metadata used for
 experiment tracking and analysis.
 
+IMPORTANT:
+    Samples are generated lazily inside __getitem__.
+    The complete dataset is NOT stored in RAM.
+
 Author: Ormin Joseph
 =========================================================
 """
+
+import random
 
 import numpy as np
 import torch
@@ -45,7 +51,7 @@ from dataset.mask_generator import SeismicMaskGenerator
 
 class SyntheticSeismicDataset(Dataset):
     """
-    Synthetic dataset for Physics-Informed 3D
+    Lazy synthetic dataset for Physics-Informed 3D
     Seismic Reconstruction.
 
     Each sample contains:
@@ -79,28 +85,31 @@ class SyntheticSeismicDataset(Dataset):
         geological_mode:
             Geological structure used to generate
             the seismic target.
+
+    Samples are generated on demand. Therefore, the
+    dataset does not retain all seismic volumes in RAM.
     """
 
     # =====================================================
     # CLASS CONSTANTS
     # =====================================================
 
-    VALID_GEOLOGICAL_MODES = [
+    VALID_GEOLOGICAL_MODES = (
         "horizontal",
         "dipping",
         "faulted",
         "folded",
         "complex",
         "highly_complex",
-    ]
+    )
 
-    VALID_MASK_TYPES = [
+    VALID_MASK_TYPES = (
         "random_voxels",
         "missing_traces",
         "missing_inlines",
         "missing_crosslines",
         "missing_blocks",
-    ]
+    )
 
     # =====================================================
     # INITIALIZATION
@@ -113,6 +122,7 @@ class SyntheticSeismicDataset(Dataset):
         missing_probability=0.30,
         geological_mode="random",
         mask_mode="random",
+        seed=42,
     ):
         """
         Parameters
@@ -153,6 +163,10 @@ class SyntheticSeismicDataset(Dataset):
                 missing_crosslines
                 missing_blocks
                 random
+
+        seed : int
+            Base random seed used to make sample generation
+            deterministic with respect to the sample index.
         """
 
         super().__init__()
@@ -163,7 +177,10 @@ class SyntheticSeismicDataset(Dataset):
 
         self.num_samples = int(num_samples)
 
-        self.cube_size = tuple(cube_size)
+        self.cube_size = tuple(
+            int(dimension)
+            for dimension in cube_size
+        )
 
         self.missing_probability = float(
             missing_probability
@@ -176,6 +193,8 @@ class SyntheticSeismicDataset(Dataset):
         self.mask_mode = str(
             mask_mode
         )
+
+        self.seed = int(seed)
 
         # =================================================
         # EXPECTED SAMPLE SHAPE
@@ -210,23 +229,68 @@ class SyntheticSeismicDataset(Dataset):
         )
 
         # =================================================
-        # DATA STORAGE
+        # METADATA CACHE
+        # =================================================
+        #
+        # IMPORTANT:
+        # We do NOT store seismic tensors here.
+        #
+        # Only the generated metadata are retained.
+        #
+        # This requires very little RAM compared with storing
+        # complete seismic volumes.
         # =================================================
 
-        self.inputs = []
-        self.targets = []
-        self.masks = []
-        self.velocities = []
+        self.mask_types = [None] * self.num_samples
 
-        # Experiment metadata
-        self.mask_types = []
-        self.geological_modes = []
+        self.geological_modes = [None] * self.num_samples
 
         # =================================================
-        # DATASET GENERATION
+        # DATASET INFORMATION
         # =================================================
 
-        self._generate_dataset()
+        print()
+        print("=" * 60)
+        print("LAZY SYNTHETIC DATASET INITIALIZED")
+        print("=" * 60)
+
+        print(
+            f"Number of Samples    : "
+            f"{self.num_samples}"
+        )
+
+        print(
+            f"Cube Size            : "
+            f"{self.cube_size}"
+        )
+
+        print(
+            f"Missing Probability  : "
+            f"{self.missing_probability}"
+        )
+
+        print(
+            f"Geological Mode      : "
+            f"{self.geological_mode}"
+        )
+
+        print(
+            f"Mask Mode            : "
+            f"{self.mask_mode}"
+        )
+
+        print(
+            f"Random Seed          : "
+            f"{self.seed}"
+        )
+
+        print(
+            "Generation Strategy  : "
+            "On-demand / lazy"
+        )
+
+        print("=" * 60)
+        print()
 
     # =====================================================
     # CONFIGURATION VALIDATION
@@ -272,27 +336,62 @@ class SyntheticSeismicDataset(Dataset):
 
         if self.geological_mode not in (
             self.VALID_GEOLOGICAL_MODES
-            + ["random"]
+            + ("random",)
         ):
 
             raise ValueError(
                 "Unsupported geological_mode: "
                 f"{self.geological_mode}. "
                 "Supported modes are: "
-                f"{self.VALID_GEOLOGICAL_MODES + ['random']}"
+                f"{self.VALID_GEOLOGICAL_MODES + ('random',)}"
             )
 
         if self.mask_mode not in (
             self.VALID_MASK_TYPES
-            + ["random"]
+            + ("random",)
         ):
 
             raise ValueError(
                 "Unsupported mask_mode: "
                 f"{self.mask_mode}. "
                 "Supported modes are: "
-                f"{self.VALID_MASK_TYPES + ['random']}"
+                f"{self.VALID_MASK_TYPES + ('random',)}"
             )
+
+    # =====================================================
+    # SAMPLE SEED
+    # =====================================================
+
+    def _set_sample_seed(self, idx):
+        """
+        Set deterministic random seeds for one sample.
+
+        The seed depends on:
+
+            base dataset seed
+            sample index
+
+        This makes sample generation reproducible without
+        storing the generated tensors.
+        """
+
+        sample_seed = (
+            self.seed
+            + int(idx) * 100003
+        )
+
+        # Python random
+        random.seed(sample_seed)
+
+        # NumPy random
+        np.random.seed(
+            sample_seed % (2**32 - 1)
+        )
+
+        # PyTorch random
+        torch.manual_seed(sample_seed)
+
+        return sample_seed
 
     # =====================================================
     # SELECT GEOLOGICAL MODE
@@ -340,15 +439,22 @@ class SyntheticSeismicDataset(Dataset):
     def _to_float_tensor(data):
         """
         Convert data to a float32 PyTorch tensor.
+
+        Existing tensors are converted without moving
+        them to GPU.
         """
 
         if isinstance(data, torch.Tensor):
 
-            return data.float()
+            return data.to(
+                dtype=torch.float32,
+                device="cpu",
+            )
 
-        return torch.tensor(
+        return torch.as_tensor(
             data,
-            dtype=torch.float32
+            dtype=torch.float32,
+            device="cpu",
         )
 
     # =====================================================
@@ -363,6 +469,15 @@ class SyntheticSeismicDataset(Dataset):
         """
         Validate tensor shape and finite values.
         """
+
+        if not isinstance(
+            tensor,
+            torch.Tensor
+        ):
+
+            raise RuntimeError(
+                f"{name} must be a PyTorch tensor."
+            )
 
         if tuple(tensor.shape) != self.expected_shape:
 
@@ -392,10 +507,12 @@ class SyntheticSeismicDataset(Dataset):
 
         self._validate_tensor(
             velocity,
-            "Generated velocity model"
+            "Generated velocity model",
         )
 
-        if torch.any(velocity <= 0):
+        if torch.any(
+            velocity <= 0
+        ):
 
             raise RuntimeError(
                 "Velocity model must contain "
@@ -416,7 +533,7 @@ class SyntheticSeismicDataset(Dataset):
 
         self._validate_tensor(
             mask,
-            "Generated sampling mask"
+            "Generated sampling mask",
         )
 
         unique_values = torch.unique(mask)
@@ -433,178 +550,130 @@ class SyntheticSeismicDataset(Dataset):
             )
 
     # =====================================================
-    # GENERATE DATASET
+    # GENERATE ONE SAMPLE
     # =====================================================
 
-    def _generate_dataset(self):
+    def _generate_sample(self, idx):
         """
-        Generate all synthetic dataset samples.
+        Generate one synthetic seismic sample.
+
+        Nothing is permanently stored in the dataset.
+
+        Returns
+        -------
+        tuple
+            input_cube,
+            target_cube,
+            mask,
+            velocity_model,
+            mask_type,
+            geological_mode
         """
 
-        print()
-        print("=" * 60)
-        print("GENERATING SYNTHETIC DATASET")
-        print("=" * 60)
+        # -------------------------------------------------
+        # Make this sample reproducible
+        # -------------------------------------------------
 
-        print(
-            f"Number of Samples    : "
-            f"{self.num_samples}"
+        self._set_sample_seed(idx)
+
+        # -------------------------------------------------
+        # Geological structure
+        # -------------------------------------------------
+
+        geological_mode = (
+            self._select_geological_mode()
         )
 
-        print(
-            f"Cube Size            : "
-            f"{self.cube_size}"
+        # -------------------------------------------------
+        # Complete seismic target
+        # -------------------------------------------------
+
+        target = self.generator.generate(
+            mode=geological_mode
         )
 
-        print(
-            f"Missing Probability  : "
-            f"{self.missing_probability}"
+        target = self._to_float_tensor(
+            target
         )
 
-        print(
-            f"Geological Mode      : "
-            f"{self.geological_mode}"
+        self._validate_tensor(
+            target,
+            "Generated seismic target",
         )
 
-        print(
-            f"Mask Mode            : "
-            f"{self.mask_mode}"
+        # -------------------------------------------------
+        # Velocity model
+        # -------------------------------------------------
+
+        velocity = (
+            self.velocity_generator.generate()
         )
 
-        # =================================================
-        # GENERATE EACH SAMPLE
-        # =================================================
-
-        for sample_index in range(
-            self.num_samples
-        ):
-
-            # ---------------------------------------------
-            # Geological structure
-            # ---------------------------------------------
-
-            geological_mode = (
-                self._select_geological_mode()
-            )
-
-            # ---------------------------------------------
-            # Complete seismic target
-            # ---------------------------------------------
-
-            target = self.generator.generate(
-                mode=geological_mode
-            )
-
-            target = self._to_float_tensor(
-                target
-            )
-
-            self._validate_tensor(
-                target,
-                "Generated seismic target"
-            )
-
-            # ---------------------------------------------
-            # Velocity model
-            # ---------------------------------------------
-
-            velocity = (
-                self.velocity_generator.generate()
-            )
-
-            velocity = self._to_float_tensor(
-                velocity
-            )
-
-            self._validate_velocity(
-                velocity
-            )
-
-            # ---------------------------------------------
-            # Sampling mask
-            # ---------------------------------------------
-
-            mask_type = (
-                self._select_mask_type()
-            )
-
-            mask = (
-                self.mask_generator.generate(
-                    mask_type=mask_type
-                )
-            )
-
-            mask = self._to_float_tensor(
-                mask
-            )
-
-            self._validate_mask(
-                mask
-            )
-
-            # ---------------------------------------------
-            # Simulate incomplete acquisition
-            # ---------------------------------------------
-
-            input_cube = target * mask
-
-            self._validate_tensor(
-                input_cube,
-                "Generated input seismic volume"
-            )
-
-            # ---------------------------------------------
-            # Store sample
-            # ---------------------------------------------
-
-            self.inputs.append(
-                input_cube
-            )
-
-            self.targets.append(
-                target
-            )
-
-            self.masks.append(
-                mask
-            )
-
-            self.velocities.append(
-                velocity
-            )
-
-            # Store metadata
-            self.mask_types.append(
-                mask_type
-            )
-
-            self.geological_modes.append(
-                geological_mode
-            )
-
-            # ---------------------------------------------
-            # Progress information
-            # ---------------------------------------------
-
-            print(
-                f"Generated sample "
-                f"{sample_index + 1}/"
-                f"{self.num_samples}"
-                f" | Geology: {geological_mode}"
-                f" | Mask: {mask_type}"
-            )
-
-        # =================================================
-        # COMPLETION MESSAGE
-        # =================================================
-
-        print("=" * 60)
-
-        print(
-            "Synthetic dataset generation completed."
+        velocity = self._to_float_tensor(
+            velocity
         )
 
-        print("=" * 60)
+        self._validate_velocity(
+            velocity
+        )
+
+        # -------------------------------------------------
+        # Sampling mask
+        # -------------------------------------------------
+
+        mask_type = (
+            self._select_mask_type()
+        )
+
+        mask = (
+            self.mask_generator.generate(
+                mask_type=mask_type
+            )
+        )
+
+        mask = self._to_float_tensor(
+            mask
+        )
+
+        self._validate_mask(
+            mask
+        )
+
+        # -------------------------------------------------
+        # Simulate incomplete acquisition
+        # -------------------------------------------------
+
+        input_cube = (
+            target * mask
+        )
+
+        self._validate_tensor(
+            input_cube,
+            "Generated input seismic volume",
+        )
+
+        # -------------------------------------------------
+        # Store only metadata
+        # -------------------------------------------------
+
+        self.mask_types[idx] = mask_type
+
+        self.geological_modes[idx] = (
+            geological_mode
+        )
+
+        # -------------------------------------------------
+        # Return current sample
+        # -------------------------------------------------
+
+        return (
+            input_cube,
+            target,
+            mask,
+            velocity,
+            mask_type,
+            geological_mode,
+        )
 
     # =====================================================
     # DATASET LENGTH
@@ -623,10 +692,12 @@ class SyntheticSeismicDataset(Dataset):
 
     def __getitem__(
         self,
-        idx
+        idx,
     ):
         """
-        Return one synthetic seismic sample.
+        Generate and return one synthetic seismic sample.
+
+        Samples are generated on demand.
 
         Returns
         -------
@@ -664,11 +735,40 @@ class SyntheticSeismicDataset(Dataset):
                 [C, D, H, W]
         """
 
-        return (
-            self.inputs[idx],
-            self.targets[idx],
-            self.masks[idx],
-            self.velocities[idx],
-            self.mask_types[idx],
-            self.geological_modes[idx],
-        )
+        # -------------------------------------------------
+        # Handle tensor indices
+        # -------------------------------------------------
+
+        if isinstance(
+            idx,
+            torch.Tensor
+        ):
+
+            idx = idx.item()
+
+        # -------------------------------------------------
+        # Convert index to integer
+        # -------------------------------------------------
+
+        idx = int(idx)
+
+        # -------------------------------------------------
+        # Validate index
+        # -------------------------------------------------
+
+        if idx < 0:
+
+            idx += self.num_samples
+
+        if idx < 0 or idx >= self.num_samples:
+
+            raise IndexError(
+                f"Dataset index {idx} is out of range "
+                f"for dataset of size {self.num_samples}."
+            )
+
+        # -------------------------------------------------
+        # Generate sample on demand
+        # -------------------------------------------------
+
+        return self._generate_sample(idx)

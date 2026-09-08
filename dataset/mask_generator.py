@@ -6,6 +6,8 @@
 Physics-Informed 3D Encoder–Decoder Framework
 with Predictive Uncertainty for Seismic Data Reconstruction
 
+Purpose
+-------
 Generates binary sampling masks for simulating incomplete
 3D seismic acquisition.
 
@@ -42,7 +44,8 @@ Supported mask types
     random
         Randomly selects one of the above patterns.
 
-Author: Ormin Joseph
+Author:
+Ormin Joseph
 =========================================================
 """
 
@@ -71,13 +74,26 @@ class SeismicMaskGenerator:
     """
 
     # =====================================================
+    # SUPPORTED MASK TYPES
+    # =====================================================
+
+    SUPPORTED_MASK_TYPES = (
+        "random_voxels",
+        "missing_traces",
+        "missing_inlines",
+        "missing_crosslines",
+        "missing_blocks",
+    )
+
+    # =====================================================
     # INITIALIZATION
     # =====================================================
 
     def __init__(
         self,
         cube_size=(64, 128, 128),
-        missing_probability=0.30
+        missing_probability=0.30,
+        seed=None,
     ):
         """
         Parameters
@@ -89,58 +105,96 @@ class SeismicMaskGenerator:
 
         missing_probability : float
             Approximate proportion of data to remove.
+
+        seed : int or None
+            Optional seed for reproducible mask generation.
         """
 
-        self.cube_size = tuple(
-            cube_size
-        )
+        # =================================================
+        # VALIDATE CUBE SIZE
+        # =================================================
 
-        self.depth = (
-            self.cube_size[0]
-        )
+        if (
+            not isinstance(cube_size, tuple)
+            or len(cube_size) != 3
+        ):
+            raise ValueError(
+                "cube_size must be a tuple "
+                "(depth, height, width)."
+            )
 
-        self.height = (
-            self.cube_size[1]
-        )
+        if any(
+            not isinstance(dimension, int)
+            or isinstance(dimension, bool)
+            or dimension <= 0
+            for dimension in cube_size
+        ):
+            raise ValueError(
+                "All cube dimensions must be "
+                "positive integers."
+            )
 
-        self.width = (
-            self.cube_size[2]
-        )
+        # =================================================
+        # VALIDATE MISSING PROBABILITY
+        # =================================================
+
+        if not isinstance(
+            missing_probability,
+            (int, float),
+        ) or isinstance(
+            missing_probability,
+            bool,
+        ):
+            raise TypeError(
+                "missing_probability must be a real number."
+            )
+
+        if not (
+            0.0
+            <= float(missing_probability)
+            < 1.0
+        ):
+            raise ValueError(
+                "missing_probability must be "
+                "between 0.0 and 1.0."
+            )
+
+        # =================================================
+        # STORE CONFIGURATION
+        # =================================================
+
+        self.cube_size = cube_size
+
+        self.depth = cube_size[0]
+        self.height = cube_size[1]
+        self.width = cube_size[2]
 
         self.missing_probability = float(
             missing_probability
         )
 
+        self.seed = seed
+
         # =================================================
-        # VALIDATION
+        # LOCAL RANDOM-NUMBER GENERATOR
         # =================================================
 
-        if len(self.cube_size) != 3:
+        # A local RNG prevents this generator from changing
+        # Python's global random-number state.
+        #
+        # This is particularly useful for the lazy dataset,
+        # where each sample can be generated independently.
+        self.rng = random.Random(seed)
 
-            raise ValueError(
-                "cube_size must contain exactly "
-                "(depth, height, width)."
-            )
+        # -------------------------------------------------
+        # PyTorch generator for tensor-based random
+        # operations.
+        # -------------------------------------------------
 
-        if any(
-            dimension <= 0
-            for dimension in self.cube_size
-        ):
+        self.torch_generator = torch.Generator()
 
-            raise ValueError(
-                "All cube dimensions must be positive."
-            )
-
-        if not (
-            0.0
-            <= self.missing_probability
-            < 1.0
-        ):
-
-            raise ValueError(
-                "missing_probability must be "
-                "between 0.0 and 1.0."
-            )
+        if seed is not None:
+            self.torch_generator.manual_seed(seed)
 
     # =====================================================
     # CREATE COMPLETE MASK
@@ -149,14 +203,21 @@ class SeismicMaskGenerator:
     def _ones_mask(self):
         """
         Create a mask representing completely observed data.
+
+        Returns
+        -------
+        torch.Tensor
+            Shape [1, D, H, W].
         """
 
         return torch.ones(
-            1,
-            self.depth,
-            self.height,
-            self.width,
-            dtype=torch.float32
+            (
+                1,
+                self.depth,
+                self.height,
+                self.width,
+            ),
+            dtype=torch.float32,
         )
 
     # =====================================================
@@ -168,20 +229,30 @@ class SeismicMaskGenerator:
         Randomly remove individual seismic voxels.
 
         This produces an independent Bernoulli sampling mask.
+
+        Returns
+        -------
+        torch.Tensor
+            Shape [1, D, H, W].
         """
 
-        mask = (
-            torch.rand(
+        random_values = torch.rand(
+            (
                 1,
                 self.depth,
                 self.height,
-                self.width
-            )
-            >
-            self.missing_probability
+                self.width,
+            ),
+            generator=self.torch_generator,
+            dtype=torch.float32,
         )
 
-        return mask.float()
+        mask = (
+            random_values
+            >= self.missing_probability
+        )
+
+        return mask.to(dtype=torch.float32)
 
     # =====================================================
     # MISSING SEISMIC TRACES
@@ -192,12 +263,18 @@ class SeismicMaskGenerator:
         Remove complete seismic traces.
 
         A seismic trace extends along the depth dimension.
+
         Therefore, for a selected trace location:
 
             mask[:, :, h, w] = 0
 
-        The approximate number of removed traces is determined
-        by missing_probability.
+        The approximate number of removed traces is
+        determined by missing_probability.
+
+        Returns
+        -------
+        torch.Tensor
+            Shape [1, D, H, W].
         """
 
         mask = self._ones_mask()
@@ -218,18 +295,16 @@ class SeismicMaskGenerator:
 
         number_missing = min(
             number_missing,
-            total_traces
+            total_traces,
         )
 
         if number_missing == 0:
-
             return mask
 
         selected = torch.randperm(
-            total_traces
-        )[
-            :number_missing
-        ]
+            total_traces,
+            generator=self.torch_generator,
+        )[:number_missing]
 
         inline_indices = (
             selected
@@ -247,7 +322,7 @@ class SeismicMaskGenerator:
             :,
             :,
             inline_indices,
-            crossline_indices
+            crossline_indices,
         ] = 0.0
 
         return mask
@@ -263,6 +338,11 @@ class SeismicMaskGenerator:
         For a selected inline index h:
 
             mask[:, :, h, :] = 0
+
+        Returns
+        -------
+        torch.Tensor
+            Shape [1, D, H, W].
         """
 
         mask = self._ones_mask()
@@ -277,24 +357,22 @@ class SeismicMaskGenerator:
 
         number_missing = min(
             number_missing,
-            self.height
+            self.height,
         )
 
         if number_missing == 0:
-
             return mask
 
         selected = torch.randperm(
-            self.height
-        )[
-            :number_missing
-        ]
+            self.height,
+            generator=self.torch_generator,
+        )[:number_missing]
 
         mask[
             :,
             :,
             selected,
-            :
+            :,
         ] = 0.0
 
         return mask
@@ -310,6 +388,11 @@ class SeismicMaskGenerator:
         For a selected crossline index w:
 
             mask[:, :, :, w] = 0
+
+        Returns
+        -------
+        torch.Tensor
+            Shape [1, D, H, W].
         """
 
         mask = self._ones_mask()
@@ -324,24 +407,22 @@ class SeismicMaskGenerator:
 
         number_missing = min(
             number_missing,
-            self.width
+            self.width,
         )
 
         if number_missing == 0:
-
             return mask
 
         selected = torch.randperm(
-            self.width
-        )[
-            :number_missing
-        ]
+            self.width,
+            generator=self.torch_generator,
+        )[:number_missing]
 
         mask[
             :,
             :,
             :,
-            selected
+            selected,
         ] = 0.0
 
         return mask
@@ -354,8 +435,13 @@ class SeismicMaskGenerator:
         """
         Remove a contiguous approximately cubic 3D region.
 
-        The block volume is chosen to approximately match the
-        requested missing probability.
+        The block dimensions are chosen to approximately
+        correspond to the requested missing probability.
+
+        Returns
+        -------
+        torch.Tensor
+            Shape [1, D, H, W].
         """
 
         mask = self._ones_mask()
@@ -377,12 +463,11 @@ class SeismicMaskGenerator:
         )
 
         if target_missing <= 0:
-
             return mask
 
-        # -------------------------------------------------
-        # Determine approximately cubic block dimensions.
-        # -------------------------------------------------
+        # =================================================
+        # DETERMINE APPROXIMATELY CUBIC BLOCK DIMENSIONS
+        # =================================================
 
         scale = (
             self.missing_probability
@@ -399,8 +484,8 @@ class SeismicMaskGenerator:
                         *
                         scale
                     )
-                )
-            )
+                ),
+            ),
         )
 
         block_height = max(
@@ -413,8 +498,8 @@ class SeismicMaskGenerator:
                         *
                         scale
                     )
-                )
-            )
+                ),
+            ),
         )
 
         block_width = max(
@@ -427,32 +512,41 @@ class SeismicMaskGenerator:
                         *
                         scale
                     )
-                )
+                ),
+            ),
+        )
+
+        # =================================================
+        # RANDOM STARTING POSITION
+        # =================================================
+
+        if self.depth == block_depth:
+            start_depth = 0
+        else:
+            start_depth = self.rng.randint(
+                0,
+                self.depth - block_depth,
             )
-        )
 
-        # -------------------------------------------------
-        # Random starting position.
-        # -------------------------------------------------
+        if self.height == block_height:
+            start_height = 0
+        else:
+            start_height = self.rng.randint(
+                0,
+                self.height - block_height,
+            )
 
-        start_depth = random.randint(
-            0,
-            self.depth - block_depth
-        )
+        if self.width == block_width:
+            start_width = 0
+        else:
+            start_width = self.rng.randint(
+                0,
+                self.width - block_width,
+            )
 
-        start_height = random.randint(
-            0,
-            self.height - block_height
-        )
-
-        start_width = random.randint(
-            0,
-            self.width - block_width
-        )
-
-        # -------------------------------------------------
-        # Remove contiguous block.
-        # -------------------------------------------------
+        # =================================================
+        # REMOVE CONTIGUOUS BLOCK
+        # =================================================
 
         mask[
             :,
@@ -461,7 +555,7 @@ class SeismicMaskGenerator:
             start_height:
             start_height + block_height,
             start_width:
-            start_width + block_width
+            start_width + block_width,
         ] = 0.0
 
         return mask
@@ -472,7 +566,7 @@ class SeismicMaskGenerator:
 
     def generate(
         self,
-        mask_type="random"
+        mask_type="random",
     ):
         """
         Generate a binary seismic sampling mask.
@@ -490,35 +584,35 @@ class SeismicMaskGenerator:
 
         Returns
         -------
-
-        mask : torch.Tensor
-
-            Shape:
-
-                [1, D, H, W]
+        torch.Tensor
+            Shape [1, D, H, W].
         """
 
-        available_types = [
-            "random_voxels",
-            "missing_traces",
-            "missing_inlines",
-            "missing_crosslines",
-            "missing_blocks"
-        ]
+        # =================================================
+        # VALIDATE MASK TYPE
+        # =================================================
 
-        # -------------------------------------------------
+        if not isinstance(
+            mask_type,
+            str,
+        ):
+            raise TypeError(
+                "mask_type must be a string."
+            )
+
+        # =================================================
         # RANDOMLY SELECT MASK TYPE
-        # -------------------------------------------------
+        # =================================================
 
         if mask_type == "random":
 
-            mask_type = random.choice(
-                available_types
+            mask_type = self.rng.choice(
+                self.SUPPORTED_MASK_TYPES
             )
 
-        # -------------------------------------------------
+        # =================================================
         # GENERATE SELECTED MASK
-        # -------------------------------------------------
+        # =================================================
 
         if mask_type == "random_voxels":
 
@@ -544,5 +638,92 @@ class SeismicMaskGenerator:
             "Unsupported mask_type: "
             f"{mask_type}. "
             "Supported types are: "
-            f"{available_types + ['random']}"
+            f"{list(self.SUPPORTED_MASK_TYPES) + ['random']}"
         )
+
+    # =====================================================
+    # MASK VALIDATION
+    # =====================================================
+
+    @staticmethod
+    def validate_mask(
+        mask,
+    ):
+        """
+        Validate a generated seismic sampling mask.
+
+        Parameters
+        ----------
+        mask : torch.Tensor
+            Expected shape:
+
+                [1, D, H, W]
+
+        Returns
+        -------
+        bool
+            True when the mask is valid.
+        """
+
+        # -------------------------------------------------
+        # Type validation
+        # -------------------------------------------------
+
+        if not isinstance(
+            mask,
+            torch.Tensor,
+        ):
+            raise TypeError(
+                "mask must be a torch.Tensor."
+            )
+
+        # -------------------------------------------------
+        # Dimension validation
+        # -------------------------------------------------
+
+        if mask.ndim != 4:
+            raise ValueError(
+                "mask must have shape "
+                "[C,D,H,W]. "
+                f"Received: {tuple(mask.shape)}."
+            )
+
+        # -------------------------------------------------
+        # Single-channel validation
+        # -------------------------------------------------
+
+        if mask.shape[0] != 1:
+            raise ValueError(
+                "mask must contain exactly one "
+                f"channel. Received {mask.shape[0]}."
+            )
+
+        # -------------------------------------------------
+        # Numerical validation
+        # -------------------------------------------------
+
+        if not torch.isfinite(mask).all():
+            raise ValueError(
+                "Mask contains NaN or Inf."
+            )
+
+        # -------------------------------------------------
+        # Binary-value validation
+        #
+        # Valid values:
+        #
+        #       0.0 = missing
+        #       1.0 = observed
+        # -------------------------------------------------
+
+        if not torch.all(
+            (mask == 0.0)
+            |
+            (mask == 1.0)
+        ):
+            raise ValueError(
+                "Mask must contain only binary values "
+                "0.0 and 1.0."
+            )
+
+        return True
