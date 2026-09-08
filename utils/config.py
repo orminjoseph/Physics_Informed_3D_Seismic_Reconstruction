@@ -105,7 +105,7 @@ EXPERIMENT_NAME = "synthetic_training"
 
 # Number of synthetic seismic volumes.
 
-SYNTHETIC_NUM_SAMPLES = 10
+SYNTHETIC_NUM_SAMPLES = 100
 
 
 # Synthetic seismic cube dimensions:
@@ -183,7 +183,7 @@ BATCH_SIZE = 1
 
 # Number of training epochs.
 
-NUM_EPOCHS = 5
+NUM_EPOCHS = 100
 
 
 # Initial learning rate for Adam.
@@ -202,7 +202,7 @@ WEIGHT_DECAY = 1e-5
 
 # Fraction of available data reserved for validation.
 
-VALIDATION_SPLIT = 0.10
+VALIDATION_SPLIT = 0.20
 
 
 # =========================================================
@@ -221,7 +221,7 @@ SAVE_EVERY = 5
 # Number of consecutive validation epochs without
 # improvement before training is stopped.
 
-PATIENCE = 10
+PATIENCE = 15
 
 
 # =========================================================
