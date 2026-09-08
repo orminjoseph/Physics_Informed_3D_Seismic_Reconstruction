@@ -78,7 +78,7 @@ def main():
         train_loader,
         val_loader,
         epochs=NUM_EPOCHS,
-        resume=False
+        resume=True
     )
 
 
