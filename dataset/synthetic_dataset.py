@@ -33,6 +33,16 @@ IMPORTANT:
     Samples are generated lazily inside __getitem__.
     The complete dataset is NOT stored in RAM.
 
+Reproducibility:
+    Every sample is generated deterministically from:
+
+        base dataset seed
+        +
+        sample index
+
+    Separate deterministic seeds are assigned to the
+    geological, velocity, and mask generation processes.
+
 Author: Ormin Joseph
 =========================================================
 """
@@ -212,20 +222,17 @@ class SyntheticSeismicDataset(Dataset):
         self._validate_configuration()
 
         # =================================================
-        # GENERATORS
+        # GEOLOGICAL GENERATOR
+        # =================================================
+        #
+        # GeologicalGenerator does not maintain an
+        # independent random generator. Its stochastic
+        # operations therefore use the deterministic
+        # PyTorch/NumPy seeds established for each sample.
         # =================================================
 
         self.generator = GeologicalGenerator(
             cube_size=self.cube_size
-        )
-
-        self.velocity_generator = VelocityGenerator(
-            cube_size=self.cube_size
-        )
-
-        self.mask_generator = SeismicMaskGenerator(
-            cube_size=self.cube_size,
-            missing_probability=self.missing_probability,
         )
 
         # =================================================
@@ -362,33 +369,60 @@ class SyntheticSeismicDataset(Dataset):
     # SAMPLE SEED
     # =====================================================
 
-    def _set_sample_seed(self, idx):
+    def _get_sample_seed(self, idx):
         """
-        Set deterministic random seeds for one sample.
+        Generate a deterministic base seed for one sample.
 
-        The seed depends on:
+        The seed depends only on:
 
-            base dataset seed
+            dataset seed
             sample index
 
-        This makes sample generation reproducible without
-        storing the generated tensors.
+        Therefore, the same dataset seed and sample index
+        always produce the same sample.
         """
 
-        sample_seed = (
+        return (
             self.seed
             + int(idx) * 100003
         )
 
+    # =====================================================
+    # SET GLOBAL SAMPLE SEEDS
+    # =====================================================
+
+    def _set_sample_seed(self, idx):
+        """
+        Set deterministic global random seeds for one sample.
+
+        These seeds control randomness used by components
+        that rely on the global random number generators.
+
+        Independent generators such as VelocityGenerator
+        and SeismicMaskGenerator receive their own explicit
+        sample-specific seeds elsewhere.
+        """
+
+        sample_seed = self._get_sample_seed(idx)
+
+        # -------------------------------------------------
         # Python random
+        # -------------------------------------------------
+
         random.seed(sample_seed)
 
+        # -------------------------------------------------
         # NumPy random
+        # -------------------------------------------------
+
         np.random.seed(
             sample_seed % (2**32 - 1)
         )
 
+        # -------------------------------------------------
         # PyTorch random
+        # -------------------------------------------------
+
         torch.manual_seed(sample_seed)
 
         return sample_seed
@@ -559,6 +593,9 @@ class SyntheticSeismicDataset(Dataset):
 
         Nothing is permanently stored in the dataset.
 
+        Every random component is deterministically seeded
+        from the sample index.
+
         Returns
         -------
         tuple
@@ -571,10 +608,26 @@ class SyntheticSeismicDataset(Dataset):
         """
 
         # -------------------------------------------------
-        # Make this sample reproducible
+        # Establish deterministic sample seed
         # -------------------------------------------------
 
-        self._set_sample_seed(idx)
+        sample_seed = self._set_sample_seed(idx)
+
+        # -------------------------------------------------
+        # Use separate deterministic seeds for components
+        # -------------------------------------------------
+        #
+        # Keeping separate seed streams prevents one generator
+        # from changing the random sequence of another.
+        # -------------------------------------------------
+
+        velocity_seed = (
+            sample_seed + 1
+        )
+
+        mask_seed = (
+            sample_seed + 2
+        )
 
         # -------------------------------------------------
         # Geological structure
@@ -604,9 +657,20 @@ class SyntheticSeismicDataset(Dataset):
         # -------------------------------------------------
         # Velocity model
         # -------------------------------------------------
+        #
+        # IMPORTANT:
+        # Create a sample-specific generator with an explicit
+        # seed. This avoids dependence on the generator's
+        # previous internal random state.
+        # -------------------------------------------------
+
+        velocity_generator = VelocityGenerator(
+            cube_size=self.cube_size,
+            seed=velocity_seed,
+        )
 
         velocity = (
-            self.velocity_generator.generate()
+            velocity_generator.generate()
         )
 
         velocity = self._to_float_tensor(
@@ -618,15 +682,30 @@ class SyntheticSeismicDataset(Dataset):
         )
 
         # -------------------------------------------------
-        # Sampling mask
+        # Sampling mask type
         # -------------------------------------------------
 
         mask_type = (
             self._select_mask_type()
         )
 
+        # -------------------------------------------------
+        # Sampling mask
+        # -------------------------------------------------
+        #
+        # Create a sample-specific mask generator with an
+        # explicit seed so repeated calls to dataset[idx]
+        # produce the same mask.
+        # -------------------------------------------------
+
+        mask_generator = SeismicMaskGenerator(
+            cube_size=self.cube_size,
+            missing_probability=self.missing_probability,
+            seed=mask_seed,
+        )
+
         mask = (
-            self.mask_generator.generate(
+            mask_generator.generate(
                 mask_type=mask_type
             )
         )
