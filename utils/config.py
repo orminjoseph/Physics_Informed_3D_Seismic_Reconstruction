@@ -105,7 +105,7 @@ EXPERIMENT_NAME = "synthetic_training"
 
 # Number of synthetic seismic volumes.
 
-SYNTHETIC_NUM_SAMPLES = 100
+SYNTHETIC_NUM_SAMPLES = 1000
 
 
 # Synthetic seismic cube dimensions:
@@ -183,7 +183,7 @@ BATCH_SIZE = 1
 
 # Number of training epochs.
 
-NUM_EPOCHS = 100
+NUM_EPOCHS = 5
 
 
 # Initial learning rate for Adam.
