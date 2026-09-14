@@ -105,7 +105,7 @@ EXPERIMENT_NAME = "synthetic_training"
 
 # Number of synthetic seismic volumes.
 
-SYNTHETIC_NUM_SAMPLES = 1000
+SYNTHETIC_NUM_SAMPLES = 100
 
 
 # Synthetic seismic cube dimensions:
