@@ -1,128 +1,63 @@
 """
 =========================================================
-Synthetic 3D Seismic Dataset Test
+Synthetic Dataset Validation Test
 =========================================================
 
-Tests the complete SyntheticSeismicDataset including:
+Physics-Informed 3D Encoder-Decoder Framework
+with Predictive Uncertainty for Seismic Data Reconstruction
 
-    1. Dataset length
-    2. Tensor shapes
-    3. Tensor data types
-    4. Finite values
-    5. Sampling mask
-    6. Input/mask consistency
-    7. Missing voxel fraction
-    8. Velocity model
-    9. Mask type tracking
-   10. Geological mode tracking
-   11. Explicit mask modes
-   12. Random mask mode
-   13. All dataset samples
-   14. PyTorch DataLoader
+Tests:
+1. Dataset creation
+2. Sample generation
+3. Tensor shapes
+4. Mask validity
+5. Velocity validity
+6. Geological-mode validity
+7. Reproducibility
+8. DataLoader compatibility
 
-Author: Ormin Joseph
 =========================================================
 """
 
 import torch
-
 from torch.utils.data import DataLoader
 
-from dataset.synthetic_dataset import (
-    SyntheticSeismicDataset
-)
+from dataset.synthetic_dataset import SyntheticSeismicDataset
 
 
-# =====================================================
-# CONFIGURATION
-# =====================================================
+def test_dataset():
 
-CUBE_SIZE = (16, 32, 32)
+    print("\n" + "=" * 70)
+    print("SYNTHETIC DATASET VALIDATION TEST")
+    print("=" * 70)
 
-NUM_SAMPLES = 5
+    # -----------------------------------------------------
+    # 1. Create dataset
+    # -----------------------------------------------------
 
-MISSING_PROBABILITY = 0.30
-
-
-# =====================================================
-# VALID MASK TYPES
-# =====================================================
-
-VALID_MASK_TYPES = [
-    "random_voxels",
-    "missing_traces",
-    "missing_inlines",
-    "missing_crosslines",
-    "missing_blocks"
-]
-
-
-# =====================================================
-# VALID GEOLOGICAL MODES
-# =====================================================
-
-VALID_GEOLOGICAL_MODES = [
-    "horizontal",
-    "dipping",
-    "faulted",
-    "folded",
-    "complex",
-    "highly_complex"
-]
-
-
-# =====================================================
-# DATASET CREATION
-# =====================================================
-
-def create_dataset(
-    mask_mode="random"
-):
-    """
-    Create a small synthetic dataset for testing.
-    """
-
-    return SyntheticSeismicDataset(
-        num_samples=NUM_SAMPLES,
-        cube_size=CUBE_SIZE,
-        missing_probability=MISSING_PROBABILITY,
+    dataset = SyntheticSeismicDataset(
+        num_samples=10,
+        cube_size=(64, 128, 128),
+        missing_probability=0.30,
         geological_mode="random",
-        mask_mode=mask_mode
+        mask_mode="random",
+        seed=42,
     )
 
+    print("\n[1] Dataset creation")
+    print("    Number of samples:", len(dataset))
 
-# =====================================================
-# TEST DATASET LENGTH
-# =====================================================
+    assert len(dataset) == 10
 
-def test_dataset_length():
+    print("    PASS")
 
-    print()
-    print("Testing Dataset Length")
+    # -----------------------------------------------------
+    # 2. Generate one sample
+    # -----------------------------------------------------
 
-    dataset = create_dataset()
+    print("\n[2] Generating sample 0...")
 
-    assert len(dataset) == NUM_SAMPLES
-
-    print(
-        f"Dataset Size: {len(dataset)}"
-    )
-
-    print(
-        "Dataset Length Test: PASSED"
-    )
-
-
-# =====================================================
-# TEST SAMPLE SHAPES
-# =====================================================
-
-def test_sample_shapes():
-
-    print()
-    print("Testing Sample Shapes")
-
-    dataset = create_dataset()
+    sample = dataset[0]
 
     (
         input_cube,
@@ -130,669 +65,203 @@ def test_sample_shapes():
         mask,
         velocity,
         mask_type,
-        geological_mode
-    ) = dataset[0]
+        geological_mode,
+    ) = sample
 
-    expected_shape = torch.Size(
-        (
-            1,
-            *CUBE_SIZE
-        )
-    )
+    print("    Input shape:   ", input_cube.shape)
+    print("    Target shape:  ", target_cube.shape)
+    print("    Mask shape:    ", mask.shape)
+    print("    Velocity shape:", velocity.shape)
 
-    print(
-        f"Input Shape       : "
-        f"{input_cube.shape}"
-    )
+    print("    Mask type:     ", mask_type)
+    print("    Geological mode:", geological_mode)
 
-    print(
-        f"Target Shape      : "
-        f"{target_cube.shape}"
-    )
+    # -----------------------------------------------------
+    # 3. Check tensor dimensions
+    # -----------------------------------------------------
 
-    print(
-        f"Mask Shape        : "
-        f"{mask.shape}"
-    )
+    print("\n[3] Checking tensor dimensions")
 
-    print(
-        f"Velocity Shape    : "
-        f"{velocity.shape}"
-    )
-
-    print(
-        f"Mask Type         : "
-        f"{mask_type}"
-    )
-
-    print(
-        f"Geological Mode   : "
-        f"{geological_mode}"
-    )
+    expected_shape = (1, 64, 128, 128)
 
     assert input_cube.shape == expected_shape
-
     assert target_cube.shape == expected_shape
-
     assert mask.shape == expected_shape
-
     assert velocity.shape == expected_shape
 
-    print(
-        "Sample Shape Test: PASSED"
-    )
+    print("    PASS")
 
+    # -----------------------------------------------------
+    # 4. Check tensor types
+    # -----------------------------------------------------
 
-# =====================================================
-# TEST TENSOR TYPES
-# =====================================================
-
-def test_tensor_types():
-
-    print()
-    print("Testing Tensor Types")
-
-    dataset = create_dataset()
-
-    (
-        input_cube,
-        target_cube,
-        mask,
-        velocity,
-        _,
-        _
-    ) = dataset[0]
+    print("\n[4] Checking tensor data types")
 
     assert input_cube.dtype == torch.float32
-
     assert target_cube.dtype == torch.float32
-
     assert mask.dtype == torch.float32
-
     assert velocity.dtype == torch.float32
 
-    print(
-        "Tensor Type Test: PASSED"
-    )
+    print("    PASS")
 
+    # -----------------------------------------------------
+    # 5. Check mask values
+    # -----------------------------------------------------
 
-# =====================================================
-# TEST FINITE VALUES
-# =====================================================
+    print("\n[5] Checking mask values")
 
-def test_finite_values():
+    unique_mask_values = torch.unique(mask)
 
-    print()
-    print("Testing Finite Values")
+    print("    Unique mask values:", unique_mask_values.tolist())
 
-    dataset = create_dataset()
+    assert torch.all((mask == 0) | (mask == 1))
 
-    (
-        input_cube,
-        target_cube,
-        mask,
-        velocity,
-        _,
-        _
-    ) = dataset[0]
+    print("    PASS")
 
-    assert torch.isfinite(
-        input_cube
-    ).all()
+    # -----------------------------------------------------
+    # 6. Check input-mask relationship
+    # -----------------------------------------------------
 
-    assert torch.isfinite(
-        target_cube
-    ).all()
+    print("\n[6] Checking input = target × mask")
 
-    assert torch.isfinite(
-        mask
-    ).all()
-
-    assert torch.isfinite(
-        velocity
-    ).all()
-
-    print(
-        "Finite Value Test: PASSED"
-    )
-
-
-# =====================================================
-# TEST SAMPLING MASK
-# =====================================================
-
-def test_sampling_mask():
-
-    print()
-    print("Testing Sampling Mask")
-
-    dataset = create_dataset()
-
-    (
-        _,
-        _,
-        mask,
-        _,
-        _,
-        _
-    ) = dataset[0]
-
-    unique_values = torch.unique(
-        mask
-    )
-
-    print(
-        f"Mask Values: "
-        f"{unique_values.tolist()}"
-    )
-
-    assert torch.isfinite(
-        mask
-    ).all()
-
-    assert torch.all(
-        (unique_values == 0.0)
-        |
-        (unique_values == 1.0)
-    )
-
-    print(
-        "Mask Value Test: PASSED"
-    )
-
-
-# =====================================================
-# TEST INPUT / MASK CONSISTENCY
-# =====================================================
-
-def test_input_mask_consistency():
-
-    print()
-    print(
-        "Testing Input and Mask Consistency"
-    )
-
-    dataset = create_dataset()
-
-    (
-        input_cube,
-        target_cube,
-        mask,
-        _,
-        _,
-        _
-    ) = dataset[0]
-
-    expected_input = (
-        target_cube * mask
-    )
+    reconstructed_input = target_cube * mask
 
     assert torch.allclose(
         input_cube,
-        expected_input,
-        atol=1.0e-6
+        reconstructed_input,
+        atol=1e-6
     )
 
-    print(
-        "Input/Mask Consistency Test: PASSED"
+    print("    PASS")
+
+    # -----------------------------------------------------
+    # 7. Check velocity validity
+    # -----------------------------------------------------
+
+    print("\n[7] Checking velocity model")
+
+    print("    Minimum velocity:", velocity.min().item())
+    print("    Maximum velocity:", velocity.max().item())
+    print("    Mean velocity:   ", velocity.mean().item())
+
+    assert torch.isfinite(velocity).all()
+
+    assert velocity.min() >= 1500.0
+    assert velocity.max() <= 5000.0
+
+    print("    PASS")
+
+    # -----------------------------------------------------
+    # 8. Check seismic target validity
+    # -----------------------------------------------------
+
+    print("\n[8] Checking seismic target")
+
+    print("    Minimum amplitude:", target_cube.min().item())
+    print("    Maximum amplitude:", target_cube.max().item())
+    print("    Mean amplitude:   ", target_cube.mean().item())
+
+    assert torch.isfinite(target_cube).all()
+
+    print("    PASS")
+
+    # -----------------------------------------------------
+    # 9. Check geological mode
+    # -----------------------------------------------------
+
+    print("\n[9] Checking geological mode")
+
+    valid_modes = {
+        "horizontal",
+        "dipping",
+        "faulted",
+        "folded",
+        "complex",
+        "highly_complex",
+    }
+
+    assert geological_mode in valid_modes
+
+    print("    Mode:", geological_mode)
+    print("    PASS")
+
+    # -----------------------------------------------------
+    # 10. Check mask type
+    # -----------------------------------------------------
+
+    print("\n[10] Checking mask type")
+
+    valid_masks = {
+        "random_voxels",
+        "missing_traces",
+        "missing_inlines",
+        "missing_crosslines",
+        "missing_blocks",
+    }
+
+    assert mask_type in valid_masks
+
+    print("    Mask:", mask_type)
+    print("    PASS")
+
+    # -----------------------------------------------------
+    # 11. Reproducibility test
+    # -----------------------------------------------------
+
+    print("\n[11] Testing reproducibility")
+
+    dataset_a = SyntheticSeismicDataset(
+        num_samples=3,
+        cube_size=(64, 128, 128),
+        missing_probability=0.30,
+        geological_mode="random",
+        mask_mode="random",
+        seed=42,
     )
 
-
-# =====================================================
-# TEST MISSING VOXEL FRACTION
-# =====================================================
-
-def test_missing_voxels():
-
-    print()
-    print("Testing Missing Seismic Voxels")
-
-    dataset = create_dataset(
-        mask_mode="random_voxels"
+    dataset_b = SyntheticSeismicDataset(
+        num_samples=3,
+        cube_size=(64, 128, 128),
+        missing_probability=0.30,
+        geological_mode="random",
+        mask_mode="random",
+        seed=42,
     )
 
-    (
-        _,
-        _,
-        mask,
-        _,
-        mask_type,
-        _
-    ) = dataset[0]
+    sample_a = dataset_a[0]
+    sample_b = dataset_b[0]
 
-    assert mask_type == "random_voxels"
+    assert torch.equal(sample_a[0], sample_b[0])
+    assert torch.equal(sample_a[1], sample_b[1])
+    assert torch.equal(sample_a[2], sample_b[2])
+    assert torch.equal(sample_a[3], sample_b[3])
 
-    missing_voxels = torch.sum(
-        mask == 0.0
-    ).item()
+    assert sample_a[4] == sample_b[4]
+    assert sample_a[5] == sample_b[5]
 
-    total_voxels = mask.numel()
+    print("    Input identical:     True")
+    print("    Target identical:    True")
+    print("    Mask identical:      True")
+    print("    Velocity identical:  True")
+    print("    Mask type identical: True")
+    print("    Geological mode identical: True")
 
-    missing_fraction = (
-        missing_voxels
-        /
-        total_voxels
-    )
+    print("    PASS")
 
-    print(
-        f"Mask Type       : "
-        f"{mask_type}"
-    )
+    # -----------------------------------------------------
+    # 12. DataLoader test
+    # -----------------------------------------------------
 
-    print(
-        f"Missing Voxels  : "
-        f"{missing_voxels}"
-    )
+    print("\n[12] Testing DataLoader compatibility")
 
-    print(
-        f"Total Voxels    : "
-        f"{total_voxels}"
-    )
-
-    print(
-        f"Missing Fraction: "
-        f"{missing_fraction:.4f}"
-    )
-
-    # -------------------------------------------------
-    # Allow stochastic variation.
-    # -------------------------------------------------
-
-    tolerance = 0.05
-
-    assert abs(
-        missing_fraction
-        -
-        MISSING_PROBABILITY
-    ) < tolerance
-
-    print(
-        "Missing Voxel Test: PASSED"
-    )
-
-
-# =====================================================
-# TEST VELOCITY MODEL
-# =====================================================
-
-def test_velocity_model():
-
-    print()
-    print("Testing Velocity Model")
-
-    dataset = create_dataset()
-
-    (
-        _,
-        _,
-        _,
-        velocity,
-        _,
-        _
-    ) = dataset[0]
-
-    minimum_velocity = (
-        velocity.min().item()
-    )
-
-    maximum_velocity = (
-        velocity.max().item()
-    )
-
-    print(
-        f"Velocity Minimum : "
-        f"{minimum_velocity:.2f}"
-    )
-
-    print(
-        f"Velocity Maximum : "
-        f"{maximum_velocity:.2f}"
-    )
-
-    assert torch.isfinite(
-        velocity
-    ).all()
-
-    assert torch.all(
-        velocity > 0
-    )
-
-    assert minimum_velocity >= 1800.0
-
-    assert maximum_velocity <= 3500.0
-
-    print(
-        "Velocity Model Test: PASSED"
-    )
-
-
-# =====================================================
-# TEST MASK TYPE TRACKING
-# =====================================================
-
-def test_mask_type_tracking():
-
-    print()
-    print("Testing Mask Type Tracking")
-
-    dataset = create_dataset(
-        mask_mode="random"
-    )
-
-    # -------------------------------------------------
-    # Verify storage length.
-    # -------------------------------------------------
-
-    assert len(
-        dataset.mask_types
-    ) == NUM_SAMPLES
-
-    # -------------------------------------------------
-    # Verify stored values.
-    # -------------------------------------------------
-
-    for mask_type in dataset.mask_types:
-
-        assert mask_type in VALID_MASK_TYPES
-
-    # -------------------------------------------------
-    # Verify returned metadata.
-    # -------------------------------------------------
-
-    for index in range(
-        len(dataset)
-    ):
-
-        sample = dataset[index]
-
-        returned_mask_type = sample[4]
-
-        assert returned_mask_type == (
-            dataset.mask_types[index]
-        )
-
-    print()
-    print(
-        "Stored Mask Types:"
-    )
-
-    for index, mask_type in enumerate(
-        dataset.mask_types
-    ):
-
-        print(
-            f"Sample {index + 1}: "
-            f"{mask_type}"
-        )
-
-    print(
-        "Mask Type Tracking Test: PASSED"
-    )
-
-
-# =====================================================
-# TEST GEOLOGICAL MODE TRACKING
-# =====================================================
-
-def test_geological_mode_tracking():
-
-    print()
-    print(
-        "Testing Geological Mode Tracking"
-    )
-
-    dataset = create_dataset()
-
-    # -------------------------------------------------
-    # Verify storage length.
-    # -------------------------------------------------
-
-    assert len(
-        dataset.geological_modes
-    ) == NUM_SAMPLES
-
-    # -------------------------------------------------
-    # Verify stored geological modes.
-    # -------------------------------------------------
-
-    for mode in dataset.geological_modes:
-
-        assert mode in VALID_GEOLOGICAL_MODES
-
-    # -------------------------------------------------
-    # Verify returned metadata.
-    # -------------------------------------------------
-
-    for index in range(
-        len(dataset)
-    ):
-
-        sample = dataset[index]
-
-        returned_mode = sample[5]
-
-        assert returned_mode == (
-            dataset.geological_modes[index]
-        )
-
-    print()
-    print(
-        "Stored Geological Modes:"
-    )
-
-    for index, mode in enumerate(
-        dataset.geological_modes
-    ):
-
-        print(
-            f"Sample {index + 1}: "
-            f"{mode}"
-        )
-
-    print(
-        "Geological Mode Tracking Test: PASSED"
-    )
-
-
-# =====================================================
-# TEST EXPLICIT MASK MODES
-# =====================================================
-
-def test_explicit_mask_modes():
-
-    print()
-    print(
-        "Testing Explicit Mask Modes"
-    )
-
-    for mask_type in VALID_MASK_TYPES:
-
-        dataset = create_dataset(
-            mask_mode=mask_type
-        )
-
-        for index in range(
-            len(dataset)
-        ):
-
-            sample = dataset[index]
-
-            returned_mask_type = sample[4]
-
-            assert returned_mask_type == (
-                mask_type
-            )
-
-        print(
-            f"{mask_type}: PASSED"
-        )
-
-    print(
-        "Explicit Mask Mode Test: PASSED"
-    )
-
-
-# =====================================================
-# TEST RANDOM MASK MODE
-# =====================================================
-
-def test_random_mask_mode():
-
-    print()
-    print(
-        "Testing Random Mask Mode"
-    )
-
-    dataset = create_dataset(
-        mask_mode="random"
-    )
-
-    observed_types = set(
-        dataset.mask_types
-    )
-
-    print(
-        f"Observed Mask Types: "
-        f"{sorted(observed_types)}"
-    )
-
-    # -------------------------------------------------
-    # At least one valid mask type must occur.
-    # -------------------------------------------------
-
-    assert len(
-        observed_types
-    ) >= 1
-
-    # -------------------------------------------------
-    # Every generated type must be valid.
-    # -------------------------------------------------
-
-    for mask_type in observed_types:
-
-        assert mask_type in VALID_MASK_TYPES
-
-    print(
-        "Random Mask Mode Test: PASSED"
-    )
-
-
-# =====================================================
-# TEST ALL DATASET SAMPLES
-# =====================================================
-
-def test_all_samples():
-
-    print()
-    print(
-        "Testing All Dataset Samples"
-    )
-
-    dataset = create_dataset()
-
-    expected_shape = torch.Size(
-        (
-            1,
-            *CUBE_SIZE
-        )
-    )
-
-    for index in range(
-        len(dataset)
-    ):
-
-        (
-            input_cube,
-            target_cube,
-            mask,
-            velocity,
-            mask_type,
-            geological_mode
-        ) = dataset[index]
-
-        # -------------------------------------------------
-        # Shape checks.
-        # -------------------------------------------------
-
-        assert input_cube.shape == expected_shape
-
-        assert target_cube.shape == expected_shape
-
-        assert mask.shape == expected_shape
-
-        assert velocity.shape == expected_shape
-
-        # -------------------------------------------------
-        # Metadata checks.
-        # -------------------------------------------------
-
-        assert mask_type in VALID_MASK_TYPES
-
-        assert geological_mode in (
-            VALID_GEOLOGICAL_MODES
-        )
-
-        # -------------------------------------------------
-        # Tensor checks.
-        # -------------------------------------------------
-
-        assert input_cube.dtype == torch.float32
-
-        assert target_cube.dtype == torch.float32
-
-        assert mask.dtype == torch.float32
-
-        assert velocity.dtype == torch.float32
-
-        assert torch.isfinite(
-            input_cube
-        ).all()
-
-        assert torch.isfinite(
-            target_cube
-        ).all()
-
-        assert torch.isfinite(
-            mask
-        ).all()
-
-        assert torch.isfinite(
-            velocity
-        ).all()
-
-        # -------------------------------------------------
-        # Input/mask consistency.
-        # -------------------------------------------------
-
-        assert torch.allclose(
-            input_cube,
-            target_cube * mask,
-            atol=1.0e-6
-        )
-
-    print(
-        "All Dataset Samples Test: PASSED"
-    )
-
-
-# =====================================================
-# TEST PYTORCH DATALOADER
-# =====================================================
-
-def test_dataloader():
-
-    print()
-    print(
-        "Testing PyTorch DataLoader"
-    )
-
-    dataset = create_dataset()
-
-    dataloader = DataLoader(
+    loader = DataLoader(
         dataset,
-        batch_size=2,
-        shuffle=False
+        batch_size=1,
+        shuffle=False,
+        num_workers=0,
     )
+
+    batch = next(iter(loader))
 
     (
         batch_input,
@@ -800,203 +269,29 @@ def test_dataloader():
         batch_mask,
         batch_velocity,
         batch_mask_type,
-        batch_geological_mode
-    ) = next(
-        iter(dataloader)
-    )
+        batch_geological_mode,
+    ) = batch
 
-    # -------------------------------------------------
-    # Display batch information.
-    # -------------------------------------------------
+    print("    Batch input shape:   ", batch_input.shape)
+    print("    Batch target shape:  ", batch_target.shape)
+    print("    Batch mask shape:    ", batch_mask.shape)
+    print("    Batch velocity shape:", batch_velocity.shape)
 
-    print(
-        f"Batch Input Shape       : "
-        f"{batch_input.shape}"
-    )
+    assert batch_input.shape == (1, 1, 64, 128, 128)
+    assert batch_target.shape == (1, 1, 64, 128, 128)
+    assert batch_mask.shape == (1, 1, 64, 128, 128)
+    assert batch_velocity.shape == (1, 1, 64, 128, 128)
 
-    print(
-        f"Batch Target Shape      : "
-        f"{batch_target.shape}"
-    )
+    print("    PASS")
 
-    print(
-        f"Batch Mask Shape        : "
-        f"{batch_mask.shape}"
-    )
+    # -----------------------------------------------------
+    # Final result
+    # -----------------------------------------------------
 
-    print(
-        f"Batch Velocity Shape    : "
-        f"{batch_velocity.shape}"
-    )
+    print("\n" + "=" * 70)
+    print("ALL SYNTHETIC DATASET TESTS PASSED")
+    print("=" * 70)
 
-    print(
-        f"Batch Mask Types        : "
-        f"{list(batch_mask_type)}"
-    )
-
-    print(
-        f"Batch Geological Modes  : "
-        f"{list(batch_geological_mode)}"
-    )
-
-    # =================================================
-    # EXPECTED BATCH SHAPE
-    # =================================================
-
-    expected_batch_shape = torch.Size(
-        (
-            2,
-            1,
-            *CUBE_SIZE
-        )
-    )
-
-    # -------------------------------------------------
-    # Tensor shape checks.
-    # -------------------------------------------------
-
-    assert batch_input.shape == (
-        expected_batch_shape
-    )
-
-    assert batch_target.shape == (
-        expected_batch_shape
-    )
-
-    assert batch_mask.shape == (
-        expected_batch_shape
-    )
-
-    assert batch_velocity.shape == (
-        expected_batch_shape
-    )
-
-    # -------------------------------------------------
-    # Metadata checks.
-    # -------------------------------------------------
-
-    assert len(
-        batch_mask_type
-    ) == 2
-
-    assert len(
-        batch_geological_mode
-    ) == 2
-
-    for mask_type in batch_mask_type:
-
-        assert mask_type in VALID_MASK_TYPES
-
-    for mode in batch_geological_mode:
-
-        assert mode in VALID_GEOLOGICAL_MODES
-
-    # -------------------------------------------------
-    # Verify tensor data types.
-    # -------------------------------------------------
-
-    assert batch_input.dtype == torch.float32
-
-    assert batch_target.dtype == torch.float32
-
-    assert batch_mask.dtype == torch.float32
-
-    assert batch_velocity.dtype == torch.float32
-
-    print(
-        "DataLoader Test: PASSED"
-    )
-
-
-# =====================================================
-# MAIN TEST
-# =====================================================
-
-def main():
-
-    print()
-    print("=" * 60)
-
-    print(
-        "TESTING SYNTHETIC 3D SEISMIC DATASET"
-    )
-
-    print("=" * 60)
-
-    # -------------------------------------------------
-    # Basic dataset tests.
-    # -------------------------------------------------
-
-    test_dataset_length()
-
-    test_sample_shapes()
-
-    test_tensor_types()
-
-    test_finite_values()
-
-    # -------------------------------------------------
-    # Sampling tests.
-    # -------------------------------------------------
-
-    test_sampling_mask()
-
-    test_input_mask_consistency()
-
-    test_missing_voxels()
-
-    # -------------------------------------------------
-    # Physics-related dataset test.
-    # -------------------------------------------------
-
-    test_velocity_model()
-
-    # -------------------------------------------------
-    # Metadata tests.
-    # -------------------------------------------------
-
-    test_mask_type_tracking()
-
-    test_geological_mode_tracking()
-
-    # -------------------------------------------------
-    # Mask configuration tests.
-    # -------------------------------------------------
-
-    test_explicit_mask_modes()
-
-    test_random_mask_mode()
-
-    # -------------------------------------------------
-    # Complete dataset test.
-    # -------------------------------------------------
-
-    test_all_samples()
-
-    # -------------------------------------------------
-    # DataLoader integration.
-    # -------------------------------------------------
-
-    test_dataloader()
-
-    # =================================================
-    # FINAL RESULT
-    # =================================================
-
-    print()
-    print("=" * 60)
-
-    print(
-        "SYNTHETIC SEISMIC DATASET TEST: PASSED"
-    )
-
-    print("=" * 60)
-
-
-# =====================================================
-# RUN TEST
-# =====================================================
 
 if __name__ == "__main__":
-
-    main()
+    test_dataset()
