@@ -66,11 +66,11 @@ from models.network import Network3D
 # BASELINE METHODS
 # =========================================================
 
-from evaluation.baseline_nearest_neighbor import (
+from evaluation.baselines.baseline_nearest_neighbor import (
     nearest_neighbor_reconstruction
 )
 
-from evaluation.baseline_linear_interpolation import (
+from evaluation.baselines.baseline_linear_interpolation import (
     linear_interpolation_reconstruction
 )
 

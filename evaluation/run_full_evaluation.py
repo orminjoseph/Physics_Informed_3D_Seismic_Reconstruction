@@ -34,7 +34,7 @@ from evaluation.uncertainty_analysis import (
     analyze_uncertainty
 )
 
-from evaluation.compare_with_baselines import (
+from evaluation.baselines.compare_with_baselines import (
     main as baseline_comparison
 )
 
