@@ -61,11 +61,18 @@ MISSING_RATES = [
 GEOLOGICAL_MODES = [
     "horizontal",
     "dipping",
+    "faulted",
+    "folded",
+    "complex",
+    "highly_complex",
 ]
 
 MASK_MODES = [
     "random_voxels",
     "missing_traces",
+    "missing_inlines",
+    "missing_crosslines",
+    "missing_blocks",
 ]
 
 SEEDS = [
