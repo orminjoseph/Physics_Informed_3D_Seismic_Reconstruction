@@ -577,7 +577,7 @@ DEVICE = "cpu"
 
 # Root output directory.
 
-OUTPUT_ROOT = (
+OUTPUT_ROOT =(
     "/content/drive/MyDrive/"
     "Physics_Informed_3D_Seismic_Reconstruction/"
     "outputs"

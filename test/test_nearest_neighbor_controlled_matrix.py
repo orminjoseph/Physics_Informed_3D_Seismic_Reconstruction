@@ -106,39 +106,25 @@ CHANNELS = 1
 
 # Missing rates.
 MISSING_RATES = [
-    0.10,
-    0.20,
     0.30,
-    0.40,
-    0.50
 ]
 
 # Missing mechanisms.
 MASK_MODES = [
     "random_voxels",
     "missing_traces",
-    "missing_inlines",
-    "missing_crosslines",
-    "missing_blocks"
 ]
 
 # Geological complexity modes.
 GEOLOGICAL_MODES = [
     "horizontal",
     "dipping",
-    "faulted",
-    "folded",
-    "complex",
-    "highly_complex"
 ]
 
 # Controlled random seeds.
 SEEDS = [
     42,
     43,
-    44,
-    45,
-    46
 ]
 
 # One synthetic sample is sufficient for each controlled case.

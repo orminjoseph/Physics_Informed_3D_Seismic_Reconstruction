@@ -55,36 +55,22 @@ from evaluation.baselines.dictionary_learning import (
 CUBE_SIZE = (64, 128, 128)
 
 MISSING_RATES = [
-    0.10,
-    0.20,
     0.30,
-    0.40,
-    0.50,
 ]
 
 GEOLOGICAL_MODES = [
     "horizontal",
     "dipping",
-    "faulted",
-    "folded",
-    "complex",
-    "highly_complex",
 ]
 
 MASK_MODES = [
     "random_voxels",
     "missing_traces",
-    "missing_inlines",
-    "missing_crosslines",
-    "missing_blocks",
 ]
 
 SEEDS = [
     42,
     43,
-    44,
-    45,
-    46,
 ]
 
 

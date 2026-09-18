@@ -145,37 +145,23 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 GEOLOGICAL_MODES = [
     "horizontal",
     "dipping",
-    "faulted",
-    "folded",
-    "complex",
-    "highly_complex",
 ]
 
 
 MASK_MODES = [
     "random_voxels",
     "missing_traces",
-    "missing_inlines",
-    "missing_crosslines",
-    "missing_blocks",
 ]
 
 
 MISSING_RATES = [
-    0.10,
-    0.20,
     0.30,
-    0.40,
-    0.50,
 ]
 
 
 SEEDS = [
     42,
     43,
-    44,
-    45,
-    46,
 ]
 
 

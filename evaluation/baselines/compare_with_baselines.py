@@ -1,1045 +1,1974 @@
 """
-=========================================================
-Baseline Comparison
-=========================================================
+======================================================================
+COMMON SEVEN-METHOD RECONSTRUCTION COMPARISON
+======================================================================
 
 Physics-Informed 3D Encoder-Decoder Framework
-with Predictive Uncertainty for Seismic Data Reconstruction.
+with Predictive Uncertainty for Seismic Data Reconstruction
 
-Compare:
+Purpose
+-------
+Compare the six classical reconstruction baselines and the proposed
+Physics-Informed 3D Encoder-Decoder model under identical input
+conditions.
 
+Methods
+-------
 1. Nearest Neighbor
 2. Linear Interpolation
-3. Physics-Informed 3D Network
+3. f-x Prediction
+4. Compressive Sensing
+5. Curvelet POCS
+6. Dictionary Learning
+7. Proposed Physics-Informed 3D Encoder-Decoder
 
-The active experiment and output directories are controlled
-by utils.config.
+Important
+---------
+This script is NOT the 750-case controlled experimental matrix.
 
-Expected experiment structure:
+The dedicated controlled-matrix scripts are responsible for the
+large-scale 750-case experiments.
 
-    outputs/
-        <EXPERIMENT_NAME>/
-            checkpoints/
-                best_model.pth
-            reports/
-                baseline_comparison.csv
+This script performs a common side-by-side comparison using exactly
+the same:
 
-Dataset output convention:
-
-    corrupted/input
     target
-    mask
-    velocity_model
+    corrupted input
+    observation mask
 
-Predictor output convention:
+for every reconstruction method.
 
-    reconstruction
-    travel_time
-    predictive_uncertainty
-    aleatoric_std
+Common metrics
+--------------
+    MAE
+    RMSE
+    PSNR
+    SNR
+    SSIM
+    Missing-region MAE
+    Missing-region RMSE
+    Runtime
+    Observed-data preservation error
+
+Proposed-model-specific quantities
+----------------------------------
+    Aleatoric variance
+    Epistemic variance
+    Predictive variance
+    Predictive standard deviation
+
+Input convention
+----------------
+    (C, D, H, W)
+
+Mask convention
+---------------
+    1 = observed
+    0 = missing
 
 Author: Ormin Joseph
-=========================================================
+======================================================================
 """
 
-
-# =========================================================
+# =====================================================================
 # IMPORTS
-# =========================================================
+# =====================================================================
 
 import csv
-import os
+import random
+import time
+from pathlib import Path
 
 import numpy as np
 import torch
 
-
-# =========================================================
-# MODEL AND INFERENCE
-# =========================================================
-
-from inference.predictor import Predictor
-from models.network import Network3D
-
-
-# =========================================================
-# BASELINE METHODS
-# =========================================================
+from dataset.synthetic_dataset import SyntheticSeismicDataset
 
 from evaluation.baselines.baseline_nearest_neighbor import (
-    nearest_neighbor_reconstruction
+    nearest_neighbor_reconstruction,
 )
 
 from evaluation.baselines.baseline_linear_interpolation import (
-    linear_interpolation_reconstruction
+    linear_interpolation_reconstruction,
 )
 
+from evaluation.baselines.fx_prediction import (
+    fx_prediction_reconstruction,
+)
 
-# =========================================================
-# RECONSTRUCTION METRICS
-# =========================================================
+from evaluation.baselines.compressive_sensing import (
+    compressive_sensing_reconstruction,
+)
+
+from evaluation.baselines.curvelet_pocs import (
+    curvelet_pocs_reconstruction,
+)
+
+from evaluation.baselines.dictionary_learning import (
+    dictionary_learning_reconstruction,
+)
+
+from models.network import Network3D
+
+from models.mc_dropout import MCDropout3D
+
+from models.predictive_uncertainty import (
+    PredictiveUncertaintyEstimator,
+)
 
 from metrics.reconstruction_metrics import (
     mae,
     rmse,
     psnr,
     snr,
-    ssim
+    ssim,
 )
-
-
-# =========================================================
-# CONFIGURATION
-# =========================================================
 
 from utils.config import (
-    EXPERIMENT_NAME,
-    DATASET_MODE,
-    CHECKPOINT_DIR,
+    MC_DROPOUT_SAMPLES,
+)
+
+
+# =====================================================================
+# PROJECT ROOT
+# =====================================================================
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+# =====================================================================
+# EXPERIMENT CONFIGURATION
+# =====================================================================
+
+# -------------------------------------------------------------
+# Standard controlled benchmark cube
+# -------------------------------------------------------------
+
+CUBE_SIZE = (
+    64,
+    128,
+    128,
+)
+
+# -------------------------------------------------------------
+# Single common comparison case
+#
+# The same target, corrupted input and mask are passed to
+# every reconstruction method.
+# -------------------------------------------------------------
+
+NUM_SAMPLES = 1
+
+MISSING_RATE = 0.30
+
+GEOLOGICAL_MODE = "folded"
+
+MASK_MODE = "missing_crosslines"
+
+SEED = 42
+
+
+# =====================================================================
+# PROPOSED MODEL CONFIGURATION
+# =====================================================================
+
+CHECKPOINT = (
+    PROJECT_ROOT
+    / "outputs"
+    / "synthetic_training"
+    / "checkpoints"
+    / "best_model.pth"
+)
+
+MC_SAMPLES = MC_DROPOUT_SAMPLES
+
+
+# =====================================================================
+# OUTPUT CONFIGURATION
+# =====================================================================
+
+REPORT_DIR = (
+    PROJECT_ROOT
+    / "outputs"
+    / "synthetic_training"
+    / "reports"
+)
+
+REPORT_DIR.mkdir(
+    parents=True,
+    exist_ok=True,
+)
+
+
+RESULTS_FILE = (
     REPORT_DIR
+    / "baseline_comparison.csv"
+)
+
+SUMMARY_FILE = (
+    REPORT_DIR
+    / "baseline_comparison_summary.csv"
 )
 
 
-# =========================================================
-# DATASET BUILDER
-# =========================================================
+# =====================================================================
+# NUMERICAL TOLERANCE
+# =====================================================================
 
-from dataset.build_dataset import build_dataset
+OBSERVED_PRESERVATION_TOLERANCE = 1.0e-6
 
 
-# =========================================================
-# EXPERIMENT CHECKPOINT
-# =========================================================
+# =====================================================================
+# DEVICE
+# =====================================================================
 
-CHECKPOINT = os.path.join(
-    CHECKPOINT_DIR,
-    "best_model.pth"
+DEVICE = torch.device(
+    "cuda"
+    if torch.cuda.is_available()
+    else "cpu"
 )
 
 
-# =========================================================
-# EVALUATION FUNCTION
-# =========================================================
+# =====================================================================
+# REPRODUCIBILITY
+# =====================================================================
 
-def calculate_metrics(
-    prediction,
-    target
-):
+def set_seed(seed):
     """
-    Compute reconstruction metrics.
-
-    Both prediction and target must have identical shapes.
+    Set deterministic random seeds.
     """
 
-    if prediction.shape != target.shape:
+    random.seed(seed)
 
-        raise RuntimeError(
-            "Prediction and target shapes do not match:\n"
-            f"Prediction: {tuple(prediction.shape)}\n"
-            f"Target    : {tuple(target.shape)}"
-        )
+    np.random.seed(seed)
 
-    return [
+    torch.manual_seed(seed)
 
-        mae(
-            prediction,
-            target
-        ).item(),
-
-        rmse(
-            prediction,
-            target
-        ).item(),
-
-        psnr(
-            prediction,
-            target
-        ).item(),
-
-        snr(
-            prediction,
-            target
-        ).item(),
-
-        ssim(
-            prediction,
-            target
-        ).item()
-
-    ]
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
-# =========================================================
-# VALIDATE METRIC RESULT
-# =========================================================
+# =====================================================================
+# METRIC CONVERSION
+# =====================================================================
 
-def validate_metrics(
-    metrics,
-    method_name
-):
+def metric_to_float(value):
     """
-    Validate that all calculated metrics are finite.
+    Convert a metric result to a Python float.
     """
 
-    metrics = np.asarray(
-        metrics,
-        dtype=np.float64
-    )
+    if isinstance(value, torch.Tensor):
 
-    if metrics.shape != (5,):
-
-        raise RuntimeError(
-            f"{method_name} returned an invalid "
-            f"metric vector with shape {metrics.shape}."
+        return float(
+            value.detach()
+            .cpu()
+            .item()
         )
 
-    if not np.all(
-        np.isfinite(metrics)
-    ):
+    if isinstance(value, np.ndarray):
 
-        raise RuntimeError(
-            f"{method_name} produced "
-            "non-finite metric values."
+        return float(
+            value.item()
         )
 
-    return metrics.tolist()
+    return float(value)
 
 
-# =========================================================
-# VALIDATE DATASET SAMPLE
-# =========================================================
+# =====================================================================
+# FINITE CHECK
+# =====================================================================
 
-def validate_sample(
-    sample,
-    patch_index
-):
+def tensor_is_finite(tensor):
     """
-    Validate the dataset sample structure.
-
-    Expected convention:
-
-        sample[0] -> corrupted/input
-        sample[1] -> target
-        sample[2] -> mask
-        sample[3] -> velocity_model
+    Return True when all tensor values are finite.
     """
 
-    if not isinstance(
-        sample,
-        (tuple, list)
-    ):
-
-        raise RuntimeError(
-            f"Dataset sample {patch_index + 1} "
-            "is not a tuple/list."
-        )
-
-    if len(sample) < 4:
-
-        raise RuntimeError(
-            f"Dataset sample {patch_index + 1} does not "
-            "contain the expected four components:\n"
-            "input, target, mask, velocity_model."
-        )
-
-
-# =========================================================
-# CONVERT TO FLOAT TENSOR
-# =========================================================
-
-def ensure_tensor(
-    value,
-    name
-):
-    """
-    Convert a dataset value to a float32 tensor.
-
-    The returned tensor is always CPU-resident at this stage.
-    """
-
-    if not isinstance(
-        value,
-        torch.Tensor
-    ):
-
-        value = torch.as_tensor(
-            value,
-            dtype=torch.float32
-        )
-
-    else:
-
-        value = value.detach().float()
-
-    if value.numel() == 0:
-
-        raise RuntimeError(
-            f"{name} is empty."
-        )
-
-    if not torch.isfinite(
-        value
-    ).all():
-
-        raise RuntimeError(
-            f"{name} contains non-finite values."
-        )
-
-    return value
-
-
-# =========================================================
-# VALIDATE MASK
-# =========================================================
-
-def validate_mask(
-    mask,
-    corrupted,
-    patch_index
-):
-    """
-    Validate the seismic observation mask.
-
-    Convention:
-
-        1.0 -> observed voxel
-        0.0 -> missing voxel
-
-    The mask must contain at least one observed voxel.
-    """
-
-    if mask.shape != corrupted.shape:
-
-        raise RuntimeError(
-            f"Mask shape does not match corrupted input "
-            f"for patch {patch_index + 1}:\n"
-            f"Input: {tuple(corrupted.shape)}\n"
-            f"Mask : {tuple(mask.shape)}"
-        )
-
-    unique_values = torch.unique(mask)
-
-    if unique_values.numel() == 0:
-
-        raise RuntimeError(
-            f"Mask for patch {patch_index + 1} is empty."
-        )
-
-    if not torch.all(
-        (unique_values == 0.0) |
-        (unique_values == 1.0)
-    ):
-
-        raise RuntimeError(
-            f"Mask for patch {patch_index + 1} contains "
-            "values other than 0.0 and 1.0:\n"
-            f"{unique_values.tolist()}"
-        )
-
-    observed = torch.count_nonzero(
-        mask > 0.5
-    ).item()
-
-    missing = torch.count_nonzero(
-        mask <= 0.5
-    ).item()
-
-    total = mask.numel()
-
-    if observed == 0:
-
-        raise RuntimeError(
-            f"Patch {patch_index + 1} contains no observed "
-            "voxels. Nearest-neighbor and linear "
-            "interpolation cannot be performed."
-        )
-
-    if missing == 0:
-
-        print(
-            "  Warning: patch contains no missing voxels."
-        )
-
-    print(
-        f"  Mask voxels : total={total}, "
-        f"observed={observed}, "
-        f"missing={missing}"
+    return bool(
+        torch.isfinite(tensor)
+        .all()
+        .item()
     )
 
 
-# =========================================================
-# ADD BATCH DIMENSION
-# =========================================================
-
-def add_batch_dimension(
-    tensor,
-    name
-):
-    """
-    Convert:
-
-        [C, D, H, W]
-
-    to:
-
-        [B, C, D, H, W]
-
-    If already 5D, leave unchanged.
-    """
-
-    if tensor.ndim == 4:
-
-        tensor = tensor.unsqueeze(0)
-
-    elif tensor.ndim == 5:
-
-        pass
-
-    else:
-
-        raise RuntimeError(
-            f"Unexpected {name} shape: "
-            f"{tuple(tensor.shape)}. "
-            "Expected [C,D,H,W] or [B,C,D,H,W]."
-        )
-
-    return tensor
-
-
-# =========================================================
+# =====================================================================
 # VALIDATE RECONSTRUCTION
-# =========================================================
+# =====================================================================
 
 def validate_reconstruction(
     reconstruction,
-    target,
-    method_name
+    corrupted,
+    mask,
 ):
     """
-    Validate reconstructed seismic volume.
+    Validate the reconstructed cube.
+
+    Checks:
+        1. Tensor type
+        2. Shape
+        3. Finite values
+        4. Observed-data preservation
     """
 
-    reconstruction = ensure_tensor(
+    if not isinstance(
         reconstruction,
-        f"{method_name} prediction"
-    )
-
-    reconstruction = add_batch_dimension(
-        reconstruction,
-        f"{method_name} prediction"
-    )
-
-    if reconstruction.shape != target.shape:
-
-        raise RuntimeError(
-            f"{method_name} reconstruction shape does not "
-            "match target shape:\n"
-            f"Reconstruction: {tuple(reconstruction.shape)}\n"
-            f"Target        : {tuple(target.shape)}"
-        )
-
-    return reconstruction
-
-
-# =========================================================
-# MAIN BASELINE COMPARISON
-# =========================================================
-
-def main():
-
-    print()
-    print("=" * 70)
-    print("BASELINE COMPARISON")
-    print("=" * 70)
-
-    # =====================================================
-    # DEVICE
-    # =====================================================
-
-    device = torch.device(
-        "cuda"
-        if torch.cuda.is_available()
-        else "cpu"
-    )
-
-    print()
-    print(
-        "Experiment :",
-        EXPERIMENT_NAME
-    )
-
-    print(
-        "Dataset    :",
-        DATASET_MODE
-    )
-
-    print(
-        "Device     :",
-        device
-    )
-
-    print(
-        "Checkpoint :",
-        CHECKPOINT
-    )
-
-    # =====================================================
-    # CHECKPOINT VALIDATION
-    # =====================================================
-
-    if not os.path.isfile(
-        CHECKPOINT
+        torch.Tensor,
     ):
 
-        raise FileNotFoundError(
-            "\nCheckpoint not found:\n"
-            f"{CHECKPOINT}\n\n"
-            "Make sure the selected experiment has "
-            "been trained and best_model.pth exists."
+        raise TypeError(
+            "Reconstruction must be a torch.Tensor."
         )
 
-    # =====================================================
-    # BUILD ACTIVE DATASET
-    # =====================================================
-
-    print()
-    print("=" * 70)
-    print("LOADING DATASET")
-    print("=" * 70)
-
-    dataset = build_dataset()
-
-    print()
-    print(
-        "Dataset Length:",
-        len(dataset)
-    )
-
-    if len(dataset) == 0:
+    if (
+        reconstruction.shape
+        != corrupted.shape
+    ):
 
         raise RuntimeError(
-            "Dataset is empty."
+            "Reconstruction shape mismatch. "
+            f"Expected {tuple(corrupted.shape)}, "
+            f"received {tuple(reconstruction.shape)}."
         )
 
-    # =====================================================
-    # NUMBER OF TEST PATCHES
-    # =====================================================
+    if not tensor_is_finite(
+        reconstruction
+    ):
 
-    NUM_TEST_PATCHES = min(
-        20,
-        len(dataset)
+        raise RuntimeError(
+            "Reconstruction contains NaN or Inf."
+        )
+
+    observed_difference = torch.max(
+        torch.abs(
+            reconstruction[mask == 1]
+            -
+            corrupted[mask == 1]
+        )
+    ).item()
+
+    if (
+        observed_difference
+        >
+        OBSERVED_PRESERVATION_TOLERANCE
+    ):
+
+        raise RuntimeError(
+            "Observed-data preservation failed. "
+            f"Maximum difference: "
+            f"{observed_difference:.6e}"
+        )
+
+    return float(
+        observed_difference
     )
 
-    print()
-    print(
-        "Test Patches  :",
-        NUM_TEST_PATCHES
+
+# =====================================================================
+# CALCULATE COMMON METRICS
+# =====================================================================
+
+def calculate_metrics(
+    reconstruction,
+    target,
+    mask,
+):
+    """
+    Calculate common reconstruction metrics.
+    """
+
+    # -------------------------------------------------------------
+    # Missing-region selection
+    # -------------------------------------------------------------
+
+    missing_selector = (
+        mask == 0
     )
 
-    # =====================================================
-    # STORAGE FOR METRICS
-    # =====================================================
+    missing_prediction = (
+        reconstruction[
+            missing_selector
+        ]
+    )
 
-    nn_all = []
+    missing_target = (
+        target[
+            missing_selector
+        ]
+    )
 
-    linear_all = []
+    if missing_prediction.numel() == 0:
 
-    network_all = []
+        raise RuntimeError(
+            "No missing samples are available "
+            "for missing-region metrics."
+        )
 
-    # =====================================================
-    # PHYSICS-INFORMED NETWORK
-    # =====================================================
+    # -------------------------------------------------------------
+    # Missing-region MAE
+    # -------------------------------------------------------------
+
+    missing_mae = float(
+        torch.mean(
+            torch.abs(
+                missing_prediction
+                -
+                missing_target
+            )
+        )
+        .item()
+    )
+
+    # -------------------------------------------------------------
+    # Missing-region RMSE
+    # -------------------------------------------------------------
+
+    missing_rmse = float(
+        torch.sqrt(
+            torch.mean(
+                (
+                    missing_prediction
+                    -
+                    missing_target
+                )
+                ** 2
+            )
+        )
+        .item()
+    )
+
+    # -------------------------------------------------------------
+    # Add batch and channel dimensions
+    # -------------------------------------------------------------
+
+    reconstruction_batch = (
+        reconstruction
+        .unsqueeze(0)
+        .to(DEVICE)
+    )
+
+    target_batch = (
+        target
+        .unsqueeze(0)
+        .to(DEVICE)
+    )
+
+    # -------------------------------------------------------------
+    # Global metrics
+    # -------------------------------------------------------------
+
+    metric_mae = metric_to_float(
+        mae(
+            reconstruction_batch,
+            target_batch,
+        )
+    )
+
+    metric_rmse = metric_to_float(
+        rmse(
+            reconstruction_batch,
+            target_batch,
+        )
+    )
+
+    metric_psnr = metric_to_float(
+        psnr(
+            reconstruction_batch,
+            target_batch,
+        )
+    )
+
+    metric_snr = metric_to_float(
+        snr(
+            reconstruction_batch,
+            target_batch,
+        )
+    )
+
+    metric_ssim = metric_to_float(
+        ssim(
+            reconstruction_batch,
+            target_batch,
+        )
+    )
+
+    return {
+        "missing_mae": missing_mae,
+        "missing_rmse": missing_rmse,
+        "MAE": metric_mae,
+        "RMSE": metric_rmse,
+        "PSNR": metric_psnr,
+        "SNR": metric_snr,
+        "SSIM": metric_ssim,
+    }
+
+
+# =====================================================================
+# LOAD PROPOSED MODEL
+# =====================================================================
+
+def load_proposed_model():
+    """
+    Load the frozen proposed-model checkpoint.
+    """
+
+    if not CHECKPOINT.is_file():
+
+        raise FileNotFoundError(
+            "\nProposed-model checkpoint was not found:\n"
+            f"{CHECKPOINT}\n"
+        )
 
     print()
     print("=" * 70)
-    print("LOADING PHYSICS-INFORMED NETWORK")
+    print("LOADING PROPOSED MODEL")
     print("=" * 70)
+
+    print()
+    print("Checkpoint:")
+    print(CHECKPOINT)
+
+    print()
+    print("Device:")
+    print(DEVICE)
+
+    # -------------------------------------------------------------
+    # Create production architecture
+    # -------------------------------------------------------------
 
     model = Network3D(
         use_attention=True,
         use_residual=True,
-        use_uncertainty=True
+        use_uncertainty=True,
     )
 
-    predictor = Predictor(
-        model=model,
-        checkpoint=CHECKPOINT,
-        device=device
+    model = model.to(DEVICE)
+
+    # -------------------------------------------------------------
+    # Load checkpoint
+    # -------------------------------------------------------------
+
+    checkpoint = torch.load(
+        CHECKPOINT,
+        map_location=DEVICE,
     )
 
-    print(
-        "Physics-Informed Network loaded successfully."
-    )
+    if "model_state_dict" not in checkpoint:
 
-    # =====================================================
-    # EVALUATION MODE
-    # =====================================================
+        raise KeyError(
+            "Checkpoint does not contain "
+            "'model_state_dict'."
+        )
+
+    model.load_state_dict(
+        checkpoint["model_state_dict"]
+    )
 
     model.eval()
 
-    # =====================================================
-    # PATCH LOOP
-    # =====================================================
+    print()
+    print(
+        "Proposed model loaded successfully."
+    )
 
-    for patch_index in range(
-        NUM_TEST_PATCHES
+    if "best_epoch" in checkpoint:
+
+        print(
+            "Best epoch:",
+            checkpoint["best_epoch"],
+        )
+
+    return model
+
+
+# =====================================================================
+# RUN CLASSICAL BASELINE
+# =====================================================================
+
+def run_classical_method(
+    method_name,
+    reconstruction_function,
+    corrupted,
+    mask,
+    target,
+):
+    """
+    Run one classical reconstruction baseline.
+    """
+
+    print()
+    print("-" * 70)
+    print(method_name)
+    print("-" * 70)
+
+    start_time = time.perf_counter()
+
+    reconstruction = (
+        reconstruction_function(
+            corrupted,
+            mask,
+        )
+    )
+
+    end_time = time.perf_counter()
+
+    runtime_seconds = (
+        end_time
+        -
+        start_time
+    )
+
+    # -------------------------------------------------------------
+    # Validate reconstruction
+    # -------------------------------------------------------------
+
+    observed_difference = (
+        validate_reconstruction(
+            reconstruction,
+            corrupted,
+            mask,
+        )
+    )
+
+    # -------------------------------------------------------------
+    # Calculate metrics
+    # -------------------------------------------------------------
+
+    metrics = calculate_metrics(
+        reconstruction,
+        target,
+        mask,
+    )
+
+    result = {
+
+        "method":
+            method_name,
+
+        "geological_mode":
+            GEOLOGICAL_MODE,
+
+        "mask_mode":
+            MASK_MODE,
+
+        "seed":
+            int(SEED),
+
+        "requested_missing_rate":
+            float(MISSING_RATE),
+
+        "cube_depth":
+            int(CUBE_SIZE[0]),
+
+        "cube_height":
+            int(CUBE_SIZE[1]),
+
+        "cube_width":
+            int(CUBE_SIZE[2]),
+
+        "runtime_seconds":
+            float(runtime_seconds),
+
+        "observed_preservation_error":
+            float(observed_difference),
+
+        "missing_mae":
+            metrics["missing_mae"],
+
+        "missing_rmse":
+            metrics["missing_rmse"],
+
+        "MAE":
+            metrics["MAE"],
+
+        "RMSE":
+            metrics["RMSE"],
+
+        "PSNR":
+            metrics["PSNR"],
+
+        "SNR":
+            metrics["SNR"],
+
+        "SSIM":
+            metrics["SSIM"],
+
+        "aleatoric_variance_mean":
+            np.nan,
+
+        "epistemic_variance_mean":
+            np.nan,
+
+        "predictive_variance_mean":
+            np.nan,
+
+        "predictive_std_mean":
+            np.nan,
+
+        "missing_aleatoric_variance_mean":
+            np.nan,
+
+        "missing_epistemic_variance_mean":
+            np.nan,
+
+        "missing_predictive_variance_mean":
+            np.nan,
+
+        "missing_predictive_std_mean":
+            np.nan,
+
+        "status":
+            "PASS",
+
+        "error":
+            "",
+    }
+
+    print(
+        f"MAE          : {result['MAE']:.6f}"
+    )
+
+    print(
+        f"RMSE         : {result['RMSE']:.6f}"
+    )
+
+    print(
+        f"PSNR         : {result['PSNR']:.6f} dB"
+    )
+
+    print(
+        f"SNR          : {result['SNR']:.6f} dB"
+    )
+
+    print(
+        f"SSIM         : {result['SSIM']:.6f}"
+    )
+
+    print(
+        f"Missing MAE  : "
+        f"{result['missing_mae']:.6f}"
+    )
+
+    print(
+        f"Runtime      : "
+        f"{result['runtime_seconds']:.4f} s"
+    )
+
+    print(
+        f"Observed err : "
+        f"{result['observed_preservation_error']:.6e}"
+    )
+
+    return result
+
+
+# =====================================================================
+# RUN PROPOSED MODEL
+# =====================================================================
+
+def run_proposed_model(
+    model,
+    corrupted,
+    mask,
+    target,
+):
+    """
+    Run the proposed Physics-Informed 3D model.
+    """
+
+    print()
+    print("-" * 70)
+    print(
+        "Proposed Physics-Informed 3D Model"
+    )
+    print("-" * 70)
+
+    # -------------------------------------------------------------
+    # Prepare input
+    # -------------------------------------------------------------
+
+    input_batch = (
+        corrupted
+        .unsqueeze(0)
+        .unsqueeze(0)
+        .to(DEVICE)
+    )
+
+    # -------------------------------------------------------------
+    # MC Dropout predictor
+    # -------------------------------------------------------------
+
+    predictor = MCDropout3D(
+        model=model,
+        num_samples=MC_SAMPLES,
+    )
+
+    # -------------------------------------------------------------
+    # Inference
+    # -------------------------------------------------------------
+
+    start_time = time.perf_counter()
+
+    predictions = predictor.predict(
+        input_batch
+    )
+
+    end_time = time.perf_counter()
+
+    runtime_seconds = (
+        end_time
+        -
+        start_time
+    )
+
+    # -------------------------------------------------------------
+    # Required MC outputs
+    # -------------------------------------------------------------
+
+    required_keys = {
+        "reconstruction_samples",
+        "log_variance_samples",
+    }
+
+    missing_keys = (
+        required_keys
+        -
+        predictions.keys()
+    )
+
+    if missing_keys:
+
+        raise KeyError(
+            "Missing MC outputs: "
+            f"{missing_keys}"
+        )
+
+    reconstruction_samples = (
+        predictions[
+            "reconstruction_samples"
+        ]
+    )
+
+    log_variance_samples = (
+        predictions[
+            "log_variance_samples"
+        ]
+    )
+
+    # -------------------------------------------------------------
+    # Reconstruction mean
+    # -------------------------------------------------------------
+
+    reconstruction_mean = (
+        reconstruction_samples.mean(
+            dim=0
+        )
+    )
+
+    # -------------------------------------------------------------
+    # Uncertainty decomposition
+    # -------------------------------------------------------------
+
+    aleatoric_variance = (
+        PredictiveUncertaintyEstimator
+        .aleatoric_variance(
+            log_variance_samples
+        )
+    )
+
+    epistemic_variance = (
+        PredictiveUncertaintyEstimator
+        .epistemic_variance(
+            reconstruction_samples
+        )
+    )
+
+    predictive_variance = (
+        PredictiveUncertaintyEstimator
+        .predictive_variance(
+            aleatoric_variance,
+            epistemic_variance,
+        )
+    )
+
+    predictive_std = torch.sqrt(
+        torch.clamp(
+            predictive_variance,
+            min=0.0,
+        )
+    )
+
+    # -------------------------------------------------------------
+    # Validate uncertainty tensors
+    # -------------------------------------------------------------
+
+    uncertainty_tensors = {
+        "aleatoric_variance":
+            aleatoric_variance,
+
+        "epistemic_variance":
+            epistemic_variance,
+
+        "predictive_variance":
+            predictive_variance,
+
+        "predictive_std":
+            predictive_std,
+    }
+
+    for name, tensor in (
+        uncertainty_tensors.items()
     ):
 
-        print()
-        print(
-            f"Processing patch "
-            f"{patch_index + 1}/"
-            f"{NUM_TEST_PATCHES}"
-        )
+        if not tensor_is_finite(tensor):
 
-        # =================================================
-        # LOAD DATASET SAMPLE
-        # =================================================
+            raise RuntimeError(
+                f"{name} contains NaN or Inf."
+            )
 
-        sample = dataset[
-            patch_index
-        ]
+        if (
+            name.endswith("variance")
+            and (tensor < 0).any()
+        ):
 
-        validate_sample(
-            sample,
-            patch_index
-        )
+            raise RuntimeError(
+                f"Negative {name} detected."
+            )
 
+    # -------------------------------------------------------------
+    # Data-consistency projection
+    # -------------------------------------------------------------
+
+    reconstruction = (
+        reconstruction_mean
+        *
         (
-            corrupted,
-            target,
-            mask,
-            velocity
-        ) = sample[:4]
-
-        # =================================================
-        # CONVERT DATA TO TENSORS
-        # =================================================
-
-        corrupted = ensure_tensor(
-            corrupted,
-            "Corrupted input"
+            1.0
+            -
+            mask.unsqueeze(0)
         )
+        +
+        corrupted.unsqueeze(0)
+        *
+        mask.unsqueeze(0)
+    )
 
-        target = ensure_tensor(
-            target,
-            "Target"
-        )
+    # Remove the batch dimension.
+    reconstruction = (
+        reconstruction.squeeze(0)
+    )
 
-        mask = ensure_tensor(
-            mask,
-            "Mask"
-        )
+    # -------------------------------------------------------------
+    # Validate reconstruction
+    # -------------------------------------------------------------
 
-        # =================================================
-        # SHAPE VALIDATION
-        # =================================================
-
-        if corrupted.shape != target.shape:
-
-            raise RuntimeError(
-                "Corrupted input and target shapes do not "
-                f"match for patch {patch_index + 1}:\n"
-                f"Input : {tuple(corrupted.shape)}\n"
-                f"Target: {tuple(target.shape)}"
-            )
-
-        if corrupted.shape != mask.shape:
-
-            raise RuntimeError(
-                "Corrupted input and mask shapes do not "
-                f"match for patch {patch_index + 1}:\n"
-                f"Input: {tuple(corrupted.shape)}\n"
-                f"Mask : {tuple(mask.shape)}"
-            )
-
-        # =================================================
-        # MASK VALIDATION
-        # =================================================
-
-        validate_mask(
-            mask,
-            corrupted,
-            patch_index
-        )
-
-        # =================================================
-        # BATCH DIMENSION
-        # =================================================
-
-        corrupted_input = add_batch_dimension(
-            corrupted,
-            "corrupted input"
-        )
-
-        target_batch = add_batch_dimension(
-            target,
-            "target"
-        )
-
-        # =================================================
-        # 1. NEAREST NEIGHBOR
-        # =================================================
-
-        print(
-            "  -> Nearest Neighbor"
-        )
-
-        try:
-
-            nn_prediction = (
-                nearest_neighbor_reconstruction(
-                    corrupted,
-                    mask
-                )
-            )
-
-        except Exception as exc:
-
-            raise RuntimeError(
-                f"Nearest Neighbor reconstruction failed "
-                f"on patch {patch_index + 1}.\n"
-                f"Input shape: {tuple(corrupted.shape)}\n"
-                f"Mask shape : {tuple(mask.shape)}\n"
-                f"Original error: {exc}"
-            ) from exc
-
-        nn_prediction = validate_reconstruction(
-            nn_prediction,
-            target_batch,
-            "Nearest Neighbor"
-        )
-
-        nn_metrics = calculate_metrics(
-            nn_prediction,
-            target_batch
-        )
-
-        nn_metrics = validate_metrics(
-            nn_metrics,
-            "Nearest Neighbor"
-        )
-
-        nn_all.append(
-            nn_metrics
-        )
-
-        # =================================================
-        # 2. LINEAR INTERPOLATION
-        # =================================================
-
-        print(
-            "  -> Linear Interpolation"
-        )
-
-        try:
-
-            linear_prediction = (
-                linear_interpolation_reconstruction(
-                    corrupted,
-                    mask
-                )
-            )
-
-        except Exception as exc:
-
-            raise RuntimeError(
-                f"Linear interpolation reconstruction "
-                f"failed on patch {patch_index + 1}.\n"
-                f"Input shape: {tuple(corrupted.shape)}\n"
-                f"Mask shape : {tuple(mask.shape)}\n"
-                f"Original error: {exc}"
-            ) from exc
-
-        linear_prediction = validate_reconstruction(
-            linear_prediction,
-            target_batch,
-            "Linear Interpolation"
-        )
-
-        linear_metrics = calculate_metrics(
-            linear_prediction,
-            target_batch
-        )
-
-        linear_metrics = validate_metrics(
-            linear_metrics,
-            "Linear Interpolation"
-        )
-
-        linear_all.append(
-            linear_metrics
-        )
-
-        # =================================================
-        # 3. PHYSICS-INFORMED NETWORK
-        # =================================================
-
-        print(
-            "  -> Physics-Informed Network"
-        )
-
-        try:
-
-            with torch.no_grad():
-
-                (
-                    reconstruction,
-                    travel_time,
-                    predictive_uncertainty,
-                    aleatoric_std
-                ) = predictor.predict(
-                    corrupted_input
-                )
-
-        except Exception as exc:
-
-            raise RuntimeError(
-                f"Physics-Informed Network inference "
-                f"failed on patch {patch_index + 1}.\n"
-                f"Input shape: {tuple(corrupted_input.shape)}\n"
-                f"Device     : {device}\n"
-                f"Original error: {exc}"
-            ) from exc
-
-        reconstruction = validate_reconstruction(
+    observed_difference = (
+        validate_reconstruction(
             reconstruction,
-            target_batch,
-            "Physics-Informed Network"
+            corrupted,
+            mask,
         )
-
-        network_metrics = calculate_metrics(
-            reconstruction,
-            target_batch
-        )
-
-        network_metrics = validate_metrics(
-            network_metrics,
-            "Physics-Informed Network"
-        )
-
-        network_all.append(
-            network_metrics
-        )
-
-    # =====================================================
-    # CONVERT TO NUMPY ARRAYS
-    # =====================================================
-
-    nn_all = np.asarray(
-        nn_all,
-        dtype=np.float64
     )
 
-    linear_all = np.asarray(
-        linear_all,
-        dtype=np.float64
+    # -------------------------------------------------------------
+    # Common metrics
+    # -------------------------------------------------------------
+
+    metrics = calculate_metrics(
+        reconstruction,
+        target,
+        mask,
     )
 
-    network_all = np.asarray(
-        network_all,
-        dtype=np.float64
+    # -------------------------------------------------------------
+    # Missing-region uncertainty
+    # -------------------------------------------------------------
+
+    missing_selector = (
+        mask.unsqueeze(0)
+        ==
+        0
     )
 
-    # =====================================================
-    # COMPUTE AVERAGE METRICS
-    # =====================================================
-
-    nn_metrics = np.mean(
-        nn_all,
-        axis=0
-    ).tolist()
-
-    linear_metrics = np.mean(
-        linear_all,
-        axis=0
-    ).tolist()
-
-    network_metrics = np.mean(
-        network_all,
-        axis=0
-    ).tolist()
-
-    # =====================================================
-    # SAVE RESULTS
-    # =====================================================
-
-    os.makedirs(
-        REPORT_DIR,
-        exist_ok=True
+    missing_aleatoric = float(
+        aleatoric_variance[
+            missing_selector
+        ]
+        .mean()
+        .item()
     )
 
-    csv_file = os.path.join(
-        REPORT_DIR,
-        "baseline_comparison.csv"
+    missing_epistemic = float(
+        epistemic_variance[
+            missing_selector
+        ]
+        .mean()
+        .item()
+    )
+
+    missing_predictive = float(
+        predictive_variance[
+            missing_selector
+        ]
+        .mean()
+        .item()
+    )
+
+    missing_predictive_std = float(
+        predictive_std[
+            missing_selector
+        ]
+        .mean()
+        .item()
+    )
+
+    # -------------------------------------------------------------
+    # Overall uncertainty
+    # -------------------------------------------------------------
+
+    mean_aleatoric = float(
+        aleatoric_variance
+        .mean()
+        .item()
+    )
+
+    mean_epistemic = float(
+        epistemic_variance
+        .mean()
+        .item()
+    )
+
+    mean_predictive = float(
+        predictive_variance
+        .mean()
+        .item()
+    )
+
+    mean_predictive_std = float(
+        predictive_std
+        .mean()
+        .item()
+    )
+
+    result = {
+
+        "method":
+            "proposed_physics_informed_3d",
+
+        "geological_mode":
+            GEOLOGICAL_MODE,
+
+        "mask_mode":
+            MASK_MODE,
+
+        "seed":
+            int(SEED),
+
+        "requested_missing_rate":
+            float(MISSING_RATE),
+
+        "cube_depth":
+            int(CUBE_SIZE[0]),
+
+        "cube_height":
+            int(CUBE_SIZE[1]),
+
+        "cube_width":
+            int(CUBE_SIZE[2]),
+
+        "runtime_seconds":
+            float(runtime_seconds),
+
+        "observed_preservation_error":
+            float(observed_difference),
+
+        "missing_mae":
+            metrics["missing_mae"],
+
+        "missing_rmse":
+            metrics["missing_rmse"],
+
+        "MAE":
+            metrics["MAE"],
+
+        "RMSE":
+            metrics["RMSE"],
+
+        "PSNR":
+            metrics["PSNR"],
+
+        "SNR":
+            metrics["SNR"],
+
+        "SSIM":
+            metrics["SSIM"],
+
+        "aleatoric_variance_mean":
+            mean_aleatoric,
+
+        "epistemic_variance_mean":
+            mean_epistemic,
+
+        "predictive_variance_mean":
+            mean_predictive,
+
+        "predictive_std_mean":
+            mean_predictive_std,
+
+        "missing_aleatoric_variance_mean":
+            missing_aleatoric,
+
+        "missing_epistemic_variance_mean":
+            missing_epistemic,
+
+        "missing_predictive_variance_mean":
+            missing_predictive,
+
+        "missing_predictive_std_mean":
+            missing_predictive_std,
+
+        "status":
+            "PASS",
+
+        "error":
+            "",
+    }
+
+    print(
+        f"MAE          : {result['MAE']:.6f}"
+    )
+
+    print(
+        f"RMSE         : {result['RMSE']:.6f}"
+    )
+
+    print(
+        f"PSNR         : {result['PSNR']:.6f} dB"
+    )
+
+    print(
+        f"SNR          : {result['SNR']:.6f} dB"
+    )
+
+    print(
+        f"SSIM         : {result['SSIM']:.6f}"
+    )
+
+    print(
+        f"Missing MAE  : "
+        f"{result['missing_mae']:.6f}"
+    )
+
+    print(
+        f"Runtime      : "
+        f"{result['runtime_seconds']:.4f} s"
+    )
+
+    print(
+        f"Predictive σ : "
+        f"{result['predictive_std_mean']:.6e}"
+    )
+
+    return result
+
+
+# =====================================================================
+# WRITE CSV
+# =====================================================================
+
+def write_csv(
+    filename,
+    records,
+):
+    """
+    Write experiment records to CSV.
+    """
+
+    if not records:
+        return
+
+    fieldnames = list(
+        records[0].keys()
     )
 
     with open(
-        csv_file,
+        filename,
         "w",
-        newline=""
+        newline="",
+        encoding="utf-8",
     ) as file:
 
-        writer = csv.writer(
-            file
+        writer = csv.DictWriter(
+            file,
+            fieldnames=fieldnames,
         )
 
-        writer.writerow([
-            "Method",
-            "MAE",
-            "RMSE",
-            "PSNR",
-            "SNR",
-            "SSIM"
-        ])
+        writer.writeheader()
 
-        writer.writerow(
-            [
-                "Nearest_Neighbor"
-            ]
-            +
-            nn_metrics
+        writer.writerows(
+            records
         )
 
-        writer.writerow(
-            [
-                "Linear_Interpolation"
-            ]
-            +
-            linear_metrics
+
+# =====================================================================
+# SUMMARY
+# =====================================================================
+
+def calculate_summary(
+    records,
+):
+    """
+    Calculate summary statistics by method.
+
+    Since this comparison script uses one common test case per
+    method, the standard deviation is zero for the current run.
+
+    The dedicated 750-case matrices remain the source of
+    multi-case statistical summaries.
+    """
+
+    summaries = []
+
+    for record in records:
+
+        summary = {
+            "method":
+                record["method"],
+
+            "n_cases":
+                1,
+
+            "MAE_mean":
+                record["MAE"],
+
+            "RMSE_mean":
+                record["RMSE"],
+
+            "PSNR_mean":
+                record["PSNR"],
+
+            "SNR_mean":
+                record["SNR"],
+
+            "SSIM_mean":
+                record["SSIM"],
+
+            "missing_mae_mean":
+                record["missing_mae"],
+
+            "missing_rmse_mean":
+                record["missing_rmse"],
+
+            "runtime_seconds_mean":
+                record["runtime_seconds"],
+
+            "observed_preservation_error_max":
+                record[
+                    "observed_preservation_error"
+                ],
+
+            "aleatoric_variance_mean":
+                record[
+                    "aleatoric_variance_mean"
+                ],
+
+            "epistemic_variance_mean":
+                record[
+                    "epistemic_variance_mean"
+                ],
+
+            "predictive_variance_mean":
+                record[
+                    "predictive_variance_mean"
+                ],
+
+            "predictive_std_mean":
+                record[
+                    "predictive_std_mean"
+                ],
+
+            "missing_aleatoric_variance_mean":
+                record[
+                    "missing_aleatoric_variance_mean"
+                ],
+
+            "missing_epistemic_variance_mean":
+                record[
+                    "missing_epistemic_variance_mean"
+                ],
+
+            "missing_predictive_variance_mean":
+                record[
+                    "missing_predictive_variance_mean"
+                ],
+
+            "missing_predictive_std_mean":
+                record[
+                    "missing_predictive_std_mean"
+                ],
+
+            "status":
+                record["status"],
+        }
+
+        summaries.append(
+            summary
         )
 
-        writer.writerow(
-            [
-                "Physics_Informed_Network"
-            ]
-            +
-            network_metrics
+    return summaries
+
+
+# =====================================================================
+# MAIN
+# =====================================================================
+
+def main():
+
+    print()
+    print("=" * 78)
+    print(
+        "COMMON SEVEN-METHOD RECONSTRUCTION COMPARISON"
+    )
+    print("=" * 78)
+
+    print()
+    print(
+        f"Cube size       : {CUBE_SIZE}"
+    )
+
+    print(
+        f"Geology         : {GEOLOGICAL_MODE}"
+    )
+
+    print(
+        f"Mask            : {MASK_MODE}"
+    )
+
+    print(
+        f"Missing rate    : {MISSING_RATE:.0%}"
+    )
+
+    print(
+        f"Seed            : {SEED}"
+    )
+
+    print(
+        f"Device          : {DEVICE}"
+    )
+
+    print(
+        f"MC samples      : {MC_SAMPLES}"
+    )
+
+    # ================================================================
+    # REPRODUCIBILITY
+    # ================================================================
+
+    set_seed(SEED)
+
+    # ================================================================
+    # CREATE ONE COMMON DATA SAMPLE
+    # ================================================================
+
+    print()
+    print("=" * 78)
+    print(
+        "CREATING COMMON TEST SAMPLE"
+    )
+    print("=" * 78)
+
+    dataset = SyntheticSeismicDataset(
+        num_samples=NUM_SAMPLES,
+        cube_size=CUBE_SIZE,
+        missing_probability=MISSING_RATE,
+        geological_mode=GEOLOGICAL_MODE,
+        mask_mode=MASK_MODE,
+        seed=SEED,
+    )
+
+    (
+        corrupted,
+        target,
+        mask,
+        velocity,
+        actual_mask_mode,
+        actual_geological_mode,
+    ) = dataset[0]
+
+    # ================================================================
+    # DATASET VALIDATION
+    # ================================================================
+
+    if actual_geological_mode != GEOLOGICAL_MODE:
+
+        raise RuntimeError(
+            "Geological mode mismatch. "
+            f"Expected {GEOLOGICAL_MODE}, "
+            f"received {actual_geological_mode}."
         )
 
-        writer.writerow([
-            "Num_Patches",
-            NUM_TEST_PATCHES
-        ])
+    if actual_mask_mode != MASK_MODE:
 
-    # =====================================================
-    # DISPLAY RESULTS
-    # =====================================================
+        raise RuntimeError(
+            "Mask mode mismatch. "
+            f"Expected {MASK_MODE}, "
+            f"received {actual_mask_mode}."
+        )
 
-    print()
-    print("=" * 70)
-    print("BASELINE COMPARISON RESULTS")
-    print("=" * 70)
+    expected_shape = (
+        1,
+        *CUBE_SIZE,
+    )
 
-    print()
-    print(
-        f"Average over "
-        f"{NUM_TEST_PATCHES} "
-        f"{DATASET_MODE} patches"
+    if tuple(corrupted.shape) != expected_shape:
+
+        raise RuntimeError(
+            "Unexpected corrupted shape. "
+            f"Expected {expected_shape}, "
+            f"received {tuple(corrupted.shape)}."
+        )
+
+    if corrupted.shape != target.shape:
+
+        raise RuntimeError(
+            "Corrupted and target shapes differ."
+        )
+
+    if corrupted.shape != mask.shape:
+
+        raise RuntimeError(
+            "Corrupted and mask shapes differ."
+        )
+
+    if corrupted.shape != velocity.shape:
+
+        raise RuntimeError(
+            "Corrupted and velocity shapes differ."
+        )
+
+    # ================================================================
+    # FINITE CHECKS
+    # ================================================================
+
+    for name, tensor in {
+        "corrupted": corrupted,
+        "target": target,
+        "mask": mask,
+        "velocity": velocity,
+    }.items():
+
+        if not tensor_is_finite(tensor):
+
+            raise RuntimeError(
+                f"{name} contains NaN or Inf."
+            )
+
+    # ================================================================
+    # MASK VALIDATION
+    # ================================================================
+
+    unique_mask = torch.unique(mask)
+
+    if not torch.all(
+        (unique_mask == 0)
+        |
+        (unique_mask == 1)
+    ):
+
+        raise RuntimeError(
+            "Mask must contain only 0 and 1."
+        )
+
+    # ================================================================
+    # INPUT CONSISTENCY
+    # ================================================================
+
+    expected_input = (
+        target
+        *
+        mask
+    )
+
+    input_difference = torch.max(
+        torch.abs(
+            corrupted
+            -
+            expected_input
+        )
+    ).item()
+
+    if (
+        input_difference
+        >
+        OBSERVED_PRESERVATION_TOLERANCE
+    ):
+
+        raise RuntimeError(
+            "Input consistency check failed: "
+            f"{input_difference:.6e}"
+        )
+
+    # ================================================================
+    # SAMPLE COUNTS
+    # ================================================================
+
+    observed_samples = int(
+        torch.sum(
+            mask == 1
+        ).item()
+    )
+
+    missing_samples = int(
+        torch.sum(
+            mask == 0
+        ).item()
+    )
+
+    total_samples = (
+        observed_samples
+        +
+        missing_samples
+    )
+
+    measured_missing_rate = (
+        missing_samples
+        /
+        total_samples
     )
 
     print()
-    print("Nearest Neighbor:")
-
     print(
-        f"  MAE  : {nn_metrics[0]:.6f}"
+        f"Observed samples : {observed_samples}"
     )
 
     print(
-        f"  RMSE : {nn_metrics[1]:.6f}"
+        f"Missing samples  : {missing_samples}"
     )
 
     print(
-        f"  PSNR : {nn_metrics[2]:.6f}"
+        f"Measured missing : "
+        f"{measured_missing_rate:.4f}"
     )
 
-    print(
-        f"  SNR  : {nn_metrics[3]:.6f}"
+    # ================================================================
+    # LOAD PROPOSED MODEL
+    # ================================================================
+
+    proposed_model = (
+        load_proposed_model()
     )
 
-    print(
-        f"  SSIM : {nn_metrics[4]:.6f}"
+    # ================================================================
+    # RESULT STORAGE
+    # ================================================================
+
+    records = []
+
+    # ================================================================
+    # CLASSICAL METHODS
+    # ================================================================
+
+    classical_methods = [
+
+        (
+            "nearest_neighbor",
+            nearest_neighbor_reconstruction,
+        ),
+
+        (
+            "linear_interpolation",
+            linear_interpolation_reconstruction,
+        ),
+
+        (
+            "fx_prediction",
+            fx_prediction_reconstruction,
+        ),
+
+        (
+            "compressive_sensing",
+            compressive_sensing_reconstruction,
+        ),
+
+        (
+            "curvelet_pocs",
+            curvelet_pocs_reconstruction,
+        ),
+
+        (
+            "dictionary_learning",
+            dictionary_learning_reconstruction,
+        ),
+    ]
+
+    # ================================================================
+    # RUN CLASSICAL BASELINES
+    # ================================================================
+
+    for (
+        method_name,
+        reconstruction_function,
+    ) in classical_methods:
+
+        try:
+
+            result = run_classical_method(
+                method_name=method_name,
+                reconstruction_function=
+                    reconstruction_function,
+                corrupted=corrupted,
+                mask=mask,
+                target=target,
+            )
+
+        except Exception as exc:
+
+            print()
+            print(
+                f"{method_name} FAILED:"
+            )
+
+            print(exc)
+
+            result = {
+
+                "method":
+                    method_name,
+
+                "geological_mode":
+                    GEOLOGICAL_MODE,
+
+                "mask_mode":
+                    MASK_MODE,
+
+                "seed":
+                    int(SEED),
+
+                "requested_missing_rate":
+                    float(MISSING_RATE),
+
+                "cube_depth":
+                    int(CUBE_SIZE[0]),
+
+                "cube_height":
+                    int(CUBE_SIZE[1]),
+
+                "cube_width":
+                    int(CUBE_SIZE[2]),
+
+                "runtime_seconds":
+                    np.nan,
+
+                "observed_preservation_error":
+                    np.nan,
+
+                "missing_mae":
+                    np.nan,
+
+                "missing_rmse":
+                    np.nan,
+
+                "MAE":
+                    np.nan,
+
+                "RMSE":
+                    np.nan,
+
+                "PSNR":
+                    np.nan,
+
+                "SNR":
+                    np.nan,
+
+                "SSIM":
+                    np.nan,
+
+                "aleatoric_variance_mean":
+                    np.nan,
+
+                "epistemic_variance_mean":
+                    np.nan,
+
+                "predictive_variance_mean":
+                    np.nan,
+
+                "predictive_std_mean":
+                    np.nan,
+
+                "missing_aleatoric_variance_mean":
+                    np.nan,
+
+                "missing_epistemic_variance_mean":
+                    np.nan,
+
+                "missing_predictive_variance_mean":
+                    np.nan,
+
+                "missing_predictive_std_mean":
+                    np.nan,
+
+                "status":
+                    "FAILED",
+
+                "error":
+                    str(exc),
+            }
+
+        records.append(
+            result
+        )
+
+    # ================================================================
+    # RUN PROPOSED MODEL
+    # ================================================================
+
+    try:
+
+        result = run_proposed_model(
+            model=proposed_model,
+            corrupted=corrupted,
+            mask=mask,
+            target=target,
+        )
+
+    except Exception as exc:
+
+        print()
+        print(
+            "proposed_physics_informed_3d FAILED:"
+        )
+
+        print(exc)
+
+        result = {
+
+            "method":
+                "proposed_physics_informed_3d",
+
+            "geological_mode":
+                GEOLOGICAL_MODE,
+
+            "mask_mode":
+                MASK_MODE,
+
+            "seed":
+                int(SEED),
+
+            "requested_missing_rate":
+                float(MISSING_RATE),
+
+            "cube_depth":
+                int(CUBE_SIZE[0]),
+
+            "cube_height":
+                int(CUBE_SIZE[1]),
+
+            "cube_width":
+                int(CUBE_SIZE[2]),
+
+            "runtime_seconds":
+                np.nan,
+
+            "observed_preservation_error":
+                np.nan,
+
+            "missing_mae":
+                np.nan,
+
+            "missing_rmse":
+                np.nan,
+
+            "MAE":
+                np.nan,
+
+            "RMSE":
+                np.nan,
+
+            "PSNR":
+                np.nan,
+
+            "SNR":
+                np.nan,
+
+            "SSIM":
+                np.nan,
+
+            "aleatoric_variance_mean":
+                np.nan,
+
+            "epistemic_variance_mean":
+                np.nan,
+
+            "predictive_variance_mean":
+                np.nan,
+
+            "predictive_std_mean":
+                np.nan,
+
+            "missing_aleatoric_variance_mean":
+                np.nan,
+
+            "missing_epistemic_variance_mean":
+                np.nan,
+
+            "missing_predictive_variance_mean":
+                np.nan,
+
+            "missing_predictive_std_mean":
+                np.nan,
+
+            "status":
+                "FAILED",
+
+            "error":
+                str(exc),
+        }
+
+    records.append(
+        result
+    )
+
+    # ================================================================
+    # WRITE RAW RESULTS
+    # ================================================================
+
+    write_csv(
+        RESULTS_FILE,
+        records,
+    )
+
+    # ================================================================
+    # WRITE SUMMARY
+    # ================================================================
+
+    summaries = calculate_summary(
+        records
+    )
+
+    write_csv(
+        SUMMARY_FILE,
+        summaries,
+    )
+
+    # ================================================================
+    # FINAL REPORT
+    # ================================================================
+
+    successful = sum(
+        record["status"] == "PASS"
+        for record in records
+    )
+
+    failed = sum(
+        record["status"] == "FAILED"
+        for record in records
     )
 
     print()
-    print("Linear Interpolation:")
-
+    print("=" * 78)
     print(
-        f"  MAE  : {linear_metrics[0]:.6f}"
+        "SEVEN-METHOD COMPARISON COMPLETE"
     )
-
-    print(
-        f"  RMSE : {linear_metrics[1]:.6f}"
-    )
-
-    print(
-        f"  PSNR : {linear_metrics[2]:.6f}"
-    )
-
-    print(
-        f"  SNR  : {linear_metrics[3]:.6f}"
-    )
-
-    print(
-        f"  SSIM : {linear_metrics[4]:.6f}"
-    )
-
-    print()
-    print("Physics-Informed Network:")
-
-    print(
-        f"  MAE  : {network_metrics[0]:.6f}"
-    )
-
-    print(
-        f"  RMSE : {network_metrics[1]:.6f}"
-    )
-
-    print(
-        f"  PSNR : {network_metrics[2]:.6f}"
-    )
-
-    print(
-        f"  SNR  : {network_metrics[3]:.6f}"
-    )
-
-    print(
-        f"  SSIM : {network_metrics[4]:.6f}"
-    )
-
-    print()
-    print("Results saved:")
-
-    print(
-        csv_file
-    )
-
-    print()
-    print("=" * 70)
-    print("BASELINE COMPARISON COMPLETE")
-    print("=" * 70)
+    print("=" * 78)
 
     print()
     print(
-        "Experiment:",
-        EXPERIMENT_NAME
+        f"Methods evaluated : {len(records)}"
     )
 
     print(
-        "Dataset:",
-        DATASET_MODE
+        f"Successful        : {successful}"
     )
 
     print(
-        "Report directory:",
-        REPORT_DIR
+        f"Failed            : {failed}"
     )
 
+    print()
+    print(
+        "Raw results:"
+    )
 
-# =========================================================
+    print(
+        RESULTS_FILE
+    )
+
+    print()
+    print(
+        "Summary results:"
+    )
+
+    print(
+        SUMMARY_FILE
+    )
+
+    # ================================================================
+    # COMPARISON TABLE IN CONSOLE
+    # ================================================================
+
+    print()
+    print("=" * 78)
+    print(
+        "COMMON RECONSTRUCTION METRICS"
+    )
+    print("=" * 78)
+
+    print()
+
+    print(
+        f"{'Method':<32}"
+        f"{'MAE':>10}"
+        f"{'RMSE':>10}"
+        f"{'PSNR':>10}"
+        f"{'SNR':>10}"
+        f"{'SSIM':>10}"
+    )
+
+    print(
+        "-" * 82
+    )
+
+    for record in records:
+
+        if record["status"] != "PASS":
+            continue
+
+        print(
+            f"{record['method']:<32}"
+            f"{record['MAE']:>10.6f}"
+            f"{record['RMSE']:>10.6f}"
+            f"{record['PSNR']:>10.4f}"
+            f"{record['SNR']:>10.4f}"
+            f"{record['SSIM']:>10.6f}"
+        )
+
+    print()
+
+    if failed == 0:
+
+        print(
+            "OVERALL STATUS: PASS"
+        )
+
+        print(
+            "All seven reconstruction methods "
+            "completed successfully on the same "
+            "input cube and observation mask."
+        )
+
+    else:
+
+        print(
+            "OVERALL STATUS: FAIL"
+        )
+
+        print(
+            "One or more reconstruction methods failed. "
+            "Inspect the CSV error column."
+        )
+
+
+# =====================================================================
 # ENTRY POINT
-# =========================================================
+# =====================================================================
 
 if __name__ == "__main__":
-
     main()

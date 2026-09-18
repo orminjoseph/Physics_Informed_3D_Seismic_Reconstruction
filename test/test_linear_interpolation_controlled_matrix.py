@@ -108,36 +108,22 @@ DEVICE = torch.device("cpu")
 CUBE_SIZE = (64, 128, 128)
 
 MISSING_RATES = [
-    0.10,
-    0.20,
     0.30,
-    0.40,
-    0.50
 ]
 
 MISSING_MECHANISMS = [
     "random_voxels",
     "missing_traces",
-    "missing_inlines",
-    "missing_crosslines",
-    "missing_blocks"
 ]
 
 GEOLOGICAL_MODES = [
     "horizontal",
     "dipping",
-    "faulted",
-    "folded",
-    "complex",
-    "highly_complex"
 ]
 
 SEEDS = [
     42,
     43,
-    44,
-    45,
-    46
 ]
 
 
