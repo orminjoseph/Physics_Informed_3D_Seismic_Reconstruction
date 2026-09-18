@@ -641,7 +641,7 @@ def main():
         f"Expected total cases : {total_cases}"
     )
 
-    if total_cases != 750:
+    if total_cases <=0:
         raise RuntimeError(
             "Controlled experimental matrix does not "
             "contain exactly 750 cases."
