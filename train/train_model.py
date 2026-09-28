@@ -189,37 +189,63 @@ def main():
 
     print("=" * 70)
 
-
     # =====================================================
     # SELECT COMPUTATIONAL DEVICE
     # =====================================================
     #
-    # The configuration specifies the desired device.
+    # The computational device is controlled centrally from:
     #
-    # Example:
+    #     utils/config.py
+    #
+    # Supported settings:
     #
     #     DEVICE = "cpu"
-    #
-    # or:
+    #         Force CPU execution.
     #
     #     DEVICE = "cuda"
+    #         Force CUDA/GPU execution.
+    #         Training stops if CUDA is unavailable.
     #
-    # If CUDA is requested but unavailable, we stop with
-    # a clear error rather than silently changing the
-    # experiment configuration.
+    #     DEVICE = "auto"
+    #         Automatically use CUDA when available.
+    #         Otherwise, fall back to CPU.
+    #
+    # "auto" is recommended when the same project is used
+    # on both a local computer and Google Colab.
     # =====================================================
 
     configured_device = str(
         DEVICE
     ).lower()
 
+    # =====================================================
+    # AUTOMATIC DEVICE SELECTION
+    # =====================================================
 
-    if configured_device == "cuda":
+    if configured_device == "auto":
+
+        if torch.cuda.is_available():
+
+            device = torch.device(
+                "cuda"
+            )
+
+        else:
+
+            device = torch.device(
+                "cpu"
+            )
+
+
+    # =====================================================
+    # FORCE CUDA
+    # =====================================================
+
+    elif configured_device == "cuda":
 
         if not torch.cuda.is_available():
-
             raise RuntimeError(
-                "CUDA was requested in utils.config.py, "
+                "CUDA was requested in utils/config.py, "
                 "but CUDA is not available."
             )
 
@@ -227,26 +253,39 @@ def main():
             "cuda"
         )
 
+
+    # =====================================================
+    # FORCE CPU
+    # =====================================================
+
     elif configured_device == "cpu":
 
         device = torch.device(
             "cpu"
         )
 
+
+    # =====================================================
+    # INVALID DEVICE SETTING
+    # =====================================================
+
     else:
 
         raise ValueError(
             "Unsupported DEVICE configuration.\n"
             f"Received: {DEVICE}\n"
-            "Expected 'cpu' or 'cuda'."
+            "Expected 'cpu', 'cuda', or 'auto'."
         )
 
-
     # =====================================================
-    # DISPLAY ACTUAL DEVICE
+    # DISPLAY CONFIGURED AND ACTUAL DEVICE
     # =====================================================
 
     print()
+
+    print(
+        f"Configured device: {DEVICE}"
+    )
 
     print(
         f"Using device: {device}"
@@ -257,12 +296,15 @@ def main():
     # =====================================================
 
     if device.type == "cuda":
-
         print(
             f"CUDA device: "
             f"{torch.cuda.get_device_name(0)}"
         )
 
+        print(
+            f"CUDA device count: "
+            f"{torch.cuda.device_count()}"
+        )
 
     # =====================================================
     # BUILD DATASET

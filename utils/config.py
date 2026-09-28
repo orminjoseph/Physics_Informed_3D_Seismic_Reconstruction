@@ -564,11 +564,21 @@ CPU is intentionally retained until CUDA-enabled PyTorch
 is confirmed on the target machine.
 """
 
-DEVICE = "cpu"
+# =========================================================
+# COMPUTATIONAL DEVICE
+# =========================================================
+#
+# Available modes:
+#
+#     "cpu"   -> Force CPU
+#     "cuda"  -> Force CUDA/GPU
+#     "auto"  -> Use CUDA when available, otherwise CPU
+#
+# "auto" is recommended when the same project is used
+# across local computers and Google Colab.
+# =========================================================
 
-# Later:
-
-# DEVICE = "cuda"
+DEVICE = "auto"
 
 
 # =========================================================
