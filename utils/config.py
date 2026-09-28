@@ -831,13 +831,13 @@ def validate_config():
     # Device
     # -----------------------------------------------------
 
-    if DEVICE not in {
-        "cpu",
-        "cuda"
-    }:
+    # =========================================================
+    # VALIDATE COMPUTATIONAL DEVICE
+    # =========================================================
 
+    if DEVICE not in ("cpu", "cuda", "auto"):
         raise ValueError(
-            "DEVICE must be either 'cpu' or 'cuda'."
+            "DEVICE must be either 'cpu', 'cuda', or 'auto'."
         )
 
     # -----------------------------------------------------
