@@ -1,35 +1,52 @@
 """
-=========================================================
+======================================================================
 Model Evaluation
-=========================================================
+======================================================================
 
 Physics-Informed 3D Encoder-Decoder Framework
+with Predictive Uncertainty for Seismic Data Reconstruction
 
-Loads the best model checkpoint for the CURRENT EXPERIMENT
-and computes:
+This module is the orchestration layer for model evaluation.
 
-    MAE
-    RMSE
-    PSNR
-    SNR
-    SSIM
+Responsibilities
+----------------
+1. Build the dataset according to the active configuration.
+2. Load the best checkpoint for the current experiment.
+3. Adapt the project dataset output to the Evaluator interface.
+4. Run the centralized Evaluator.
+5. Save the complete evaluation results to CSV.
 
-Dataset output convention:
+The actual metric calculations are performed by:
+
+    evaluation.evaluator.Evaluator
+
+which uses:
+
+    evaluation.metrics.EvaluationMetrics
+
+Dataset output convention
+-------------------------
+SyntheticSeismicDataset returns:
 
     input_cube
-    target_cube
+    target
     mask
     velocity_model
+    mask_type
+    geological_mode
 
-Predictor output convention:
+Evaluator input convention
+--------------------------
+Each DataLoader batch must contain at least:
 
-    reconstruction
-    travel_time
-    log_variance
-    aleatoric_std
+    input
+    target
+    mask
 
-Checkpoint convention:
+Additional metadata are preserved where available.
 
+Checkpoint convention
+---------------------
     outputs/
         <EXPERIMENT_NAME>/
             checkpoints/
@@ -44,11 +61,12 @@ Training resume uses:
 
     latest_checkpoint.pth
 
-All experiment outputs are controlled by:
+All experiment-dependent paths are obtained from:
 
-    EXPERIMENT_NAME
+    utils.config
 
-=========================================================
+Author: Ormin Joseph
+======================================================================
 """
 
 import os
@@ -56,37 +74,175 @@ import os
 import torch
 import pandas as pd
 
-from models.network import Network3D
+from torch.utils.data import Dataset, DataLoader
 
-from inference.predictor import Predictor
+from models.network import Network3D
 
 from dataset.build_dataset import build_dataset
 
-from metrics.reconstruction_metrics import (
-    mae,
-    rmse,
-    psnr,
-    snr,
-    ssim
-)
+from evaluation.evaluator import Evaluator
 
 from utils.config import (
     EXPERIMENT_NAME,
     CHECKPOINT_DIR,
-    REPORT_DIR
+    REPORT_DIR,
 )
 
 
-def evaluate(model_override=None):
+# ======================================================================
+# EVALUATION DATASET ADAPTER
+# ======================================================================
+
+class EvaluationDatasetAdapter(Dataset):
+    """
+    Adapt the project's tuple-based dataset to the dictionary-based
+    interface expected by Evaluator.
+
+    Original dataset sample:
+
+        (
+            input_cube,
+            target_cube,
+            mask,
+            velocity_model,
+            mask_type,
+            geological_mode
+        )
+
+    Evaluator-compatible sample:
+
+        {
+            "input": input_cube,
+            "target": target_cube,
+            "mask": mask,
+            "velocity": velocity_model,
+            "mask_type": mask_type,
+            "geological_mode": geological_mode
+        }
+
+    The adapter does not modify the underlying dataset.
+    It only changes the interface presented to the evaluation pipeline.
+    """
+
+    def __init__(self, dataset):
+
+        if dataset is None:
+
+            raise ValueError(
+                "dataset cannot be None."
+            )
+
+        self.dataset = dataset
+
+    def __len__(self):
+
+        return len(self.dataset)
+
+    def __getitem__(self, index):
+
+        sample = self.dataset[index]
+
+        if not isinstance(sample, (tuple, list)):
+
+            raise TypeError(
+                "Expected dataset sample to be a tuple or list. "
+                f"Received: {type(sample)}"
+            )
+
+        if len(sample) < 3:
+
+            raise ValueError(
+                "Dataset sample must contain at least "
+                "input, target and mask."
+            )
+
+        # --------------------------------------------------------------
+        # Required evaluation tensors
+        # --------------------------------------------------------------
+
+        input_cube = sample[0]
+        target_cube = sample[1]
+        mask = sample[2]
+
+        evaluation_sample = {
+            "input": input_cube,
+            "target": target_cube,
+            "mask": mask,
+        }
+
+        # --------------------------------------------------------------
+        # Preserve optional metadata when supplied by the dataset.
+        #
+        # These fields are not currently required by Evaluator, but
+        # retaining them prevents useful dataset information from being
+        # discarded at the evaluation boundary.
+        # --------------------------------------------------------------
+
+        if len(sample) >= 4:
+
+            evaluation_sample["velocity"] = sample[3]
+
+        if len(sample) >= 5:
+
+            evaluation_sample["mask_type"] = sample[4]
+
+        if len(sample) >= 6:
+
+            evaluation_sample["geological_mode"] = sample[5]
+
+        return evaluation_sample
+
+
+# ======================================================================
+# MODEL EVALUATION
+# ======================================================================
+
+def evaluate(
+    model_override=None,
+    mc_samples=1,
+    batch_size=1,
+):
+    """
+    Evaluate the best model checkpoint for the current experiment.
+
+    Parameters
+    ----------
+    model_override:
+        Optional externally supplied model.
+
+        If None, Network3D is constructed using the project's
+        standard architecture configuration.
+
+    mc_samples:
+        Number of stochastic forward passes used by Evaluator.
+
+        mc_samples = 1
+            Deterministic reconstruction evaluation.
+
+        mc_samples > 1
+            MC-dropout uncertainty evaluation.
+
+    batch_size:
+        Evaluation DataLoader batch size.
+
+    Returns
+    -------
+    dict
+        Complete aggregated evaluation results produced by Evaluator.
+    """
+
+    # ==================================================================
+    # HEADER
+    # ==================================================================
 
     print()
-    print("=" * 60)
+    print("=" * 80)
     print("MODEL EVALUATION")
-    print("=" * 60)
+    print("=" * 80)
 
-    # =====================================================
+    # ==================================================================
     # DEVICE
-    # =====================================================
+    # ==================================================================
 
     device = torch.device(
         "cuda"
@@ -97,27 +253,99 @@ def evaluate(model_override=None):
     print()
     print("Experiment :", EXPERIMENT_NAME)
     print("Device     :", device)
+    print("MC Samples :", mc_samples)
+    print("Batch Size :", batch_size)
 
-    # =====================================================
+    # ==================================================================
+    # VALIDATE EVALUATION SETTINGS
+    # ==================================================================
+
+    if mc_samples < 1:
+
+        raise ValueError(
+            "mc_samples must be at least 1."
+        )
+
+    if batch_size < 1:
+
+        raise ValueError(
+            "batch_size must be at least 1."
+        )
+
+    # ==================================================================
     # BUILD DATASET
-    # =====================================================
+    # ==================================================================
+
+    print()
+    print("-" * 80)
+    print("BUILDING EVALUATION DATASET")
+    print("-" * 80)
 
     dataset = build_dataset()
 
+    if dataset is None:
+
+        raise RuntimeError(
+            "build_dataset() returned None."
+        )
+
+    dataset_length = len(dataset)
+
     print(
         "Dataset Length:",
-        len(dataset)
+        dataset_length
     )
 
-    if len(dataset) == 0:
+    if dataset_length == 0:
 
         raise RuntimeError(
             "Evaluation dataset is empty."
         )
 
-    # =====================================================
+    # ==================================================================
+    # ADAPT DATASET
+    # ==================================================================
+
+    evaluation_dataset = EvaluationDatasetAdapter(
+        dataset
+    )
+
+    print(
+        "Dataset Adapter:",
+        type(evaluation_dataset).__name__
+    )
+
+    # ==================================================================
+    # BUILD DATALOADER
+    # ==================================================================
+
+    dataloader = DataLoader(
+        evaluation_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+
+    print(
+        "DataLoader Batches:",
+        len(dataloader)
+    )
+
+    if len(dataloader) == 0:
+
+        raise RuntimeError(
+            "Evaluation DataLoader is empty."
+        )
+
+    # ==================================================================
     # BUILD MODEL
-    # =====================================================
+    # ==================================================================
+
+    print()
+    print("-" * 80)
+    print("BUILDING MODEL")
+    print("-" * 80)
 
     if model_override is None:
 
@@ -131,27 +359,15 @@ def evaluate(model_override=None):
 
         model = model_override
 
-    # =====================================================
+    # ==================================================================
     # MOVE MODEL TO DEVICE
-    # =====================================================
+    # ==================================================================
 
     model = model.to(device)
 
-    # =====================================================
+    # ==================================================================
     # CHECKPOINT
-    # =====================================================
-
-    # -----------------------------------------------------
-    # IMPORTANT:
-    #
-    # CHECKPOINT_DIR already contains:
-    #
-    # outputs/<EXPERIMENT_NAME>/checkpoints
-    #
-    # Therefore the evaluation checkpoint is:
-    #
-    # outputs/<EXPERIMENT_NAME>/checkpoints/best_model.pth
-    # -----------------------------------------------------
+    # ==================================================================
 
     checkpoint = os.path.join(
         CHECKPOINT_DIR,
@@ -169,209 +385,114 @@ def evaluate(model_override=None):
         raise FileNotFoundError(
             "\nBest model checkpoint not found:\n"
             f"{checkpoint}\n\n"
-            "Complete at least one training epoch "
-            "and make sure best_model.pth exists."
+            "Complete at least one training epoch and make sure "
+            "best_model.pth exists in the checkpoint directory."
         )
 
-    # =====================================================
-    # PREDICTOR
-    # =====================================================
-
-    predictor = Predictor(
-        model=model,
-        checkpoint=checkpoint,
-        device=device
-    )
-
-    # =====================================================
-    # METRIC ACCUMULATORS
-    # =====================================================
-
-    total_mae = 0.0
-    total_rmse = 0.0
-    total_psnr = 0.0
-    total_snr = 0.0
-    total_ssim = 0.0
-
-    num_samples = len(dataset)
-
-    # =====================================================
-    # EVALUATE EVERY SAMPLE
-    # =====================================================
-
-    for i in range(num_samples):
-
-        print(
-            f"Evaluating sample "
-            f"{i + 1}/{num_samples}"
-        )
-
-        # -------------------------------------------------
-        # DATASET OUTPUT
-        # -------------------------------------------------
-
-        (
-            input_cube,
-            target_cube,
-            mask,
-            velocity_model
-        ) = dataset[i][:4]
-
-        # -------------------------------------------------
-        # PREDICTION
-        #
-        # Current Predictor.predict() returns:
-        #
-        #   reconstruction
-        #   travel_time
-        #   log_variance
-        #   aleatoric_std
-        #
-        # Only reconstruction is required for the
-        # reconstruction metrics calculated here.
-        # -------------------------------------------------
-
-        (
-            reconstruction,
-            _,
-            _,
-            _
-        ) = predictor.predict(
-            input_cube
-        )
-
-        # -------------------------------------------------
-        # TARGET BATCH DIMENSION
-        #
-        # Dataset target:
-        #
-        #     [C, D, H, W]
-        #
-        # Predictor reconstruction:
-        #
-        #     [B, C, D, H, W]
-        #
-        # Therefore add the batch dimension to target.
-        # -------------------------------------------------
-
-        target_batch = (
-            target_cube.unsqueeze(0)
-        )
-
-        # -------------------------------------------------
-        # MOVE TARGET TO SAME DEVICE
-        # -------------------------------------------------
-
-        target_batch = target_batch.to(
-            reconstruction.device
-        )
-
-        # -------------------------------------------------
-        # COMPUTE METRICS
-        # -------------------------------------------------
-
-        sample_mae = mae(
-            reconstruction,
-            target_batch
-        ).item()
-
-        sample_rmse = rmse(
-            reconstruction,
-            target_batch
-        ).item()
-
-        sample_psnr = psnr(
-            reconstruction,
-            target_batch
-        ).item()
-
-        sample_snr = snr(
-            reconstruction,
-            target_batch
-        ).item()
-
-        sample_ssim = ssim(
-            reconstruction,
-            target_batch
-        ).item()
-
-        # -------------------------------------------------
-        # ACCUMULATE RESULTS
-        # -------------------------------------------------
-
-        total_mae += sample_mae
-        total_rmse += sample_rmse
-        total_psnr += sample_psnr
-        total_snr += sample_snr
-        total_ssim += sample_ssim
-
-    # =====================================================
-    # AVERAGE RESULTS
-    # =====================================================
-
-    results = {
-
-        "MAE":
-            total_mae / num_samples,
-
-        "RMSE":
-            total_rmse / num_samples,
-
-        "PSNR":
-            total_psnr / num_samples,
-
-        "SNR":
-            total_snr / num_samples,
-
-        "SSIM":
-            total_ssim / num_samples
-    }
-
-    # =====================================================
-    # PRINT RESULTS
-    # =====================================================
+    # ==================================================================
+    # EVALUATOR
+    # ==================================================================
 
     print()
-    print("=" * 60)
-    print("FINAL EVALUATION RESULTS")
-    print("=" * 60)
+    print("-" * 80)
+    print("INITIALIZING EVALUATOR")
+    print("-" * 80)
+
+    evaluator = Evaluator(
+        model=model,
+        device=device,
+        mc_samples=mc_samples
+    )
+
+    # ==================================================================
+    # RUN CENTRALIZED EVALUATION
+    # ==================================================================
+
+    print()
+    print("-" * 80)
+    print("RUNNING CENTRALIZED MODEL EVALUATION")
+    print("-" * 80)
+
+    results = evaluator.evaluate(
+        dataloader
+    )
+
+    # ==================================================================
+    # VALIDATE RESULTS
+    # ==================================================================
+
+    if not isinstance(results, dict):
+
+        raise TypeError(
+            "Evaluator.evaluate() must return a dictionary. "
+            f"Received: {type(results)}"
+        )
+
+    if len(results) == 0:
+
+        raise RuntimeError(
+            "Evaluator returned an empty results dictionary."
+        )
+
+    # ==================================================================
+    # PRINT RESULTS
+    # ==================================================================
+
+    print()
+    print("=" * 80)
+    print("FINAL MODEL EVALUATION RESULTS")
+    print("=" * 80)
 
     for key, value in results.items():
 
-        print(
-            f"{key:<10}: {value:.6f}"
-        )
+        if isinstance(value, float):
 
-    # =====================================================
+            print(
+                f"{key:<35}: {value:.6f}"
+            )
+
+        else:
+
+            print(
+                f"{key:<35}: {value}"
+            )
+
+    # ==================================================================
     # CREATE REPORT DIRECTORY
-    # =====================================================
+    # ==================================================================
 
     os.makedirs(
         REPORT_DIR,
         exist_ok=True
     )
 
-    # =====================================================
+    # ==================================================================
     # SAVE RESULTS
-    # =====================================================
+    # ==================================================================
 
     output_file = os.path.join(
         REPORT_DIR,
         "evaluation_metrics.csv"
     )
 
-    pd.DataFrame(
+    results_dataframe = pd.DataFrame(
         [results]
-    ).to_csv(
+    )
+
+    results_dataframe.to_csv(
         output_file,
         index=False
     )
 
-    # =====================================================
-    # CONFIRM OUTPUT LOCATION
-    # =====================================================
+    # ==================================================================
+    # CONFIRM OUTPUT
+    # ==================================================================
 
     print()
+    print("-" * 80)
+    print("EVALUATION OUTPUT")
+    print("-" * 80)
+
     print(
         "Evaluation results saved:"
     )
@@ -392,12 +513,17 @@ def evaluate(model_override=None):
         )
     )
 
+    print()
+    print("=" * 80)
+    print("MODEL EVALUATION COMPLETE")
+    print("=" * 80)
+
     return results
 
 
-# =========================================================
+# ======================================================================
 # MAIN
-# =========================================================
+# ======================================================================
 
 if __name__ == "__main__":
 

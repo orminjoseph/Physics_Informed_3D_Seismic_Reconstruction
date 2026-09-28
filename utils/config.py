@@ -105,7 +105,7 @@ EXPERIMENT_NAME = "synthetic_training"
 
 # Number of synthetic seismic volumes.
 
-SYNTHETIC_NUM_SAMPLES = 100
+SYNTHETIC_NUM_SAMPLES = 10
 
 
 # Synthetic seismic cube dimensions:
@@ -577,12 +577,7 @@ DEVICE = "cpu"
 
 # Root output directory.
 
-OUTPUT_ROOT =(
-    "/content/drive/MyDrive/"
-    "Physics_Informed_3D_Seismic_Reconstruction/"
-    "outputs"
-)
-
+OUTPUT_ROOT ="outputs"
 
 # Experiment-specific checkpoint directory.
 

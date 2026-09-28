@@ -4,15 +4,35 @@ Baseline Comparison Plot
 =========================================================
 
 Creates publication-quality comparison charts for the
-reconstruction model and baseline methods.
+six classical baseline methods and the proposed
+Physics-Informed 3D Encoder–Decoder model.
 
-The script reads the baseline comparison results generated
-by:
+Input:
+    baseline_comparison.csv
 
-    evaluation/compare_with_baselines.py
+Expected methods:
+
+    1. Nearest Neighbor
+    2. Linear Interpolation
+    3. f-x Prediction
+    4. Compressive Sensing
+    5. Curvelet POCS
+    6. Dictionary Learning
+    7. Proposed Model
+
+Metrics:
+
+    Error metrics:
+        MAE
+        RMSE
+
+    Quality metrics:
+        PSNR
+        SNR
+        SSIM
 
 The input/output locations are obtained from config.py
-through REPORT_DIR rather than using hard-coded paths.
+through REPORT_DIR.
 
 Author: Ormin Joseph
 =========================================================
@@ -43,6 +63,21 @@ OUTPUT_FILE = os.path.join(
 
 
 # =========================================================
+# EXPECTED METHODS
+# =========================================================
+
+EXPECTED_METHODS = [
+    "Nearest Neighbor",
+    "Linear Interpolation",
+    "f-x Prediction",
+    "Compressive Sensing",
+    "Curvelet POCS",
+    "Dictionary Learning",
+    "Proposed Model"
+]
+
+
+# =========================================================
 # REQUIRED COLUMNS
 # =========================================================
 
@@ -63,20 +98,53 @@ REQUIRED_COLUMNS = [
 def load_baseline_results(csv_file):
     """
     Load and validate the baseline comparison CSV file.
+
+    Validation includes:
+
+        1. File existence
+        2. Non-empty dataframe
+        3. Required columns
+        4. Valid method names
+        5. Exactly one row per method
+        6. Numerical metric validation
+        7. Finite metric values
     """
 
+    # -----------------------------------------------------
+    # Check file
+    # -----------------------------------------------------
+
     if not os.path.exists(csv_file):
+
         raise FileNotFoundError(
-            f"Baseline comparison file not found:\n{csv_file}\n\n"
-            "Run evaluation/compare_with_baselines.py first."
+            f"\nBaseline comparison file not found:\n"
+            f"{csv_file}\n\n"
+            "Run evaluation.baselines."
+            "compare_with_baselines.py first."
         )
 
-    df = pd.read_csv(csv_file)
+    # -----------------------------------------------------
+    # Load CSV
+    # -----------------------------------------------------
+
+    df = pd.read_csv(
+        csv_file
+    )
+
+    # -----------------------------------------------------
+    # Check empty dataframe
+    # -----------------------------------------------------
 
     if df.empty:
+
         raise ValueError(
-            f"Baseline comparison file is empty:\n{csv_file}"
+            f"\nBaseline comparison file is empty:\n"
+            f"{csv_file}"
         )
+
+    # -----------------------------------------------------
+    # Required columns
+    # -----------------------------------------------------
 
     missing_columns = [
         column
@@ -85,18 +153,84 @@ def load_baseline_results(csv_file):
     ]
 
     if missing_columns:
+
         raise ValueError(
-            "The baseline comparison file is missing "
-            f"required columns: {missing_columns}"
+            "\nThe baseline comparison file is missing "
+            f"required columns:\n{missing_columns}"
         )
 
     # -----------------------------------------------------
-    # Validate method names
+    # Validate Method column
     # -----------------------------------------------------
 
     if df["Method"].isna().any():
+
         raise ValueError(
-            "The 'Method' column contains missing values."
+            "\nThe 'Method' column contains missing values."
+        )
+
+    df["Method"] = (
+        df["Method"]
+        .astype(str)
+        .str.strip()
+    )
+
+    # -----------------------------------------------------
+    # Check duplicate methods
+    # -----------------------------------------------------
+
+    duplicate_methods = (
+        df["Method"]
+        [df["Method"].duplicated(keep=False)]
+        .unique()
+        .tolist()
+    )
+
+    if duplicate_methods:
+
+        raise ValueError(
+            "\nDuplicate method entries detected:\n"
+            f"{duplicate_methods}\n\n"
+            "The baseline comparison plot requires "
+            "exactly one result row per method."
+        )
+
+    # -----------------------------------------------------
+    # Check expected methods
+    # -----------------------------------------------------
+
+    found_methods = set(
+        df["Method"].tolist()
+    )
+
+    expected_methods = set(
+        EXPECTED_METHODS
+    )
+
+    missing_methods = sorted(
+        expected_methods - found_methods
+    )
+
+    unexpected_methods = sorted(
+        found_methods - expected_methods
+    )
+
+    if missing_methods:
+
+        raise ValueError(
+            "\nExpected baseline method(s) are missing:\n"
+            f"{missing_methods}\n\n"
+            "The direct baseline comparison should contain "
+            "six classical baselines plus the Proposed Model."
+        )
+
+    if unexpected_methods:
+
+        raise ValueError(
+            "\nUnexpected method name(s) detected:\n"
+            f"{unexpected_methods}\n\n"
+            "Check the method names in "
+            "compare_with_baselines.py."
         )
 
     # -----------------------------------------------------
@@ -119,16 +253,44 @@ def load_baseline_results(csv_file):
         )
 
         if df[metric].isna().any():
+
             raise ValueError(
-                f"Metric '{metric}' contains "
+                f"\nMetric '{metric}' contains "
                 "missing or non-numeric values."
             )
 
-        if not np.isfinite(df[metric].to_numpy()).all():
+        values = df[metric].to_numpy(
+            dtype=np.float64
+        )
+
+        if not np.isfinite(values).all():
+
             raise ValueError(
-                f"Metric '{metric}' contains "
+                f"\nMetric '{metric}' contains "
                 "non-finite values."
             )
+
+    # -----------------------------------------------------
+    # Reorder rows according to the defined experimental
+    # method order.
+    # -----------------------------------------------------
+
+    method_order = {
+        method: index
+        for index, method in enumerate(
+            EXPECTED_METHODS
+        )
+    }
+
+    df["_method_order"] = (
+        df["Method"].map(method_order)
+    )
+
+    df = (
+        df.sort_values("_method_order")
+        .drop(columns="_method_order")
+        .reset_index(drop=True)
+    )
 
     return df
 
@@ -137,22 +299,22 @@ def load_baseline_results(csv_file):
 # CREATE PLOT
 # =========================================================
 
-def create_baseline_plot(df, output_file):
+def create_baseline_plot(
+        df,
+        output_file
+):
     """
     Create and save the publication-quality baseline
     comparison figure.
     """
 
-    methods = df["Method"].astype(str).tolist()
+    methods = (
+        df["Method"]
+        .tolist()
+    )
 
     # -----------------------------------------------------
     # Metric groups
-    #
-    # Error metrics:
-    #   Lower is better
-    #
-    # Quality metrics:
-    #   Higher is generally better
     # -----------------------------------------------------
 
     error_metrics = [
@@ -170,26 +332,39 @@ def create_baseline_plot(df, output_file):
     # X-axis positions
     # -----------------------------------------------------
 
-    error_x = np.arange(len(error_metrics))
-    quality_x = np.arange(len(quality_metrics))
+    error_x = np.arange(
+        len(error_metrics)
+    )
 
-    # Number of methods
-    num_methods = len(methods)
-
-    # Bar width adapts to the number of methods
-    width = min(
-        0.8 / max(num_methods, 1),
-        0.25
+    quality_x = np.arange(
+        len(quality_metrics)
     )
 
     # -----------------------------------------------------
-    # Create figure with two panels
+    # Number of methods
     # -----------------------------------------------------
+
+    num_methods = len(
+        methods
+    )
+
+    # -----------------------------------------------------
+    # Bar width
+    # -----------------------------------------------------
+
+    width = min(
+        0.8 / max(num_methods, 1),
+        0.16
+    )
+
+    # =====================================================
+    # FIGURE
+    # =====================================================
 
     fig, axes = plt.subplots(
         1,
         2,
-        figsize=(14, 6)
+        figsize=(16, 7)
     )
 
     ax_error = axes[0]
@@ -199,15 +374,22 @@ def create_baseline_plot(df, output_file):
     # ERROR METRICS
     # =====================================================
 
-    for i, method in enumerate(methods):
+    for i, method in enumerate(
+        methods
+    ):
+
+        method_row = df[
+            df["Method"] == method
+        ].iloc[0]
 
         values = [
-            df.loc[i, metric]
+            method_row[metric]
             for metric in error_metrics
         ]
 
         offset = (
-            i - (num_methods - 1) / 2
+            i
+            - (num_methods - 1) / 2
         ) * width
 
         ax_error.bar(
@@ -217,10 +399,13 @@ def create_baseline_plot(df, output_file):
             label=method
         )
 
-    ax_error.set_xticks(error_x)
+    ax_error.set_xticks(
+        error_x
+    )
 
     ax_error.set_xticklabels(
-        error_metrics
+        error_metrics,
+        fontsize=10
     )
 
     ax_error.set_ylabel(
@@ -228,7 +413,8 @@ def create_baseline_plot(df, output_file):
     )
 
     ax_error.set_title(
-        "Reconstruction Error Metrics"
+        "Reconstruction Error Metrics",
+        fontweight="bold"
     )
 
     ax_error.grid(
@@ -237,11 +423,10 @@ def create_baseline_plot(df, output_file):
         alpha=0.3
     )
 
-    # Lower error is better
     ax_error.text(
         0.5,
-        -0.14,
-        "Lower values indicate better reconstruction",
+        -0.15,
+        "Lower values indicate lower reconstruction error",
         transform=ax_error.transAxes,
         ha="center",
         fontsize=9
@@ -251,15 +436,22 @@ def create_baseline_plot(df, output_file):
     # QUALITY METRICS
     # =====================================================
 
-    for i, method in enumerate(methods):
+    for i, method in enumerate(
+        methods
+    ):
+
+        method_row = df[
+            df["Method"] == method
+        ].iloc[0]
 
         values = [
-            df.loc[i, metric]
+            method_row[metric]
             for metric in quality_metrics
         ]
 
         offset = (
-            i - (num_methods - 1) / 2
+            i
+            - (num_methods - 1) / 2
         ) * width
 
         ax_quality.bar(
@@ -274,7 +466,8 @@ def create_baseline_plot(df, output_file):
     )
 
     ax_quality.set_xticklabels(
-        quality_metrics
+        quality_metrics,
+        fontsize=10
     )
 
     ax_quality.set_ylabel(
@@ -282,7 +475,8 @@ def create_baseline_plot(df, output_file):
     )
 
     ax_quality.set_title(
-        "Reconstruction Quality Metrics"
+        "Reconstruction Quality Metrics",
+        fontweight="bold"
     )
 
     ax_quality.grid(
@@ -291,11 +485,10 @@ def create_baseline_plot(df, output_file):
         alpha=0.3
     )
 
-    # Higher quality is generally better
     ax_quality.text(
         0.5,
-        -0.14,
-        "Higher values generally indicate better reconstruction",
+        -0.15,
+        "Higher values generally indicate better reconstruction quality",
         transform=ax_quality.transAxes,
         ha="center",
         fontsize=9
@@ -306,46 +499,56 @@ def create_baseline_plot(df, output_file):
     # =====================================================
 
     fig.suptitle(
-        "Baseline Comparison of Seismic Reconstruction Methods",
-        fontsize=14,
+        "Comparison of Seismic Reconstruction Methods",
+        fontsize=15,
         fontweight="bold"
     )
 
-    # -----------------------------------------------------
-    # Shared legend
-    # -----------------------------------------------------
+    # =====================================================
+    # SHARED LEGEND
+    # =====================================================
 
-    handles, labels = ax_error.get_legend_handles_labels()
+    handles, labels = (
+        ax_error.get_legend_handles_labels()
+    )
 
     fig.legend(
         handles,
         labels,
         loc="upper center",
-        bbox_to_anchor=(0.5, 0.94),
-        ncol=min(num_methods, 4),
-        frameon=False
+        bbox_to_anchor=(0.5, 0.925),
+        ncol=4,
+        frameon=False,
+        fontsize=9
     )
 
-    # -----------------------------------------------------
-    # Layout
-    # -----------------------------------------------------
+    # =====================================================
+    # LAYOUT
+    # =====================================================
 
     plt.tight_layout(
-        rect=[0, 0.05, 1, 0.86]
+        rect=[
+            0,
+            0.06,
+            1,
+            0.82
+        ]
     )
 
-    # -----------------------------------------------------
-    # Ensure output directory exists
-    # -----------------------------------------------------
+    # =====================================================
+    # OUTPUT DIRECTORY
+    # =====================================================
 
     os.makedirs(
-        os.path.dirname(output_file),
+        os.path.dirname(
+            output_file
+        ),
         exist_ok=True
     )
 
-    # -----------------------------------------------------
-    # Save high-resolution figure
-    # -----------------------------------------------------
+    # =====================================================
+    # SAVE FIGURE
+    # =====================================================
 
     fig.savefig(
         output_file,
@@ -353,7 +556,9 @@ def create_baseline_plot(df, output_file):
         bbox_inches="tight"
     )
 
-    plt.close(fig)
+    plt.close(
+        fig
+    )
 
 
 # =========================================================
@@ -363,28 +568,43 @@ def create_baseline_plot(df, output_file):
 def main():
 
     print()
-    print("=" * 60)
+    print("=" * 70)
     print("BASELINE COMPARISON PLOT")
-    print("=" * 60)
+    print("=" * 70)
 
     print()
     print("Input:")
     print(CSV_FILE)
 
     print()
-    print("Loading baseline results...")
+    print("Loading and validating baseline results...")
 
     df = load_baseline_results(
         CSV_FILE
     )
 
     print()
-    print("Methods:")
-    for method in df["Method"]:
-        print(f"  - {method}")
+    print("Validated methods:")
+
+    for number, method in enumerate(
+        df["Method"],
+        start=1
+    ):
+
+        print(
+            f"  {number}. {method}"
+        )
 
     print()
-    print("Creating comparison figure...")
+    print(
+        "Number of methods:",
+        len(df)
+    )
+
+    print()
+    print(
+        "Creating comparison figure..."
+    )
 
     create_baseline_plot(
         df,
@@ -396,9 +616,11 @@ def main():
     print(OUTPUT_FILE)
 
     print()
-    print("=" * 60)
-    print("BASELINE COMPARISON PLOT COMPLETE")
-    print("=" * 60)
+    print("=" * 70)
+    print(
+        "BASELINE COMPARISON PLOT COMPLETE"
+    )
+    print("=" * 70)
 
 
 # =========================================================
@@ -406,4 +628,5 @@ def main():
 # =========================================================
 
 if __name__ == "__main__":
+
     main()

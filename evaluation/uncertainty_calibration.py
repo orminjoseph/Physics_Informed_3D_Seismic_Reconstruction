@@ -1,956 +1,1236 @@
 """
-=========================================================
-Uncertainty Calibration
-=========================================================
+======================================================================
+UNCERTAINTY CALIBRATION AND ERROR ALIGNMENT
+======================================================================
 
 Physics-Informed 3D Encoder-Decoder Framework
 with Predictive Uncertainty for Seismic Data Reconstruction
 
 Purpose
 -------
-Evaluates whether higher predictive uncertainty is associated
-with higher reconstruction error.
+This module evaluates whether predictive uncertainty is aligned with
+reconstruction error.
 
-The script is DATASET-MODE AWARE and can operate with:
+The analysis includes:
 
-    DATASET_MODE = "synthetic"
-    DATASET_MODE = "f3"
+1. Patch-level predictive uncertainty
+2. Patch-level reconstruction error
+3. Missing-region reconstruction error
+4. Pearson correlation
+5. Spearman correlation
+6. Quantile-based uncertainty bins
+7. Uncertainty-Error Alignment Gap (UEAG)
+8. Observed-data preservation verification
+9. Summary CSV files
+10. Calibration plot
 
-Predictive uncertainty is computed as:
+Important
+---------
+This module performs uncertainty-error alignment analysis.
 
-    Predictive Variance
-        = Aleatoric Variance
-        + Epistemic Variance
+UEAG is NOT Expected Calibration Error (ECE).
 
-and therefore:
-
-    Predictive Std
-        = sqrt(Aleatoric Std^2 + Epistemic Std^2)
-
-Outputs
--------
-1. uncertainty_calibration.csv
-2. uncertainty_calibration.png
+Formal probabilistic interval coverage should be evaluated separately
+if required.
 
 Author: Ormin Joseph
-=========================================================
+======================================================================
 """
 
-import os
+# ======================================================================
+# 1. IMPORTS
+# ======================================================================
+
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import torch
 import matplotlib.pyplot as plt
+
+from scipy.stats import pearsonr, spearmanr
 
 from utils.config import (
     DATASET_MODE,
-    CHECKPOINT_DIR,
+    EXPERIMENT_NAME,
     REPORT_DIR,
-    FIGURE_DIR,
+    BATCH_SIZE,
+    MC_DROPOUT_SAMPLES,
     DEVICE,
 )
 
 from dataset.build_dataset import build_dataset
-from inference.predictor import Predictor
+
 from models.network import Network3D
 
+from inference.predictor import Predictor
 
-# =========================================================
-# Configuration
-# =========================================================
+from evaluation.evaluator import Evaluator
 
-NUM_PATCHES = 20
+
+# ======================================================================
+# 2. USER SETTINGS
+# ======================================================================
+
+# ----------------------------------------------------------------------
+# Number of samples to analyse.
+#
+# None = use the complete dataset.
+#
+# For a quick debugging test, you may temporarily use:
+#
+# NUM_PATCHES = 5
+#
+# For final thesis evaluation:
+#
+# NUM_PATCHES = None
+# ----------------------------------------------------------------------
+
+NUM_PATCHES = None
+
+
+# ----------------------------------------------------------------------
+# Number of uncertainty bins.
+# ----------------------------------------------------------------------
+
 NUM_BINS = 10
 
-CHECKPOINT = os.path.join(
-    CHECKPOINT_DIR,
-    "best_model.pth"
+
+# ----------------------------------------------------------------------
+# Numerical tolerance.
+# ----------------------------------------------------------------------
+
+EPSILON = 1.0e-8
+
+
+# ----------------------------------------------------------------------
+# Expected observed-data preservation tolerance.
+# ----------------------------------------------------------------------
+
+OBSERVED_PRESERVATION_TOLERANCE = 1.0e-6
+
+
+# ======================================================================
+# 3. OUTPUT PATHS
+# ======================================================================
+
+# Convert REPORT_DIR into a Path object.
+REPORT_PATH = Path(REPORT_DIR)
+
+# Create the directory if it does not already exist.
+REPORT_PATH.mkdir(parents=True, exist_ok=True)
+
+
+# Output files.
+PATCH_RESULTS_FILE = (
+    REPORT_PATH / "uncertainty_calibration.csv"
 )
 
-OUTPUT_DIRECTORY = os.path.join(
-    REPORT_DIR,
-    "uncertainty_calibration"
+BIN_RESULTS_FILE = (
+    REPORT_PATH / "uncertainty_calibration_bins.csv"
 )
 
-CSV_FILE = os.path.join(
-    OUTPUT_DIRECTORY,
-    "uncertainty_calibration.csv"
+SUMMARY_FILE = (
+    REPORT_PATH / "uncertainty_calibration_summary.csv"
 )
 
-FIGURE_FILE = os.path.join(
-    FIGURE_DIR,
-    "uncertainty_calibration",
-    "uncertainty_calibration.png"
+PLOT_FILE = (
+    REPORT_PATH / "uncertainty_calibration.png"
 )
 
 
-# =========================================================
-# Utility Functions
-# =========================================================
+# ======================================================================
+# 4. DATASET ADAPTER
+# ======================================================================
 
-def validate_finite_array(
-    array,
-    name
+class SingleSampleDataset(torch.utils.data.Dataset):
+    """
+    Converts one dataset sample into the dictionary format expected
+    by evaluation.Evaluator.
+    """
+
+    def __init__(self, sample):
+        """
+        Parameters
+        ----------
+        sample : tuple
+            Expected dataset output:
+
+            (
+                input_cube,
+                target_cube,
+                mask,
+                velocity,
+                mask_type,
+                geological_mode
+            )
+        """
+
+        # Store the sample.
+        self.sample = sample
+
+    def __len__(self):
+        """
+        Return the number of samples.
+
+        This adapter contains exactly one sample.
+        """
+
+        return 1
+
+    def __getitem__(self, index):
+        """
+        Return one sample in Evaluator-compatible dictionary format.
+        """
+
+        # Prevent invalid indexing.
+        if index != 0:
+            raise IndexError("SingleSampleDataset contains one sample.")
+
+        # Unpack the original dataset tuple.
+        (
+            input_cube,
+            target_cube,
+            mask,
+            velocity,
+            mask_type,
+            geological_mode,
+        ) = self.sample
+
+        # Return the dictionary expected by Evaluator.
+        return {
+            "input": input_cube,
+            "target": target_cube,
+            "mask": mask,
+            "velocity": velocity,
+            "mask_type": mask_type,
+            "geological_mode": geological_mode,
+        }
+
+
+# ======================================================================
+# 5. NUMERICAL VALIDATION
+# ======================================================================
+
+def validate_finite_dataframe(dataframe):
+    """
+    Check that all numeric columns contain finite values.
+    """
+
+    # Select numeric columns only.
+    numeric_columns = dataframe.select_dtypes(
+        include=[np.number]
+    ).columns
+
+    # Check every numeric column.
+    for column in numeric_columns:
+
+        # Convert the column to NumPy values.
+        values = dataframe[column].to_numpy(
+            dtype=float
+        )
+
+        # Check for NaN or infinite values.
+        if not np.all(np.isfinite(values)):
+
+            raise ValueError(
+                f"Non-finite values detected in column: {column}"
+            )
+
+
+# ======================================================================
+# 6. CORRELATION ANALYSIS
+# ======================================================================
+
+def calculate_correlations(
+    uncertainty,
+    reconstruction_error,
+    missing_error,
 ):
     """
-    Validate that an array contains finite values.
+    Calculate Pearson and Spearman correlations.
+
+    Parameters
+    ----------
+    uncertainty : array-like
+        Patch-level predictive standard deviation.
+
+    reconstruction_error : array-like
+        Patch-level global MAE.
+
+    missing_error : array-like
+        Patch-level missing-region MAE.
+
+    Returns
+    -------
+    dict
+        Correlation statistics.
     """
 
-    array = np.asarray(
-        array,
-        dtype=np.float64
+    # Convert all inputs to NumPy arrays.
+    uncertainty = np.asarray(
+        uncertainty,
+        dtype=float,
     )
 
-    if array.size == 0:
+    reconstruction_error = np.asarray(
+        reconstruction_error,
+        dtype=float,
+    )
 
-        raise ValueError(
-            f"{name} is empty."
+    missing_error = np.asarray(
+        missing_error,
+        dtype=float,
+    )
+
+    # --------------------------------------------------------------
+    # Pearson correlation:
+    # uncertainty versus global reconstruction error.
+    # --------------------------------------------------------------
+
+    if len(uncertainty) >= 2:
+
+        pearson_global, pearson_global_p = pearsonr(
+            uncertainty,
+            reconstruction_error,
         )
-
-    if not np.all(
-        np.isfinite(array)
-    ):
-
-        raise ValueError(
-            f"{name} contains NaN or infinite values."
-        )
-
-    return array
-
-
-# =========================================================
-# Tensor Preparation
-# =========================================================
-
-def prepare_input_tensor(
-    corrupted
-):
-    """
-    Convert dataset input into the 5D tensor format expected
-    by the network:
-
-        [Batch, Channel, Depth, Height, Width]
-    """
-
-    if corrupted.ndim == 4:
-
-        corrupted = corrupted.unsqueeze(0)
-
-    elif corrupted.ndim == 5:
-
-        pass
 
     else:
 
-        raise ValueError(
-            "Unexpected corrupted input shape: "
-            f"{tuple(corrupted.shape)}"
-        )
+        pearson_global = np.nan
+        pearson_global_p = np.nan
 
-    return corrupted
+    # --------------------------------------------------------------
+    # Spearman correlation:
+    # uncertainty versus global reconstruction error.
+    # --------------------------------------------------------------
 
+    if len(uncertainty) >= 2:
 
-# =========================================================
-# Dataset Information
-# =========================================================
-
-def describe_dataset(
-    dataset
-):
-    """
-    Print dataset information.
-    """
-
-    print()
-    print(
-        f"Dataset mode : {DATASET_MODE}"
-    )
-
-    print(
-        f"Dataset size : {len(dataset)}"
-    )
-
-    print(
-        f"Number of patches evaluated : "
-        f"{min(NUM_PATCHES, len(dataset))}"
-    )
-
-
-# =========================================================
-# Collect Error and Uncertainty
-# =========================================================
-
-def collect_calibration_data(
-    dataset,
-    predictor
-):
-    """
-    Collect voxel-wise reconstruction error and
-    predictive uncertainty.
-
-    Returns
-    -------
-    errors : numpy.ndarray
-        Absolute reconstruction errors.
-
-    uncertainties : numpy.ndarray
-        Predictive standard deviations.
-    """
-
-    all_errors = []
-    all_uncertainties = []
-
-    number_of_patches = min(
-        NUM_PATCHES,
-        len(dataset)
-    )
-
-    for patch_index in range(
-        number_of_patches
-    ):
-
-        print(
-            f"Processing patch "
-            f"{patch_index + 1}/"
-            f"{number_of_patches}"
-        )
-
-        # -------------------------------------------------
-        # Dataset sample
-        # -------------------------------------------------
-
-        sample = dataset[
-            patch_index
-        ]
-
-        if len(sample) < 4:
-
-            raise ValueError(
-                "Dataset sample must contain at least "
-                "input, target, mask and velocity."
-            )
-
-        corrupted = sample[0]
-        target = sample[1]
-
-        # -------------------------------------------------
-        # Prepare input
-        # -------------------------------------------------
-
-        corrupted = prepare_input_tensor(
-            corrupted
-        )
-
-        # -------------------------------------------------
-        # Prediction
-        # -------------------------------------------------
-
-        (
-            reconstruction,
-            travel_time,
-            aleatoric_std,
-            epistemic_std
-        ) = predictor.predict(
-            corrupted
-        )
-
-        # -------------------------------------------------
-        # Prepare target
-        # -------------------------------------------------
-
-        if target.ndim == 4:
-
-            target = target.unsqueeze(0)
-
-        elif target.ndim == 5:
-
-            pass
-
-        else:
-
-            raise ValueError(
-                "Unexpected target shape: "
-                f"{tuple(target.shape)}"
-            )
-
-        # -------------------------------------------------
-        # Shape validation
-        # -------------------------------------------------
-
-        if (
-            reconstruction.shape
-            != target.shape
-        ):
-
-            raise ValueError(
-                "Reconstruction and target shapes "
-                "do not match.\n"
-                f"Reconstruction: "
-                f"{tuple(reconstruction.shape)}\n"
-                f"Target: "
-                f"{tuple(target.shape)}"
-            )
-
-        if (
-            aleatoric_std.shape
-            != reconstruction.shape
-        ):
-
-            raise ValueError(
-                "Aleatoric uncertainty shape does not "
-                "match reconstruction shape."
-            )
-
-        if (
-            epistemic_std.shape
-            != reconstruction.shape
-        ):
-
-            raise ValueError(
-                "Epistemic uncertainty shape does not "
-                "match reconstruction shape."
-            )
-
-        # -------------------------------------------------
-        # Reconstruction error
-        # -------------------------------------------------
-
-        error = torch_abs(
-            reconstruction
-            -
-            target.to(
-                reconstruction.device
-            )
-        )
-
-        # -------------------------------------------------
-        # Predictive uncertainty
-        # -------------------------------------------------
-        #
-        # Predictive variance:
-        #
-        #     sigma_pred^2
-        #         =
-        #     sigma_alea^2
-        #         +
-        #     sigma_epi^2
-        #
-        # Therefore:
-        #
-        #     sigma_pred
-        #         =
-        #     sqrt(
-        #         sigma_alea^2
-        #         +
-        #         sigma_epi^2
-        #     )
-
-        predictive_std = (
-            aleatoric_std.pow(2)
-            +
-            epistemic_std.pow(2)
-        ).sqrt()
-
-        # -------------------------------------------------
-        # Convert to NumPy
-        # -------------------------------------------------
-
-        error = (
-            error
-            .detach()
-            .cpu()
-            .numpy()
-            .squeeze()
-        )
-
-        predictive_std = (
-            predictive_std
-            .detach()
-            .cpu()
-            .numpy()
-            .squeeze()
-        )
-
-        # -------------------------------------------------
-        # Validate
-        # -------------------------------------------------
-
-        error = validate_finite_array(
-            error,
-            "Reconstruction error"
-        )
-
-        predictive_std = validate_finite_array(
-            predictive_std,
-            "Predictive uncertainty"
-        )
-
-        # -------------------------------------------------
-        # Flatten
-        # -------------------------------------------------
-
-        all_errors.extend(
-            error.reshape(-1)
-        )
-
-        all_uncertainties.extend(
-            predictive_std.reshape(-1)
-        )
-
-    # -----------------------------------------------------
-    # Convert to arrays
-    # -----------------------------------------------------
-
-    all_errors = np.asarray(
-        all_errors,
-        dtype=np.float64
-    )
-
-    all_uncertainties = np.asarray(
-        all_uncertainties,
-        dtype=np.float64
-    )
-
-    if len(all_errors) != len(
-        all_uncertainties
-    ):
-
-        raise RuntimeError(
-            "Error and uncertainty arrays "
-            "have different lengths."
-        )
-
-    if len(all_errors) == 0:
-
-        raise RuntimeError(
-            "No calibration data were collected."
-        )
-
-    return (
-        all_errors,
-        all_uncertainties
-    )
-
-
-# =========================================================
-# PyTorch-independent absolute value
-# =========================================================
-
-def torch_abs(
-    tensor
-):
-    """
-    Compute absolute value using PyTorch tensor operations.
-
-    Imported locally so this utility remains isolated.
-    """
-
-    import torch
-
-    return torch.abs(
-        tensor
-    )
-
-
-# =========================================================
-# Min-Max Normalization
-# =========================================================
-
-def normalize_to_unit_interval(
-    values
-):
-    """
-    Normalize values to [0, 1].
-
-    This is used here to create a relative calibration
-    diagnostic between uncertainty magnitude and error
-    magnitude.
-
-    IMPORTANT:
-    This is not a probability calibration metric.
-    """
-
-    values = validate_finite_array(
-        values,
-        "Values to normalize"
-    )
-
-    minimum = values.min()
-    maximum = values.max()
-
-    if (
-        maximum
-        -
-        minimum
-        <
-        1e-12
-    ):
-
-        return np.zeros_like(
-            values
-        )
-
-    return (
-        values
-        -
-        minimum
-    ) / (
-        maximum
-        -
-        minimum
-    )
-
-
-# =========================================================
-# Calibration Binning
-# =========================================================
-
-def calculate_calibration(
-    normalized_uncertainty,
-    normalized_error,
-    num_bins=10
-):
-    """
-    Calculate bin-wise calibration statistics.
-
-    Returns
-    -------
-    calibration : pandas.DataFrame
-    ece : float
-    """
-
-    bins = np.linspace(
-        0.0,
-        1.0,
-        num_bins + 1
-    )
-
-    records = []
-
-    total_samples = len(
-        normalized_uncertainty
-    )
-
-    for i in range(
-        num_bins
-    ):
-
-        lower = bins[i]
-        upper = bins[i + 1]
-
-        if i == num_bins - 1:
-
-            indices = (
-                (normalized_uncertainty >= lower)
-                &
-                (normalized_uncertainty <= upper)
-            )
-
-        else:
-
-            indices = (
-                (normalized_uncertainty >= lower)
-                &
-                (normalized_uncertainty < upper)
-            )
-
-        count = int(
-            indices.sum()
-        )
-
-        if count == 0:
-
-            continue
-
-        mean_uncertainty = float(
-            normalized_uncertainty[
-                indices
-            ].mean()
-        )
-
-        mean_error = float(
-            normalized_error[
-                indices
-            ].mean()
-        )
-
-        absolute_gap = abs(
-            mean_uncertainty
-            -
-            mean_error
-        )
-
-        records.append({
-
-            "Bin_Lower":
-                lower,
-
-            "Bin_Upper":
-                upper,
-
-            "Sample_Count":
-                count,
-
-            "Mean_Uncertainty":
-                mean_uncertainty,
-
-            "Mean_Error":
-                mean_error,
-
-            "Absolute_Gap":
-                absolute_gap
-        })
-
-    calibration = pd.DataFrame(
-        records
-    )
-
-    if calibration.empty:
-
-        raise RuntimeError(
-            "No populated calibration bins."
-        )
-
-    # -----------------------------------------------------
-    # Proper sample-weighted ECE
-    # -----------------------------------------------------
-
-    ece = (
-        (
-            calibration["Sample_Count"]
-            /
-            total_samples
-        )
-        *
-        calibration["Absolute_Gap"]
-    ).sum()
-
-    return (
-        calibration,
-        float(ece)
-    )
-
-
-# =========================================================
-# Pearson Correlation
-# =========================================================
-
-def calculate_correlation(
-    uncertainty,
-    error
-):
-    """
-    Calculate Pearson correlation between uncertainty
-    and reconstruction error.
-    """
-
-    if (
-        np.std(uncertainty) < 1e-12
-        or
-        np.std(error) < 1e-12
-    ):
-
-        return np.nan
-
-    return float(
-        np.corrcoef(
+        spearman_global, spearman_global_p = spearmanr(
             uncertainty,
-            error
-        )[0, 1]
-    )
+            reconstruction_error,
+        )
+
+    else:
+
+        spearman_global = np.nan
+        spearman_global_p = np.nan
+
+    # --------------------------------------------------------------
+    # Pearson correlation:
+    # uncertainty versus missing-region error.
+    # --------------------------------------------------------------
+
+    if len(uncertainty) >= 2:
+
+        pearson_missing, pearson_missing_p = pearsonr(
+            uncertainty,
+            missing_error,
+        )
+
+    else:
+
+        pearson_missing = np.nan
+        pearson_missing_p = np.nan
+
+    # --------------------------------------------------------------
+    # Spearman correlation:
+    # uncertainty versus missing-region error.
+    # --------------------------------------------------------------
+
+    if len(uncertainty) >= 2:
+
+        spearman_missing, spearman_missing_p = spearmanr(
+            uncertainty,
+            missing_error,
+        )
+
+    else:
+
+        spearman_missing = np.nan
+        spearman_missing_p = np.nan
+
+    # Return all statistics.
+    return {
+        "pearson_global_r": pearson_global,
+        "pearson_global_p": pearson_global_p,
+        "spearman_global_r": spearman_global,
+        "spearman_global_p": spearman_global_p,
+        "pearson_missing_r": pearson_missing,
+        "pearson_missing_p": pearson_missing_p,
+        "spearman_missing_r": spearman_missing,
+        "spearman_missing_p": spearman_missing_p,
+    }
 
 
-# =========================================================
-# Reliability Diagram
-# =========================================================
+# ======================================================================
+# 7. UNCERTAINTY BINNING
+# ======================================================================
 
-def plot_calibration(
-    calibration,
-    ece,
-    correlation
+def calculate_uncertainty_bins(
+    dataframe,
+    number_of_bins=10,
 ):
     """
-    Generate and save the uncertainty calibration plot.
+    Divide patches into uncertainty quantile bins.
+
+    The bins are based on predictive standard deviation.
+
+    Returns
+    -------
+    calibration_table : pandas.DataFrame
+        Statistics for every uncertainty bin.
+
+    global_gap : float
+        Mean absolute difference between normalized uncertainty
+        and normalized global MAE.
+
+    missing_gap : float
+        Mean absolute difference between normalized uncertainty
+        and normalized missing-region MAE.
+
+    Notes
+    -----
+    These gaps are descriptive alignment measures.
+
+    They are NOT Expected Calibration Error (ECE).
     """
 
-    os.makedirs(
-        os.path.dirname(
-            FIGURE_FILE
-        ),
-        exist_ok=True
+    # Work on a copy so the original dataframe is not modified.
+    data = dataframe.copy()
+
+    # --------------------------------------------------------------
+    # Create quantile-based bins.
+    # --------------------------------------------------------------
+
+    data["Uncertainty_Bin"] = pd.qcut(
+        data["Predictive_Std"],
+        q=number_of_bins,
+        labels=False,
+        duplicates="drop",
     )
 
+    # --------------------------------------------------------------
+    # Calculate statistics for each bin.
+    # --------------------------------------------------------------
+
+    calibration_table = (
+        data
+        .groupby(
+            "Uncertainty_Bin",
+            observed=True,
+        )
+        .agg(
+            Number_of_Patches=(
+                "Predictive_Std",
+                "count",
+            ),
+            Mean_Predictive_Std=(
+                "Predictive_Std",
+                "mean",
+            ),
+            Mean_MAE=(
+                "MAE",
+                "mean",
+            ),
+            Mean_Missing_MAE=(
+                "Missing_MAE",
+                "mean",
+            ),
+        )
+        .reset_index()
+    )
+
+    # --------------------------------------------------------------
+    # Calculate normalized alignment gaps.
+    # --------------------------------------------------------------
+
+    uncertainty_values = (
+        calibration_table["Mean_Predictive_Std"]
+        .to_numpy(dtype=float)
+    )
+
+    mae_values = (
+        calibration_table["Mean_MAE"]
+        .to_numpy(dtype=float)
+    )
+
+    missing_mae_values = (
+        calibration_table["Mean_Missing_MAE"]
+        .to_numpy(dtype=float)
+    )
+
+    # --------------------------------------------------------------
+    # Normalization helper.
+    # --------------------------------------------------------------
+
+    def normalize(values):
+        """
+        Min-max normalization with protection against
+        zero range.
+        """
+
+        minimum = np.min(values)
+        maximum = np.max(values)
+
+        denominator = maximum - minimum
+
+        if denominator < EPSILON:
+            return np.zeros_like(values)
+
+        return (
+            values - minimum
+        ) / denominator
+
+    # Normalize uncertainty.
+    uncertainty_normalized = normalize(
+        uncertainty_values
+    )
+
+    # Normalize global MAE.
+    mae_normalized = normalize(
+        mae_values
+    )
+
+    # Normalize missing-region MAE.
+    missing_mae_normalized = normalize(
+        missing_mae_values
+    )
+
+    # --------------------------------------------------------------
+    # Calculate alignment gaps.
+    # --------------------------------------------------------------
+
+    global_gap = float(
+        np.mean(
+            np.abs(
+                uncertainty_normalized
+                - mae_normalized
+            )
+        )
+    )
+
+    missing_gap = float(
+        np.mean(
+            np.abs(
+                uncertainty_normalized
+                - missing_mae_normalized
+            )
+        )
+    )
+
+    # --------------------------------------------------------------
+    # Add gap columns to the table.
+    # --------------------------------------------------------------
+
+    calibration_table[
+        "Global_Alignment_Gap"
+    ] = np.abs(
+        uncertainty_normalized
+        - mae_normalized
+    )
+
+    calibration_table[
+        "Missing_Alignment_Gap"
+    ] = np.abs(
+        uncertainty_normalized
+        - missing_mae_normalized
+    )
+
+    # Return all three outputs.
+    return (
+        calibration_table,
+        global_gap,
+        missing_gap,
+    )
+
+
+# ======================================================================
+# 8. PLOT GENERATION
+# ======================================================================
+
+def generate_calibration_plot(
+    dataframe,
+    calibration_table,
+):
+    """
+    Generate uncertainty-error alignment plots.
+    """
+
+    # Create a figure.
     plt.figure(
-        figsize=(7, 7)
+        figsize=(12, 5)
     )
 
-    plt.plot(
-        calibration[
-            "Mean_Uncertainty"
-        ],
-        calibration[
-            "Mean_Error"
+    # --------------------------------------------------------------
+    # Panel 1: Predictive uncertainty versus error.
+    # --------------------------------------------------------------
+
+    ax1 = plt.subplot(
+        1,
+        2,
+        1,
+    )
+
+    ax1.scatter(
+        dataframe["Predictive_Std"],
+        dataframe["MAE"],
+        alpha=0.7,
+        label="Global MAE",
+    )
+
+    ax1.scatter(
+        dataframe["Predictive_Std"],
+        dataframe["Missing_MAE"],
+        alpha=0.7,
+        label="Missing-region MAE",
+    )
+
+    ax1.set_xlabel(
+        "Predictive Standard Deviation"
+    )
+
+    ax1.set_ylabel(
+        "Reconstruction Error"
+    )
+
+    ax1.set_title(
+        "Uncertainty versus Reconstruction Error"
+    )
+
+    ax1.legend()
+
+    ax1.grid(
+        True,
+        alpha=0.3,
+    )
+
+    # --------------------------------------------------------------
+    # Panel 2: Mean uncertainty and error by bin.
+    # --------------------------------------------------------------
+
+    ax2 = plt.subplot(
+        1,
+        2,
+        2,
+    )
+
+    x = np.arange(
+        len(calibration_table)
+    )
+
+    ax2.plot(
+        x,
+        calibration_table[
+            "Mean_Predictive_Std"
         ],
         marker="o",
-        linewidth=2,
-        label="Calibration Curve"
+        label="Predictive Std",
     )
 
-    plt.plot(
-        [0, 1],
-        [0, 1],
-        "--",
-        linewidth=2,
-        label="Perfect Calibration"
+    ax2.plot(
+        x,
+        calibration_table[
+            "Mean_MAE"
+        ],
+        marker="s",
+        label="MAE",
     )
 
-    plt.xlabel(
-        "Normalized Predictive Uncertainty"
+    ax2.plot(
+        x,
+        calibration_table[
+            "Mean_Missing_MAE"
+        ],
+        marker="^",
+        label="Missing MAE",
     )
 
-    plt.ylabel(
-        "Normalized Reconstruction Error"
+    ax2.set_xlabel(
+        "Uncertainty Quantile Bin"
     )
 
-    plt.title(
-        "Predictive Uncertainty Calibration\n"
-        f"ECE = {ece:.4f}, "
-        f"Pearson r = {correlation:.4f}"
+    ax2.set_ylabel(
+        "Mean Value"
     )
 
-    plt.grid(
-        True
+    ax2.set_title(
+        "Uncertainty-Error Alignment"
     )
 
-    plt.legend()
+    ax2.set_xticks(x)
 
+    ax2.legend()
+
+    ax2.grid(
+        True,
+        alpha=0.3,
+    )
+
+    # Adjust spacing.
     plt.tight_layout()
 
+    # Save the figure.
     plt.savefig(
-        FIGURE_FILE,
+        PLOT_FILE,
         dpi=300,
-        bbox_inches="tight"
+        bbox_inches="tight",
     )
 
+    # Close the figure.
     plt.close()
 
 
-# =========================================================
-# Main
-# =========================================================
+# ======================================================================
+# 9. MAIN CALIBRATION FUNCTION
+# ======================================================================
 
-def main():
-
-    print()
-    print(
-        "=" * 60
-    )
-    print(
-        "UNCERTAINTY CALIBRATION"
-    )
-    print(
-        "=" * 60
-    )
-
-    # -----------------------------------------------------
-    # Display configuration
-    # -----------------------------------------------------
+def run_uncertainty_calibration():
+    """
+    Execute the complete uncertainty calibration/error alignment
+    analysis.
+    """
 
     print()
-    print(
-        f"Data mode : {DATASET_MODE}"
-    )
+    print("=" * 80)
+    print("UNCERTAINTY CALIBRATION AND ERROR ALIGNMENT")
+    print("=" * 80)
 
-    print(
-        f"Device    : {DEVICE}"
-    )
+    print()
+    print(f"Dataset mode       : {DATASET_MODE}")
+    print(f"Experiment         : {EXPERIMENT_NAME}")
+    print(f"Device             : {DEVICE}")
+    print(f"MC samples         : {MC_DROPOUT_SAMPLES}")
+    print(f"Number of bins     : {NUM_BINS}")
 
-    print(
-        f"Checkpoint: {CHECKPOINT}"
-    )
+    # --------------------------------------------------------------
+    # STEP 1: BUILD DATASET
+    # --------------------------------------------------------------
 
-    # -----------------------------------------------------
-    # Validate checkpoint
-    # -----------------------------------------------------
-
-    if not os.path.exists(
-        CHECKPOINT
-    ):
-
-        raise FileNotFoundError(
-            "Checkpoint not found:\n"
-            f"{CHECKPOINT}"
-        )
-
-    # -----------------------------------------------------
-    # Build dataset according to DATASET_MODE
-    # -----------------------------------------------------
+    print()
+    print("-" * 80)
+    print("STEP 1: BUILD DATASET")
+    print("-" * 80)
 
     dataset = build_dataset()
 
-    describe_dataset(
-        dataset
+    total_samples = len(dataset)
+
+    print(
+        f"Total dataset samples: {total_samples}"
     )
 
-    # -----------------------------------------------------
-    # Create predictor
-    # -----------------------------------------------------
+    # Determine how many samples to evaluate.
+    if NUM_PATCHES is None:
 
+        number_of_samples = total_samples
+
+    else:
+
+        number_of_samples = min(
+            NUM_PATCHES,
+            total_samples,
+        )
+
+    print(
+        f"Samples to evaluate: {number_of_samples}"
+    )
+
+    # --------------------------------------------------------------
+    # STEP 2: CREATE MODEL
+    # --------------------------------------------------------------
+
+    print()
+    print("-" * 80)
+    print("STEP 2: CREATE MODEL")
+    print("-" * 80)
+
+    model = Network3D(
+        use_attention=True,
+        use_residual=True,
+        use_uncertainty=True,
+    )
+
+    print(
+        "Network3D created successfully."
+    )
+
+    # --------------------------------------------------------------
+    # STEP 3: LOAD CHECKPOINT THROUGH PREDICTOR
+    # --------------------------------------------------------------
+
+    print()
+    print("-" * 80)
+    print("STEP 3: LOAD MODEL CHECKPOINT")
+    print("-" * 80)
+
+    checkpoint_path = (
+        Path.cwd()
+        / "OUTPUTS"
+        / EXPERIMENT_NAME
+        / "checkpoints"
+        / "best_model.pth"
+    )
+
+    if not checkpoint_path.exists():
+
+        raise FileNotFoundError(
+            "Model checkpoint was not found:\n"
+            f"{checkpoint_path}"
+        )
+
+    # Predictor handles checkpoint loading.
     predictor = Predictor(
-        model=Network3D(),
-        checkpoint=CHECKPOINT,
-        device=DEVICE
+        model=model,
+        checkpoint_path=str(checkpoint_path),
+        device=DEVICE,
     )
 
-    # -----------------------------------------------------
-    # Collect data
-    # -----------------------------------------------------
+    # Use the loaded model.
+    loaded_model = predictor.model
+
+    print(
+        f"Checkpoint loaded:\n{checkpoint_path}"
+    )
+
+    # --------------------------------------------------------------
+    # STEP 4: CREATE EVALUATOR
+    # --------------------------------------------------------------
+
+    print()
+    print("-" * 80)
+    print("STEP 4: CREATE EVALUATOR")
+    print("-" * 80)
+
+    evaluator = Evaluator(
+        model=loaded_model,
+        device=DEVICE,
+        mc_samples=MC_DROPOUT_SAMPLES,
+    )
+
+    print(
+        "Evaluator created successfully."
+    )
+
+    # --------------------------------------------------------------
+    # STEP 5: EVALUATE PATCHES
+    # --------------------------------------------------------------
+
+    print()
+    print("-" * 80)
+    print("STEP 5: EVALUATE PATCHES")
+    print("-" * 80)
+
+    results = []
+
+    for sample_index in range(
+        number_of_samples
+    ):
+
+        print(
+            f"Evaluating sample "
+            f"{sample_index + 1}/"
+            f"{number_of_samples}"
+        )
+
+        # ----------------------------------------------------------
+        # Obtain one dataset sample.
+        # ----------------------------------------------------------
+
+        sample = dataset[sample_index]
+
+        # ----------------------------------------------------------
+        # Convert sample to Evaluator format.
+        # ----------------------------------------------------------
+
+        single_dataset = SingleSampleDataset(
+            sample
+        )
+
+        # ----------------------------------------------------------
+        # Create DataLoader.
+        # ----------------------------------------------------------
+
+        dataloader = torch.utils.data.DataLoader(
+            single_dataset,
+            batch_size=BATCH_SIZE,
+            shuffle=False,
+            num_workers=0,
+        )
+
+        # ----------------------------------------------------------
+        # Run production evaluator.
+        # ----------------------------------------------------------
+
+        evaluation_result = evaluator.evaluate(
+            dataloader
+        )
+
+        # ----------------------------------------------------------
+        # Extract required values.
+        # ----------------------------------------------------------
+
+        row = {
+            "Sample_ID": sample_index,
+            "MAE": float(
+                evaluation_result["mae"]
+            ),
+            "RMSE": float(
+                evaluation_result["rmse"]
+            ),
+            "Missing_MAE": float(
+                evaluation_result["missing_mae"]
+            ),
+            "Missing_RMSE": float(
+                evaluation_result["missing_rmse"]
+            ),
+            "Predictive_Variance": float(
+                evaluation_result[
+                    "predictive_variance"
+                ]
+            ),
+            "Predictive_Std": float(
+                evaluation_result[
+                    "predictive_std"
+                ]
+            ),
+            "Aleatoric_Variance": float(
+                evaluation_result[
+                    "aleatoric_variance"
+                ]
+            ),
+            "Epistemic_Variance": float(
+                evaluation_result[
+                    "epistemic_variance"
+                ]
+            ),
+            "Observed_Preservation_Error": float(
+                evaluation_result[
+                    "observed_preservation_error"
+                ]
+            ),
+            "Measured_Missing_Rate": float(
+                evaluation_result[
+                    "measured_missing_rate"
+                ]
+            ),
+            "MC_Samples": int(
+                evaluation_result.get(
+                    "mc_samples",
+                    MC_DROPOUT_SAMPLES,
+                )
+            ),
+        }
+
+        # ----------------------------------------------------------
+        # Validate uncertainty decomposition.
+        # ----------------------------------------------------------
+
+        decomposition_difference = abs(
+            row["Predictive_Variance"]
+            - (
+                row["Aleatoric_Variance"]
+                + row["Epistemic_Variance"]
+            )
+        )
+
+        if (
+            decomposition_difference
+            > 1.0e-5
+        ):
+
+            raise ValueError(
+                "Predictive uncertainty decomposition "
+                "failed for sample "
+                f"{sample_index}."
+            )
+
+        # ----------------------------------------------------------
+        # Validate observed-data preservation.
+        # ----------------------------------------------------------
+
+        if (
+            row[
+                "Observed_Preservation_Error"
+            ]
+            > OBSERVED_PRESERVATION_TOLERANCE
+        ):
+
+            raise ValueError(
+                "Observed-data preservation failed "
+                f"for sample {sample_index}."
+            )
+
+        # Add row to results.
+        results.append(row)
+
+    # --------------------------------------------------------------
+    # STEP 6: CREATE DATAFRAME
+    # --------------------------------------------------------------
+
+    print()
+    print("-" * 80)
+    print("STEP 6: CREATE RESULTS TABLE")
+    print("-" * 80)
+
+    results_dataframe = pd.DataFrame(
+        results
+    )
+
+    # Validate numerical values.
+    validate_finite_dataframe(
+        results_dataframe
+    )
+
+    # Save patch-level results.
+    results_dataframe.to_csv(
+        PATCH_RESULTS_FILE,
+        index=False,
+    )
+
+    print(
+        f"Patch results saved:\n"
+        f"{PATCH_RESULTS_FILE}"
+    )
+
+    # --------------------------------------------------------------
+    # STEP 7: CORRELATION ANALYSIS
+    # --------------------------------------------------------------
+
+    print()
+    print("-" * 80)
+    print("STEP 7: CORRELATION ANALYSIS")
+    print("-" * 80)
+
+    correlation_results = calculate_correlations(
+        results_dataframe[
+            "Predictive_Std"
+        ].values,
+        results_dataframe[
+            "MAE"
+        ].values,
+        results_dataframe[
+            "Missing_MAE"
+        ].values,
+    )
+
+    # --------------------------------------------------------------
+    # STEP 8: UNCERTAINTY BINNING
+    # --------------------------------------------------------------
+
+    print()
+    print("-" * 80)
+    print("STEP 8: UNCERTAINTY BINNING")
+    print("-" * 80)
 
     (
-        all_errors,
-        all_uncertainties
-    ) = collect_calibration_data(
-        dataset,
-        predictor
+        calibration_table,
+        global_gap,
+        missing_gap,
+    ) = calculate_uncertainty_bins(
+        results_dataframe,
+        number_of_bins=NUM_BINS,
     )
 
-    # -----------------------------------------------------
-    # Normalize
-    # -----------------------------------------------------
-
-    normalized_errors = (
-        normalize_to_unit_interval(
-            all_errors
-        )
+    # Save calibration bins.
+    calibration_table.to_csv(
+        BIN_RESULTS_FILE,
+        index=False,
     )
 
-    normalized_uncertainties = (
-        normalize_to_unit_interval(
-            all_uncertainties
-        )
+    print(
+        f"Calibration bins saved:\n"
+        f"{BIN_RESULTS_FILE}"
     )
 
-    # -----------------------------------------------------
-    # Calibration
-    # -----------------------------------------------------
+    # --------------------------------------------------------------
+    # STEP 9: SUMMARY
+    # --------------------------------------------------------------
 
-    (
-        calibration,
-        ece
-    ) = calculate_calibration(
-        normalized_uncertainties,
-        normalized_errors,
-        num_bins=NUM_BINS
+    print()
+    print("-" * 80)
+    print("STEP 9: CREATE SUMMARY")
+    print("-" * 80)
+
+    summary = {
+        "Dataset_Mode": DATASET_MODE,
+        "Experiment_Name": EXPERIMENT_NAME,
+        "Number_of_Patches": len(
+            results_dataframe
+        ),
+        "MC_Samples": MC_DROPOUT_SAMPLES,
+        "Mean_MAE": results_dataframe[
+            "MAE"
+        ].mean(),
+        "Mean_RMSE": results_dataframe[
+            "RMSE"
+        ].mean(),
+        "Mean_Missing_MAE": results_dataframe[
+            "Missing_MAE"
+        ].mean(),
+        "Mean_Missing_RMSE": results_dataframe[
+            "Missing_RMSE"
+        ].mean(),
+        "Mean_Predictive_Variance": results_dataframe[
+            "Predictive_Variance"
+        ].mean(),
+        "Mean_Predictive_Std": results_dataframe[
+            "Predictive_Std"
+        ].mean(),
+        "Mean_Aleatoric_Variance": results_dataframe[
+            "Aleatoric_Variance"
+        ].mean(),
+        "Mean_Epistemic_Variance": results_dataframe[
+            "Epistemic_Variance"
+        ].mean(),
+        "Mean_Missing_Rate": results_dataframe[
+            "Measured_Missing_Rate"
+        ].mean(),
+        "Mean_Observed_Preservation_Error": results_dataframe[
+            "Observed_Preservation_Error"
+        ].mean(),
+        "Pearson_Global_r": correlation_results[
+            "pearson_global_r"
+        ],
+        "Pearson_Global_p": correlation_results[
+            "pearson_global_p"
+        ],
+        "Spearman_Global_r": correlation_results[
+            "spearman_global_r"
+        ],
+        "Spearman_Global_p": correlation_results[
+            "spearman_global_p"
+        ],
+        "Pearson_Missing_r": correlation_results[
+            "pearson_missing_r"
+        ],
+        "Pearson_Missing_p": correlation_results[
+            "pearson_missing_p"
+        ],
+        "Spearman_Missing_r": correlation_results[
+            "spearman_missing_r"
+        ],
+        "Spearman_Missing_p": correlation_results[
+            "spearman_missing_p"
+        ],
+        "Uncertainty_Error_Alignment_Gap_Global": global_gap,
+        "Uncertainty_Error_Alignment_Gap_Missing": missing_gap,
+    }
+
+    summary_dataframe = pd.DataFrame(
+        [summary]
     )
 
-    # -----------------------------------------------------
-    # Correlation
-    # -----------------------------------------------------
-
-    correlation = calculate_correlation(
-        all_uncertainties,
-        all_errors
+    # Validate summary.
+    validate_finite_dataframe(
+        summary_dataframe
     )
 
-    # -----------------------------------------------------
-    # Save calibration table
-    # -----------------------------------------------------
-
-    os.makedirs(
-        OUTPUT_DIRECTORY,
-        exist_ok=True
+    # Save summary.
+    summary_dataframe.to_csv(
+        SUMMARY_FILE,
+        index=False,
     )
 
-    calibration.to_csv(
-        CSV_FILE,
-        index=False
+    print(
+        f"Summary saved:\n"
+        f"{SUMMARY_FILE}"
     )
 
-    # -----------------------------------------------------
-    # Plot
-    # -----------------------------------------------------
+    # --------------------------------------------------------------
+    # STEP 10: GENERATE PLOT
+    # --------------------------------------------------------------
 
-    plot_calibration(
-        calibration,
-        ece,
-        correlation
+    print()
+    print("-" * 80)
+    print("STEP 10: GENERATE CALIBRATION PLOT")
+    print("-" * 80)
+
+    generate_calibration_plot(
+        results_dataframe,
+        calibration_table,
     )
 
-    # -----------------------------------------------------
-    # Print results
-    # -----------------------------------------------------
+    print(
+        f"Plot saved:\n"
+        f"{PLOT_FILE}"
+    )
+
+    # --------------------------------------------------------------
+    # STEP 11: DISPLAY RESULTS
+    # --------------------------------------------------------------
+
+    print()
+    print("=" * 80)
+    print("UNCERTAINTY CALIBRATION COMPLETE")
+    print("=" * 80)
 
     print()
     print(
-        "-" * 60
+        "Pearson correlation "
+        "(Global MAE): "
+        f"{correlation_results['pearson_global_r']:.6f}"
     )
 
     print(
-        "CALIBRATION RESULTS"
+        "Spearman correlation "
+        "(Global MAE): "
+        f"{correlation_results['spearman_global_r']:.6f}"
     )
 
     print(
-        "-" * 60
+        "Pearson correlation "
+        "(Missing MAE): "
+        f"{correlation_results['pearson_missing_r']:.6f}"
     )
 
     print(
-        f"Data mode                  : "
-        f"{DATASET_MODE}"
-    )
-
-    print(
-        f"Number of voxels           : "
-        f"{len(all_errors):,}"
-    )
-
-    print(
-        f"Mean absolute error        : "
-        f"{all_errors.mean():.6f}"
-    )
-
-    print(
-        f"Mean predictive uncertainty: "
-        f"{all_uncertainties.mean():.6f}"
-    )
-
-    print(
-        f"Pearson correlation        : "
-        f"{correlation:.6f}"
-    )
-
-    print(
-        f"Expected Calibration Error : "
-        f"{ece:.6f}"
+        "Spearman correlation "
+        "(Missing MAE): "
+        f"{correlation_results['spearman_missing_r']:.6f}"
     )
 
     print()
     print(
-        calibration
+        "Global uncertainty-error alignment gap: "
+        f"{global_gap:.6f}"
+    )
+
+    print(
+        "Missing-region uncertainty-error "
+        f"alignment gap: {missing_gap:.6f}"
     )
 
     print()
     print(
-        "Saved:"
+        "Output files:"
     )
 
     print(
-        CSV_FILE
+        f"  1. {PATCH_RESULTS_FILE}"
     )
 
     print(
-        FIGURE_FILE
+        f"  2. {BIN_RESULTS_FILE}"
+    )
+
+    print(
+        f"  3. {SUMMARY_FILE}"
+    )
+
+    print(
+        f"  4. {PLOT_FILE}"
     )
 
     print()
-    print(
-        "=" * 60
-    )
+    print("=" * 80)
 
 
-# =========================================================
-# Entry Point
-# =========================================================
+# ======================================================================
+# 10. SCRIPT ENTRY POINT
+# ======================================================================
 
 if __name__ == "__main__":
 
-    main()
+    run_uncertainty_calibration()

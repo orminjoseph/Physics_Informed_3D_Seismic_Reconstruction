@@ -24,7 +24,7 @@ Training pipeline:
           |
           +---- MAE
           +---- Eikonal Physics
-          +---- Uncertainty
+          +---- Aleatoric Uncertainty
           +---- SSIM
 
 Dataset batch convention:
@@ -33,6 +33,8 @@ Dataset batch convention:
     targets
     mask
     velocity_model
+    mask_type
+    geological_mode
 
 Tensor convention:
 
@@ -52,14 +54,33 @@ The Trainer does NOT modify the physics equation.
 Large Eikonal gradients are diagnosed and controlled
 through gradient clipping.
 
+Important uncertainty distinction:
+
+    log_variance
+        -> aleatoric variance
+        -> aleatoric standard deviation
+
+    Epistemic uncertainty is NOT estimated during ordinary
+    training validation. It is estimated separately using
+    the MC-Dropout predictive uncertainty evaluator.
+
 Author: Ormin Joseph
 =========================================================
 """
+
+# =========================================================
+# STANDARD LIBRARY IMPORTS
+# =========================================================
 
 import csv
 import json
 import os
 import time
+
+
+# =========================================================
+# THIRD-PARTY IMPORTS
+# =========================================================
 
 import matplotlib.pyplot as plt
 import torch
@@ -67,12 +88,22 @@ import torch
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.tensorboard import SummaryWriter
 
+
+# =========================================================
+# PROJECT IMPORTS
+# =========================================================
+
 from metrics.reconstruction_metrics import (
     mae,
     rmse,
     psnr,
     snr,
     ssim
+)
+
+from utils.config import (
+    PATIENCE,
+    SEISMIC_DATA_RANGE
 )
 
 from utils.experiment_manager import ExperimentManager
@@ -84,6 +115,11 @@ from utils.experiment_manager import ExperimentManager
 
 DEBUG_VALIDATION = False
 
+
+# =========================================================
+# GRADIENT DIAGNOSTICS
+# =========================================================
+
 # ---------------------------------------------------------
 # Gradient warning threshold.
 #
@@ -94,6 +130,7 @@ DEBUG_VALIDATION = False
 # ---------------------------------------------------------
 
 GRADIENT_WARNING_THRESHOLD = 1.0e6
+
 
 # ---------------------------------------------------------
 # Maximum gradient norm used by clipping.
@@ -159,7 +196,42 @@ class Trainer:
             )
 
         # -------------------------------------------------
-        # Store core components
+        # Validate patience configuration.
+        # -------------------------------------------------
+
+        if not isinstance(PATIENCE, int):
+            raise TypeError(
+                "PATIENCE must be an integer."
+            )
+
+        if PATIENCE <= 0:
+            raise ValueError(
+                "PATIENCE must be greater than zero."
+            )
+
+        # -------------------------------------------------
+        # Validate seismic data range.
+        # -------------------------------------------------
+
+        if (
+            not isinstance(
+                SEISMIC_DATA_RANGE,
+                (int, float)
+            )
+            or not torch.isfinite(
+                torch.tensor(
+                    float(SEISMIC_DATA_RANGE)
+                )
+            )
+            or float(SEISMIC_DATA_RANGE) <= 0.0
+        ):
+            raise ValueError(
+                "SEISMIC_DATA_RANGE must be a finite "
+                "positive number."
+            )
+
+        # -------------------------------------------------
+        # Store core components.
         # -------------------------------------------------
 
         self.model = model
@@ -171,7 +243,7 @@ class Trainer:
         self.device = torch.device(device)
 
         # -------------------------------------------------
-        # Experiment manager
+        # Experiment manager.
         # -------------------------------------------------
 
         self.experiment = (
@@ -181,7 +253,7 @@ class Trainer:
         )
 
         # -------------------------------------------------
-        # Move model to selected device
+        # Move model to selected device.
         # -------------------------------------------------
 
         self.model.to(
@@ -271,7 +343,12 @@ class Trainer:
 
         self.best_epoch = 0
 
-        self.patience = 10
+        # -------------------------------------------------
+        # IMPORTANT:
+        # Use the configured PATIENCE value.
+        # -------------------------------------------------
+
+        self.patience = PATIENCE
 
         self.wait = 0
 
@@ -352,13 +429,22 @@ class Trainer:
         """
         Validate dataset batch structure.
 
-        Expected:
+        Expected dataset output:
 
             inputs,
             targets,
             mask,
-            velocity_model
+            velocity_model,
+            mask_type,
+            geological_mode
+
+        The Trainer requires only the first four components
+        for the current training objective.
         """
+
+        # -------------------------------------------------
+        # Validate container type.
+        # -------------------------------------------------
 
         if not isinstance(
             batch,
@@ -370,32 +456,24 @@ class Trainer:
                 "a tuple or list."
             )
 
-        # =================================================
-        # DATASET BATCH STRUCTURE
-        # =================================================
-
-        # SyntheticSeismicDataset returns:
-        #
-        #     inputs,
-        #     targets,
-        #     mask,
-        #     velocity_model,
-        #     mask_type,
-        #     geological_mode
-        #
-        # The Trainer currently requires only the first
-        # four tensor components for loss computation.
-        #
-        # The metadata fields are deliberately retained by
-        # the dataset for later evaluation and stratified
-        # analysis.
+        # -------------------------------------------------
+        # At least four elements are required.
+        # -------------------------------------------------
 
         if len(batch) < 4:
+
             raise ValueError(
                 f"Expected {batch_name} batch to contain "
                 "at least four elements: "
                 "(inputs, targets, mask, velocity_model)."
             )
+
+        # -------------------------------------------------
+        # Extract the four tensors required by Trainer.
+        #
+        # Metadata fields are deliberately ignored here.
+        # They remain available to evaluation procedures.
+        # -------------------------------------------------
 
         (
             inputs,
@@ -405,7 +483,7 @@ class Trainer:
         ) = batch[:4]
 
         # -------------------------------------------------
-        # Validate tensors
+        # Validate tensor types.
         # -------------------------------------------------
 
         tensors = {
@@ -428,6 +506,10 @@ class Trainer:
 
         # -------------------------------------------------
         # Main tensors must be five-dimensional.
+        #
+        # Expected:
+        #
+        # [B, C, D, H, W]
         # -------------------------------------------------
 
         for name in (
@@ -473,7 +555,7 @@ class Trainer:
             )
 
         # -------------------------------------------------
-        # Velocity model must have the same spatial shape.
+        # Velocity model must match the seismic tensor.
         # -------------------------------------------------
 
         if velocity_model.shape != targets.shape:
@@ -536,11 +618,9 @@ class Trainer:
         for parameter in self.model.parameters():
 
             if not parameter.requires_grad:
-
                 continue
 
             if parameter.grad is None:
-
                 continue
 
             # -------------------------------------------------
@@ -587,7 +667,7 @@ class Trainer:
             )
 
         # -------------------------------------------------
-        # Total gradient norm.
+        # Total raw gradient norm.
         # -------------------------------------------------
 
         raw_gradient_norm = (
@@ -595,7 +675,7 @@ class Trainer:
         )
 
         # -------------------------------------------------
-        # Large finite gradient is a warning, not an error.
+        # Large finite gradients generate a warning.
         # -------------------------------------------------
 
         if (
@@ -626,34 +706,30 @@ class Trainer:
         batch_index
     ):
         """
-        Clip gradients and return the resulting norm.
+        Clip gradients and return the pre-clipping norm.
 
-        Large finite gradients are expected to be handled
-        here rather than treated as fatal errors.
+        torch.nn.utils.clip_grad_norm_ returns the total
+        gradient norm BEFORE clipping.
         """
 
-        clipped_gradient_norm = (
+        pre_clip_gradient_norm = (
             torch.nn.utils.clip_grad_norm_(
                 self.model.parameters(),
                 max_norm=MAX_GRAD_NORM
             )
         )
 
-        # -------------------------------------------------
-        # clip_grad_norm_ returns the norm BEFORE clipping.
-        # -------------------------------------------------
-
-        clipped_gradient_norm_value = float(
-            clipped_gradient_norm
+        pre_clip_gradient_norm = float(
+            pre_clip_gradient_norm
         )
 
         # -------------------------------------------------
-        # Ensure the returned norm itself is finite.
+        # Ensure returned norm is finite.
         # -------------------------------------------------
 
         if not torch.isfinite(
             torch.tensor(
-                clipped_gradient_norm_value,
+                pre_clip_gradient_norm,
                 device=self.device
             )
         ):
@@ -665,7 +741,7 @@ class Trainer:
             )
 
         # -------------------------------------------------
-        # Optional diagnostic.
+        # Optional clipping diagnostic.
         # -------------------------------------------------
 
         if (
@@ -678,11 +754,12 @@ class Trainer:
             print(
                 f"Gradient clipping applied: "
                 f"{raw_gradient_norm:.6e} "
-                f"-> maximum norm {MAX_GRAD_NORM:.6e}",
+                f"-> maximum norm "
+                f"{MAX_GRAD_NORM:.6e}",
                 flush=True
             )
 
-        return clipped_gradient_norm_value
+        return pre_clip_gradient_norm
 
     # =====================================================
     # TRAINING EPOCH
@@ -700,7 +777,9 @@ class Trainer:
             inputs,
             targets,
             mask,
-            velocity_model
+            velocity_model,
+            mask_type,
+            geological_mode
 
         Network output:
 
@@ -716,13 +795,9 @@ class Trainer:
         # =================================================
 
         running_total = 0.0
-
         running_mae = 0.0
-
         running_physics = 0.0
-
         running_uncertainty = 0.0
-
         running_ssim = 0.0
 
         # =================================================
@@ -730,7 +805,6 @@ class Trainer:
         # =================================================
 
         running_gradient_norm = 0.0
-
         maximum_gradient_seen = 0.0
 
         # =================================================
@@ -756,7 +830,7 @@ class Trainer:
         ):
 
             # -------------------------------------------------
-            # Progress
+            # Progress message.
             # -------------------------------------------------
 
             if batch_index % 5 == 0:
@@ -768,7 +842,7 @@ class Trainer:
                 )
 
             # =================================================
-            # VALIDATE DATASET BATCH
+            # VALIDATE BATCH
             # =================================================
 
             (
@@ -806,15 +880,19 @@ class Trainer:
             )
 
             # -------------------------------------------------
-            # Mask is deliberately not applied here.
+            # The mask is intentionally not applied to the
+            # current TotalLoss.
             #
-            # The current TotalLoss API does not accept mask.
+            # TotalLoss currently receives:
             #
-            # This prevents the Trainer from silently applying
-            # an incorrect masking operation.
+            # reconstruction
+            # target
+            # travel_time
+            # velocity_model
+            # log_variance
             #
-            # Mask-aware reconstruction loss can be introduced
-            # later as a controlled change to TotalLoss.
+            # The mask remains available for later evaluation
+            # and controlled mask-aware experiments.
             # -------------------------------------------------
 
             # =================================================
@@ -900,21 +978,21 @@ class Trainer:
             # COMPOSITE LOSS
             # =================================================
 
-            #
-            # The current dataset does not provide:
+            # -------------------------------------------------
+            # Current dataset does not provide:
             #
             #     source_indices
             #     travel_time_target
             #
             # Therefore they are intentionally omitted.
             #
-            # The current TotalLoss then uses:
+            # Current TotalLoss therefore contains:
             #
             #     MAE
             #     Eikonal physics
-            #     uncertainty
+            #     Aleatoric uncertainty
             #     SSIM
-            #
+            # -------------------------------------------------
 
             losses = self.criterion(
                 reconstruction,
@@ -1060,6 +1138,12 @@ class Trainer:
     ):
         """
         Validate the model for one epoch.
+
+        Validation uses deterministic model evaluation.
+
+        Predictive uncertainty through MC Dropout is NOT
+        calculated here. That is handled separately by the
+        uncertainty evaluation pipeline.
         """
 
         self.model.eval()
@@ -1069,13 +1153,9 @@ class Trainer:
         # =================================================
 
         running_total = 0.0
-
         running_mae = 0.0
-
         running_physics = 0.0
-
         running_uncertainty = 0.0
-
         running_ssim = 0.0
 
         # =================================================
@@ -1083,13 +1163,9 @@ class Trainer:
         # =================================================
 
         running_metric_mae = 0.0
-
         running_metric_rmse = 0.0
-
         running_metric_psnr = 0.0
-
         running_metric_snr = 0.0
-
         running_metric_ssim = 0.0
 
         # =================================================
@@ -1131,7 +1207,7 @@ class Trainer:
                 )
 
                 # =================================================
-                # MOVE TO DEVICE
+                # MOVE DATA TO DEVICE
                 # =================================================
 
                 inputs = inputs.to(
@@ -1320,9 +1396,14 @@ class Trainer:
                     targets
                 )
 
+                # -------------------------------------------------
+                # Use the configured seismic data range.
+                # -------------------------------------------------
+
                 metric_ssim = ssim(
                     reconstruction,
-                    targets
+                    targets,
+                    data_range=SEISMIC_DATA_RANGE
                 )
 
                 # =================================================
@@ -1407,7 +1488,20 @@ class Trainer:
 
                 if batch_index == 0:
 
-                    uncertainty = torch.exp(
+                    # -------------------------------------------------
+                    # log_variance represents:
+                    #
+                    #     log(sigma_a^2)
+                    #
+                    # Therefore:
+                    #
+                    #     sigma_a = exp(0.5 * log_variance)
+                    #
+                    # This is aleatoric standard deviation.
+                    # It is NOT the full predictive uncertainty.
+                    # -------------------------------------------------
+
+                    aleatoric_std = torch.exp(
                         0.5 * log_variance
                     )
 
@@ -1416,7 +1510,7 @@ class Trainer:
                         targets,
                         reconstruction,
                         travel_time,
-                        uncertainty,
+                        aleatoric_std,
                         self.current_epoch
                     )
 
@@ -1479,7 +1573,7 @@ class Trainer:
             2. Ground truth
             3. Reconstruction
             4. Travel-time field
-            5. Predictive uncertainty
+            5. Aleatoric uncertainty
             6. Absolute reconstruction error
         """
 
@@ -1613,7 +1707,7 @@ class Trainer:
         )
 
         # =================================================
-        # UNCERTAINTY
+        # ALEATORIC UNCERTAINTY
         # =================================================
 
         uncertainty_image = axes[1, 1].imshow(
@@ -1623,7 +1717,7 @@ class Trainer:
         )
 
         axes[1, 1].set_title(
-            "Predictive Uncertainty"
+            "Aleatoric Uncertainty (Std)"
         )
 
         fig.colorbar(
@@ -2096,7 +2190,7 @@ class Trainer:
 
         print(
             f"Early-Stopping Wait   : "
-            f"{self.wait}"
+            f"{self.wait}/{self.patience}"
         )
 
         print("=" * 60)
@@ -2594,9 +2688,9 @@ class Trainer:
                     train_losses["maximum_gradient"]
                 ])
 
-        # =================================================
-        # BEST MODEL
-        # =================================================
+            # =================================================
+            # BEST MODEL
+            # =================================================
 
             if (
                 validation_losses["total"]
@@ -2803,6 +2897,10 @@ class Trainer:
         Save final training summary.
         """
 
+        # =================================================
+        # REPORT DIRECTORY
+        # =================================================
+
         report_directory = (
             self.experiment.reports
         )
@@ -2812,10 +2910,18 @@ class Trainer:
             exist_ok=True
         )
 
+        # =================================================
+        # REPORT FILE
+        # =================================================
+
         report_file = os.path.join(
             report_directory,
             "training_summary.txt"
         )
+
+        # =================================================
+        # WRITE SUMMARY
+        # =================================================
 
         with open(
             report_file,
@@ -2876,6 +2982,11 @@ class Trainer:
                 f"{len(self.history['total'])}\n"
             )
 
+            file.write(
+                f"Early-Stopping Patience : "
+                f"{self.patience}\n"
+            )
+
             # -------------------------------------------------
             # Gradient diagnostics.
             # -------------------------------------------------
@@ -2893,3 +3004,20 @@ class Trainer:
                     f"Maximum Gradient Seen : "
                     f"{max(self.history['maximum_gradient']):.6e}\n"
                 )
+
+        # =================================================
+        # CONSOLE REPORT
+        # =================================================
+
+        print()
+        print("=" * 60)
+        print(
+            "TRAINING SUMMARY SAVED"
+        )
+        print("=" * 60)
+
+        print(
+            f"Report: {report_file}"
+        )
+
+        print("=" * 60)

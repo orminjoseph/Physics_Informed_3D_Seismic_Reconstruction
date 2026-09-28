@@ -1,56 +1,80 @@
 """
 =========================================================
-Complete Physics-Informed 3D Encoder–Decoder Network
+Network3D
 =========================================================
 
 Physics-Informed 3D Encoder–Decoder Framework
 with Predictive Uncertainty for Seismic Data Reconstruction
 
-Network outputs
----------------
+Architecture
+------------
 
-1. reconstructed_cube
-      Reconstructed seismic volume.
+    Input Seismic Cube
+          |
+          v
+      3D Encoder
+          |
+          +---- x1
+          +---- x2
+          +---- x3
+          +---- x4
+          +---- x5
+                    |
+                    v
+              3D Bottleneck
+                    |
+                    v
+              3D Decoder
+                    |
+                    v
+             Decoder Features
+                    |
+          +---------+---------+
+          |         |         |
+          v         v         v
+    Reconstruction  Travel-   Aleatoric
+        Head        Time Head  Uncertainty
+                                  Head
+          |           |             |
+          v           v             v
+      Seismic       Positive     log(sigma_a^2)
+    Reconstruction Travel Time
 
-2. travel_time
-      Predicted seismic travel-time field T(x,y,z)
-      used by the 3D Eikonal physics loss.
+Predictive uncertainty is estimated during inference:
 
-3. log_variance
-      Predicted logarithmic variance used for
-      predictive uncertainty estimation.
+    Predictive Variance
+        =
+    Aleatoric Variance
+        +
+    Epistemic Variance
 
-Governing physics
------------------
+where:
 
-The Eikonal equation is
+    Aleatoric Variance
+        = mean(exp(log_variance_samples))
 
-    |∇T|² = 1 / V²
-
-where
-
-    T = seismic travel time [s]
-    V = P-wave velocity [m/s]
+    Epistemic Variance
+        = variance of MC-Dropout reconstruction samples.
 
 Tensor convention
 -----------------
 
-Input:
-
-    [B, C, D, H, W]
-
-Outputs:
-
-    reconstructed_cube:
+    Input:
         [B, C, D, H, W]
 
-    travel_time:
-        [B, C, D, H, W]
+    Outputs:
+        Reconstruction:
+            [B, 1, D, H, W]
 
-    log_variance:
-        [B, C, D, H, W]
+        Travel time:
+            [B, 1, D, H, W]
 
-Author: Ormin Joseph
+        Log variance:
+            [B, 1, D, H, W]
+
+=========================================================
+Author:
+Ormin Joseph
 =========================================================
 """
 
@@ -66,62 +90,127 @@ from utils.config import TRAVEL_TIME_SCALE
 
 class Network3D(nn.Module):
     """
-    Physics-Informed 3D Encoder-Decoder Network.
+    Complete Physics-Informed 3D Encoder–Decoder Network.
 
-    Architecture
-    ------------
+    Parameters
+    ----------
+    in_channels : int
+        Number of input seismic channels.
 
-        Input seismic volume
-                |
-                v
-        +---------------+
-        | 3D Encoder    |
-        +---------------+
-                |
-                v
-        +---------------+
-        | Bottleneck    |
-        +---------------+
-                |
-                v
-        +---------------+
-        | 3D Decoder    |
-        +---------------+
-                |
-        +-------+-------+-------+
-        |               |       |
-        v               v       v
-    Reconstruction   Travel-T  Uncertainty
-       Head            Head       Head
-        |               |         |
-        v               v         v
-    Seismic volume   T(x,y,z)  log(sigma^2)
+    out_channels : int
+        Number of reconstructed seismic channels.
 
-    The physical P-wave velocity model is supplied
-    externally by the dataset and is NOT predicted
-    by this network.
+    use_attention : bool
+        Enables attention gates in the decoder.
+
+    use_residual : bool
+        Enables residual connections.
+
+    use_uncertainty : bool
+        Enables the aleatoric uncertainty head.
+
+    Notes
+    -----
+    The network always returns three outputs so that the
+    training and inference interfaces remain consistent:
+
+        reconstruction
+        travel_time
+        log_variance
     """
 
     def __init__(
         self,
         in_channels=1,
         out_channels=1,
-        use_uncertainty=True,
+        use_attention=True,
         use_residual=True,
-        use_attention=True
+        use_uncertainty=True,
     ):
+
         super().__init__()
 
         # =================================================
-        # STORE OPTIONS
+        # Validate constructor arguments
         # =================================================
 
-        self.use_uncertainty = use_uncertainty
-        self.use_residual = use_residual
+        if not isinstance(in_channels, int):
+            raise TypeError(
+                "in_channels must be an integer."
+            )
+
+        if in_channels <= 0:
+            raise ValueError(
+                "in_channels must be greater than zero."
+            )
+
+        if not isinstance(out_channels, int):
+            raise TypeError(
+                "out_channels must be an integer."
+            )
+
+        if out_channels <= 0:
+            raise ValueError(
+                "out_channels must be greater than zero."
+            )
+
+        if not isinstance(use_attention, bool):
+            raise TypeError(
+                "use_attention must be a boolean."
+            )
+
+        if not isinstance(use_residual, bool):
+            raise TypeError(
+                "use_residual must be a boolean."
+            )
+
+        if not isinstance(use_uncertainty, bool):
+            raise TypeError(
+                "use_uncertainty must be a boolean."
+            )
+
+        # =================================================
+        # Validate travel-time scaling
+        # =================================================
+
+        if not isinstance(
+            TRAVEL_TIME_SCALE,
+            (int, float)
+        ):
+            raise TypeError(
+                "TRAVEL_TIME_SCALE must be numeric."
+            )
+
+        if TRAVEL_TIME_SCALE <= 0:
+            raise ValueError(
+                "TRAVEL_TIME_SCALE must be greater than zero."
+            )
+
+        # =================================================
+        # Store configuration
+        # =================================================
+
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+
         self.use_attention = use_attention
+        self.use_residual = use_residual
+        self.use_uncertainty = use_uncertainty
 
         # =================================================
-        # ENCODER
+        # 3D ENCODER
+        # =================================================
+        #
+        # IMPORTANT:
+        # Encoder3D does NOT accept use_attention.
+        #
+        # Attention is handled inside the decoder through
+        # UpBlock3D.
+        #
+        # The encoder returns:
+        #
+        #     x1, x2, x3, x4, x5
+        #
         # =================================================
 
         self.encoder = Encoder3D(
@@ -130,7 +219,17 @@ class Network3D(nn.Module):
         )
 
         # =================================================
-        # BOTTLENECK
+        # 3D BOTTLENECK
+        # =================================================
+        #
+        # The encoder's deepest feature x5 contains
+        # 512 channels.
+        #
+        # Bottleneck3D therefore operates on 512 channels.
+        #
+        # dropout_probability defaults to 0.20 in the
+        # existing Bottleneck3D implementation.
+        #
         # =================================================
 
         self.bottleneck = Bottleneck3D(
@@ -139,7 +238,20 @@ class Network3D(nn.Module):
         )
 
         # =================================================
-        # DECODER
+        # 3D DECODER
+        # =================================================
+        #
+        # Decoder3D expects:
+        #
+        #     x1
+        #     x2
+        #     x3
+        #     x4
+        #     bottleneck_output
+        #
+        # Attention and residual settings are handled
+        # internally by the decoder's UpBlock3D modules.
+        #
         # =================================================
 
         self.decoder = Decoder3D(
@@ -155,12 +267,12 @@ class Network3D(nn.Module):
         #
         #     [B, 32, D, H, W]
         #
-        # Reconstruction output:
+        # A 1x1x1 convolution maps these features to
+        # the reconstructed seismic channel.
         #
-        #     [B, 1, D, H, W]
+        # No sigmoid or tanh activation is used because
+        # seismic amplitudes are signed.
         #
-        # No activation is used because seismic amplitudes
-        # may contain both positive and negative values.
         # =================================================
 
         self.reconstruction_head = nn.Conv3d(
@@ -175,65 +287,36 @@ class Network3D(nn.Module):
         # TRAVEL-TIME HEAD
         # =================================================
         #
-        # Predicts:
+        # Produces a scalar travel-time field at each voxel.
         #
-        #     T(x,y,z)
+        # Softplus is applied so that:
         #
-        # The Eikonal equation differentiates T spatially:
+        #     T(x,y,z) > 0
         #
-        #     |∇T|² = 1 / V²
-        #
-        # Therefore, the initial travel-time prediction must
-        # not contain excessively large spatial variations.
-        #
-        # A deliberately small initialization is used here
-        # to prevent the randomly initialized travel-time head
-        # from producing unrealistically large gradients.
         # =================================================
 
         self.travel_time_head = nn.Conv3d(
             in_channels=32,
-            out_channels=out_channels,
+            out_channels=1,
             kernel_size=1,
             stride=1,
             padding=0
         )
 
-        # -------------------------------------------------
-        # Physics-aware initialization
-        # -------------------------------------------------
-        #
-        # Standard Conv3D initialization produced travel-time
-        # gradients that were much larger than the physical
-        # Eikonal scale during the numerical audit.
-        #
-        # A small initialization reduces this initial
-        # gradient magnitude while keeping the parameters
-        # fully trainable.
-        # -------------------------------------------------
+        # Small initialization helps avoid excessively
+        # large initial physics gradients.
 
         nn.init.normal_(
             self.travel_time_head.weight,
             mean=0.0,
-            std=1.0e-3
+            std=1e-3
         )
 
-        nn.init.constant_(
-            self.travel_time_head.bias,
-            0.0
+        nn.init.zeros_(
+            self.travel_time_head.bias
         )
 
-        # =================================================
-        # TRAVEL-TIME ACTIVATION
-        # =================================================
-        #
-        # Softplus provides a smooth positive-valued
-        # travel-time representation.
-        #
-        # Softplus is preferable to ReLU here because its
-        # derivative is smooth, which is important because
-        # the Eikonal loss computes spatial derivatives of T.
-        # =================================================
+        # Positive travel-time activation.
 
         self.travel_time_activation = nn.Softplus(
             beta=1.0,
@@ -241,101 +324,134 @@ class Network3D(nn.Module):
         )
 
         # =================================================
-        # UNCERTAINTY HEAD
+        # ALEATORIC UNCERTAINTY HEAD
         # =================================================
         #
-        # Predicts:
+        # The head predicts:
         #
-        #     log(sigma^2)
+        #     log(sigma_a^2)
         #
-        # Log variance must remain unrestricted.
+        # rather than sigma_a^2 directly.
         #
-        # Therefore, no Softplus, ReLU or Sigmoid is applied.
+        # The exponential transformation is performed in
+        # the heteroscedastic uncertainty loss/evaluation.
+        #
+        # No activation is applied here.
+        #
         # =================================================
 
-        if self.use_uncertainty:
+        self.uncertainty_head = nn.Conv3d(
+            in_channels=32,
+            out_channels=1,
+            kernel_size=1,
+            stride=1,
+            padding=0
+        )
 
-            self.uncertainty_head = nn.Conv3d(
-                in_channels=32,
-                out_channels=out_channels,
-                kernel_size=1,
-                stride=1,
-                padding=0
-            )
+        # =================================================
+        # UNCERTAINTY HEAD INITIALIZATION
+        # =================================================
+        #
+        # Start with:
+        #
+        #     log(sigma_a^2) = 0
+        #
+        # Therefore:
+        #
+        #     sigma_a^2 = exp(0) = 1
+        #
+        # This gives a neutral deterministic initial
+        # uncertainty state.
+        #
+        # It does NOT impose a fixed final uncertainty.
+        # The uncertainty is learned during training.
+        #
+        # =================================================
 
-    # =====================================================
-    # INPUT VALIDATION
-    # =====================================================
+        nn.init.zeros_(
+            self.uncertainty_head.weight
+        )
 
-    @staticmethod
-    def _validate_input(x):
-        """
-        Validate the input seismic tensor.
-        """
-
-        if not isinstance(x, torch.Tensor):
-
-            raise TypeError(
-                "Network3D input must be a torch.Tensor."
-            )
-
-        if x.ndim != 5:
-
-            raise ValueError(
-                "Network3D expects input with shape "
-                "[B, C, D, H, W]. "
-                f"Received: {tuple(x.shape)}"
-            )
-
-        if not torch.isfinite(x).all():
-
-            raise ValueError(
-                "Network3D input contains NaN or Inf values."
-            )
+        nn.init.zeros_(
+            self.uncertainty_head.bias
+        )
 
     # =====================================================
     # FORWARD PASS
     # =====================================================
 
-    def forward(self, x):
+    def forward(
+        self,
+        x: torch.Tensor
+    ):
         """
-        Forward propagation.
+        Perform a forward pass through the network.
 
         Parameters
         ----------
         x : torch.Tensor
-
-            Incomplete seismic volume.
+            Input seismic volume.
 
             Shape:
+
                 [B, C, D, H, W]
 
         Returns
         -------
         reconstructed_cube : torch.Tensor
-
             Reconstructed seismic volume.
 
         travel_time : torch.Tensor
-
-            Predicted non-negative travel-time field.
+            Positive travel-time field.
 
         log_variance : torch.Tensor
-
-            Predicted logarithmic variance.
+            Log aleatoric variance.
         """
 
         # =================================================
-        # VALIDATE INPUT
+        # Validate input
         # =================================================
 
-        self._validate_input(x)
+        if not isinstance(x, torch.Tensor):
+            raise TypeError(
+                "Network input must be a torch.Tensor."
+            )
+
+        if x.ndim != 5:
+            raise ValueError(
+                "Network input must have shape "
+                "[B, C, D, H, W]. "
+                f"Received: {tuple(x.shape)}"
+            )
+
+        if not torch.isfinite(x).all():
+            raise ValueError(
+                "Network input contains NaN or Inf values."
+            )
 
         # =================================================
         # ENCODER
         # =================================================
+        #
+        # Encoder3D returns:
+        #
+        #     x1
+        #     x2
+        #     x3
+        #     x4
+        #     x5
+        #
+        # x5 is the deepest feature representation.
+        #
+        # =================================================
 
-        x1, x2, x3, x4, x5 = self.encoder(x)
+        (
+            x1,
+            x2,
+            x3,
+            x4,
+            x5
+        ) = self.encoder(x)
 
         # =================================================
         # BOTTLENECK
@@ -348,6 +464,11 @@ class Network3D(nn.Module):
         # =================================================
         # DECODER
         # =================================================
+        #
+        # The decoder receives the required skip
+        # connections explicitly.
+        #
+        # =================================================
 
         decoder_output = self.decoder(
             x1,
@@ -358,7 +479,7 @@ class Network3D(nn.Module):
         )
 
         # =================================================
-        # RECONSTRUCTION HEAD
+        # RECONSTRUCTION
         # =================================================
 
         reconstructed_cube = (
@@ -368,7 +489,7 @@ class Network3D(nn.Module):
         )
 
         # =================================================
-        # TRAVEL-TIME HEAD
+        # TRAVEL-TIME FIELD
         # =================================================
 
         raw_travel_time = (
@@ -377,9 +498,7 @@ class Network3D(nn.Module):
             )
         )
 
-        # =================================================
-        # POSITIVE TRAVEL-TIME REPRESENTATION
-        # =================================================
+        # Enforce positivity.
 
         normalized_travel_time = (
             self.travel_time_activation(
@@ -387,26 +506,20 @@ class Network3D(nn.Module):
             )
         )
 
-        # =================================================
-        # PHYSICAL TRAVEL-TIME SCALING
-        # =================================================
-        #
-        # The network predicts a dimensionless positive
-        # quantity which is converted into seconds using
-        # TRAVEL_TIME_SCALE.
-        # =================================================
+        # Apply configured travel-time scale.
 
         travel_time = (
             TRAVEL_TIME_SCALE
-            *
-            normalized_travel_time
+            * normalized_travel_time
         )
 
         # =================================================
-        # UNCERTAINTY HEAD
+        # ALEATORIC UNCERTAINTY
         # =================================================
 
         if self.use_uncertainty:
+
+            # Predict log(sigma_a^2).
 
             log_variance = (
                 self.uncertainty_head(
@@ -416,6 +529,9 @@ class Network3D(nn.Module):
 
         else:
 
+            # Preserve the three-output interface even
+            # when uncertainty is disabled.
+
             log_variance = torch.zeros_like(
                 reconstructed_cube
             )
@@ -424,35 +540,86 @@ class Network3D(nn.Module):
         # OUTPUT VALIDATION
         # =================================================
 
-        if reconstructed_cube.shape != x.shape:
+        reconstruction_shape = (
+            reconstructed_cube.shape
+        )
+
+        # -------------------------------------------------
+        # Travel-time shape
+        # -------------------------------------------------
+
+        if travel_time.shape != reconstruction_shape:
 
             raise RuntimeError(
-                "Reconstruction output shape does not "
-                "match input shape. "
-                f"Input: {tuple(x.shape)}, "
-                f"Output: {tuple(reconstructed_cube.shape)}"
+                "Travel-time output shape does not match "
+                "the reconstruction output shape.\n"
+                f"Reconstruction: "
+                f"{tuple(reconstruction_shape)}\n"
+                f"Travel time: "
+                f"{tuple(travel_time.shape)}"
             )
 
-        if travel_time.shape != x.shape:
+        # -------------------------------------------------
+        # Log-variance shape
+        # -------------------------------------------------
+
+        if log_variance.shape != reconstruction_shape:
 
             raise RuntimeError(
-                "Travel-time output shape does not "
-                "match input shape. "
-                f"Input: {tuple(x.shape)}, "
-                f"Output: {tuple(travel_time.shape)}"
+                "Log-variance output shape does not match "
+                "the reconstruction output shape.\n"
+                f"Reconstruction: "
+                f"{tuple(reconstruction_shape)}\n"
+                f"Log variance: "
+                f"{tuple(log_variance.shape)}"
             )
 
-        if log_variance.shape != x.shape:
+        # -------------------------------------------------
+        # Reconstruction finite check
+        # -------------------------------------------------
+
+        if not torch.isfinite(
+            reconstructed_cube
+        ).all():
 
             raise RuntimeError(
-                "Uncertainty output shape does not "
-                "match input shape. "
-                f"Input: {tuple(x.shape)}, "
-                f"Output: {tuple(log_variance.shape)}"
+                "Reconstruction output contains "
+                "NaN or Inf values."
+            )
+
+        # -------------------------------------------------
+        # Travel-time finite check
+        # -------------------------------------------------
+
+        if not torch.isfinite(
+            travel_time
+        ).all():
+
+            raise RuntimeError(
+                "Travel-time output contains "
+                "NaN or Inf values."
+            )
+
+        # -------------------------------------------------
+        # Log-variance finite check
+        # -------------------------------------------------
+
+        if not torch.isfinite(
+            log_variance
+        ).all():
+
+            raise RuntimeError(
+                "Log-variance output contains "
+                "NaN or Inf values."
             )
 
         # =================================================
-        # RETURN THREE NETWORK OUTPUTS
+        # RETURN
+        # =================================================
+        #
+        # The three-output interface is deliberately kept
+        # consistent throughout training and inference.
+        #
         # =================================================
 
         return (

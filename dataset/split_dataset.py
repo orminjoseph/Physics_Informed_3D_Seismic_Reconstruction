@@ -1,17 +1,48 @@
 """
-=========================================================
-Dataset Splitter
-=========================================================
+======================================================================
+DATASET SPLITTER
+======================================================================
 
-Splits a seismic dataset into training and validation
-subsets.
+Physics-Informed 3D Encoder-Decoder Framework
+with Predictive Uncertainty for Seismic Data Reconstruction
 
-The validation size is controlled by VALIDATION_SPLIT
-from the global configuration.
+Purpose
+-------
+Splits the complete dataset into:
+
+    1. Training subset
+    2. Validation subset
+
+The validation fraction is controlled by:
+
+    VALIDATION_SPLIT
+
+from the global configuration file.
+
+Reproducibility
+---------------
+The split is reproducible through the global:
+
+    SEED
+
+configuration parameter.
+
+Important
+---------
+This module creates only the training and validation subsets.
+
+An independent test dataset should remain separate from this
+procedure and should be used only for final model evaluation.
 
 Author: Ormin Joseph
-=========================================================
+======================================================================
 """
+
+# =====================================================================
+# IMPORTS
+# =====================================================================
+
+import torch
 
 from torch.utils.data import random_split
 
@@ -21,6 +52,10 @@ from utils.config import (
 )
 
 
+# =====================================================================
+# DATASET SPLITTING FUNCTION
+# =====================================================================
+
 def split_dataset(dataset):
     """
     Split a dataset into training and validation subsets.
@@ -28,7 +63,7 @@ def split_dataset(dataset):
     Parameters
     ----------
     dataset : torch.utils.data.Dataset
-        Complete seismic dataset.
+        Complete dataset to be divided.
 
     Returns
     -------
@@ -37,11 +72,23 @@ def split_dataset(dataset):
 
     validation_dataset : torch.utils.data.Subset
         Validation subset.
+
+    Notes
+    -----
+    The validation size is determined by VALIDATION_SPLIT.
+
+    The split is reproducible when SEED is defined.
     """
 
-    # =====================================================
+    # -----------------------------------------------------------------
     # Validate dataset
-    # =====================================================
+    # -----------------------------------------------------------------
+
+    if dataset is None:
+
+        raise ValueError(
+            "Dataset cannot be None."
+        )
 
     total_size = len(dataset)
 
@@ -52,28 +99,45 @@ def split_dataset(dataset):
             "to create training and validation subsets."
         )
 
-    # =====================================================
+    # -----------------------------------------------------------------
+    # Validate validation split
+    # -----------------------------------------------------------------
+
+    if not 0.0 < VALIDATION_SPLIT < 1.0:
+
+        raise ValueError(
+            "VALIDATION_SPLIT must be greater than 0 "
+            "and less than 1."
+        )
+
+    # -----------------------------------------------------------------
     # Calculate validation size
-    # =====================================================
+    # -----------------------------------------------------------------
+    #
+    # At least one sample is reserved for validation.
+    #
+    # However, the validation set must never consume the entire
+    # dataset because at least one sample is required for training.
 
     validation_size = max(
         1,
-        int(total_size * VALIDATION_SPLIT)
+        int(
+            round(
+                total_size
+                *
+                VALIDATION_SPLIT
+            )
+        )
     )
-
-    # =====================================================
-    # Prevent validation set from consuming the
-    # entire dataset
-    # =====================================================
 
     validation_size = min(
         validation_size,
         total_size - 1
     )
 
-    # =====================================================
+    # -----------------------------------------------------------------
     # Calculate training size
-    # =====================================================
+    # -----------------------------------------------------------------
 
     train_size = (
         total_size
@@ -81,23 +145,37 @@ def split_dataset(dataset):
         validation_size
     )
 
-    # =====================================================
-    # Reproducible random generator
-    # =====================================================
+    # -----------------------------------------------------------------
+    # Validate resulting split
+    # -----------------------------------------------------------------
 
-    generator = None
+    if train_size < 1:
+
+        raise RuntimeError(
+            "Training subset contains no samples."
+        )
+
+    if validation_size < 1:
+
+        raise RuntimeError(
+            "Validation subset contains no samples."
+        )
+
+    # -----------------------------------------------------------------
+    # Create reproducible random generator
+    # -----------------------------------------------------------------
+
+    generator = torch.Generator()
 
     if SEED is not None:
 
-        import torch
+        generator.manual_seed(
+            int(SEED)
+        )
 
-        generator = torch.Generator()
-
-        generator.manual_seed(SEED)
-
-    # =====================================================
-    # Perform split
-    # =====================================================
+    # -----------------------------------------------------------------
+    # Perform random split
+    # -----------------------------------------------------------------
 
     train_dataset, validation_dataset = random_split(
 
@@ -111,11 +189,66 @@ def split_dataset(dataset):
         generator=generator
     )
 
-    # =====================================================
+    # -----------------------------------------------------------------
+    # Verify split sizes
+    # -----------------------------------------------------------------
+
+    if (
+        len(train_dataset)
+        +
+        len(validation_dataset)
+        !=
+        total_size
+    ):
+
+        raise RuntimeError(
+            "Training and validation subsets do not "
+            "account for the complete dataset."
+        )
+
+    # -----------------------------------------------------------------
+    # Display split information
+    # -----------------------------------------------------------------
+
+    print()
+    print("=" * 60)
+    print("DATASET SPLIT")
+    print("=" * 60)
+
+    print(
+        f"Total samples      : {total_size}"
+    )
+
+    print(
+        f"Training samples    : {len(train_dataset)}"
+    )
+
+    print(
+        f"Validation samples  : {len(validation_dataset)}"
+    )
+
+    print(
+        f"Validation fraction : "
+        f"{len(validation_dataset) / total_size:.4f}"
+    )
+
+    print(
+        f"Random seed         : {SEED}"
+    )
+
+    print("=" * 60)
+    print()
+
+    # -----------------------------------------------------------------
     # Return datasets
-    # =====================================================
+    # -----------------------------------------------------------------
 
     return (
         train_dataset,
         validation_dataset
     )
+
+
+# =====================================================================
+# END OF MODULE
+# =====================================================================

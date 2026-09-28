@@ -8,7 +8,6 @@ with Predictive Uncertainty for Seismic Data Reconstruction
 
 Purpose
 -------
-
 Monte Carlo (MC) Dropout provides an approximation of
 epistemic (model) uncertainty.
 
@@ -31,23 +30,20 @@ and the epistemic variance is:
     σ²_epistemic(x)
         = 1/N Σ (y_i - μ(x))²
 
-This module does NOT replace the heteroscedastic
-aleatoric uncertainty predicted by Network3D.
+This module estimates epistemic uncertainty for the
+reconstructed seismic volume.
 
-Instead:
+Aleatoric uncertainty is predicted separately by the
+network through log_variance and is therefore not replaced
+by this module.
 
-    Aleatoric uncertainty
-        -> predicted through log_variance
+Predictive variance is subsequently obtained from:
 
-    Epistemic uncertainty
-        -> estimated through MC Dropout
-
-Together they provide a decomposition of predictive
-uncertainty.
+    σ²_predictive =
+        σ²_aleatoric + σ²_epistemic
 
 Tensor convention
 -----------------
-
 Input:
 
     [B, C, D, H, W]
@@ -64,7 +60,6 @@ Epistemic variance:
 
     [B, C, D, H, W]
 
-Author: Ormin Joseph
 =========================================================
 """
 
@@ -79,59 +74,57 @@ class MCDropout3D:
     Parameters
     ----------
     model : nn.Module
-        Trained Physics-Informed 3D Encoder-Decoder network.
+        Trained Physics-Informed 3D Encoder–Decoder network.
 
     num_samples : int
         Number of stochastic forward passes.
 
     Notes
     -----
-    Dropout is activated during inference while the remaining
-    network layers retain their evaluation behavior.
+    The complete model is placed in evaluation mode while
+    dropout layers are selectively activated.
+
+    This prevents BatchNorm layers, if present, from updating
+    their running statistics during MC inference.
     """
 
     def __init__(
         self,
-        model,
-        num_samples=20
+        model: nn.Module,
+        num_samples: int = 20,
     ):
+        """
+        Initialize the MC Dropout estimator.
+        """
 
-        # =================================================
-        # VALIDATE MODEL
-        # =================================================
+        # -------------------------------------------------
+        # Validate model
+        # -------------------------------------------------
 
         if not isinstance(model, nn.Module):
-
             raise TypeError(
-                "model must be an instance of "
-                "torch.nn.Module."
+                "model must be an instance of torch.nn.Module."
             )
 
-        # =================================================
-        # VALIDATE NUMBER OF MC SAMPLES
-        # =================================================
+        # -------------------------------------------------
+        # Validate MC sample count
+        # -------------------------------------------------
 
-        if not isinstance(
-            num_samples,
-            int
-        ):
-
+        if not isinstance(num_samples, int):
             raise TypeError(
                 "num_samples must be an integer."
             )
 
         if num_samples < 2:
-
             raise ValueError(
                 "num_samples must be at least 2."
             )
 
-        # =================================================
-        # STORE CONFIGURATION
-        # =================================================
+        # -------------------------------------------------
+        # Store configuration
+        # -------------------------------------------------
 
         self.model = model
-
         self.num_samples = num_samples
 
     # =====================================================
@@ -140,16 +133,33 @@ class MCDropout3D:
 
     def _enable_dropout(self):
         """
-        Enable only dropout layers.
+        Put the model into evaluation mode and activate only
+        dropout layers.
 
-        The complete model remains in evaluation mode,
-        while Dropout3d layers are switched to training mode.
-
-        This prevents BatchNorm3d statistics from changing
-        during MC inference.
+        Returns
+        -------
+        dict
+            Original training/evaluation state of every module.
         """
 
+        # -------------------------------------------------
+        # Save original state of every module
+        # -------------------------------------------------
+
+        original_states = {
+            module: module.training
+            for module in self.model.modules()
+        }
+
+        # -------------------------------------------------
+        # Set complete model to evaluation mode
+        # -------------------------------------------------
+
         self.model.eval()
+
+        # -------------------------------------------------
+        # Activate only dropout layers
+        # -------------------------------------------------
 
         for module in self.model.modules():
 
@@ -159,11 +169,28 @@ class MCDropout3D:
                     nn.Dropout,
                     nn.Dropout1d,
                     nn.Dropout2d,
-                    nn.Dropout3d
-                )
+                    nn.Dropout3d,
+                ),
             ):
-
                 module.train()
+
+        return original_states
+
+    # =====================================================
+    # RESTORE MODEL STATE
+    # =====================================================
+
+    @staticmethod
+    def _restore_model_state(
+        original_states
+    ):
+        """
+        Restore the training/evaluation state of every module.
+        """
+
+        for module, training_state in original_states.items():
+
+            module.training = training_state
 
     # =====================================================
     # STOCHASTIC FORWARD PASSES
@@ -172,7 +199,7 @@ class MCDropout3D:
     @torch.no_grad()
     def predict(
         self,
-        x
+        x: torch.Tensor,
     ):
         """
         Perform multiple stochastic forward passes.
@@ -180,91 +207,157 @@ class MCDropout3D:
         Parameters
         ----------
         x : torch.Tensor
-            Input seismic volume.
+            Input seismic volume with shape:
 
-            Shape:
-                [B,C,D,H,W]
+                [B, C, D, H, W]
 
         Returns
         -------
-        dictionary containing:
-
-            reconstruction_samples
-            travel_time_samples
-            log_variance_samples
-
-            reconstruction_mean
-            travel_time_mean
-            log_variance_mean
-
-            reconstruction_epistemic_variance
-            travel_time_epistemic_variance
-            log_variance_epistemic_variance
+        dict
+            MC predictions and epistemic uncertainty estimates.
         """
 
-        # =================================================
-        # VALIDATE INPUT
-        # =================================================
+        # -------------------------------------------------
+        # Validate input type
+        # -------------------------------------------------
 
-        if not isinstance(
-            x,
-            torch.Tensor
-        ):
-
+        if not isinstance(x, torch.Tensor):
             raise TypeError(
                 "x must be a torch.Tensor."
             )
 
-        if x.ndim != 5:
+        # -------------------------------------------------
+        # Validate input dimensionality
+        # -------------------------------------------------
 
+        if x.ndim != 5:
             raise ValueError(
-                "x must have shape "
-                "[B,C,D,H,W]. "
+                "x must have shape [B, C, D, H, W]. "
                 f"Received {tuple(x.shape)}."
             )
 
-        if not torch.isfinite(x).all():
+        # -------------------------------------------------
+        # Validate input values
+        # -------------------------------------------------
 
-            raise ValueError(
+        if not torch.isfinite(x).all():
+            raise FloatingPointError(
                 "x contains NaN or infinite values."
             )
 
-        # =================================================
-        # ENABLE MC DROPOUT
-        # =================================================
+        # -------------------------------------------------
+        # Save and modify model states
+        # -------------------------------------------------
 
-        self._enable_dropout()
-
-        # =================================================
-        # COLLECT STOCHASTIC PREDICTIONS
-        # =================================================
+        original_states = self._enable_dropout()
 
         reconstruction_samples = []
-
         travel_time_samples = []
-
         log_variance_samples = []
 
-        for _ in range(
-            self.num_samples
-        ):
+        try:
 
-            (
-                reconstructed_cube,
-                travel_time,
-                log_variance
-            ) = self.model(x)
+            # ---------------------------------------------
+            # Perform stochastic forward passes
+            # ---------------------------------------------
 
-            reconstruction_samples.append(
-                reconstructed_cube
-            )
+            for _ in range(self.num_samples):
 
-            travel_time_samples.append(
-                travel_time
-            )
+                outputs = self.model(x)
 
-            log_variance_samples.append(
-                log_variance
+                # -----------------------------------------
+                # Validate model output
+                # -----------------------------------------
+
+                if not isinstance(
+                    outputs,
+                    (tuple, list)
+                ):
+                    raise TypeError(
+                        "The model must return a tuple or list "
+                        "containing reconstruction, travel_time, "
+                        "and log_variance."
+                    )
+
+                if len(outputs) != 3:
+                    raise ValueError(
+                        "The model must return exactly three outputs: "
+                        "reconstruction, travel_time, and log_variance."
+                    )
+
+                (
+                    reconstructed_cube,
+                    travel_time,
+                    log_variance,
+                ) = outputs
+
+                # -----------------------------------------
+                # Validate output tensors
+                # -----------------------------------------
+
+                for name, tensor in (
+                    ("reconstruction", reconstructed_cube),
+                    ("travel_time", travel_time),
+                    ("log_variance", log_variance),
+                ):
+
+                    if not isinstance(tensor, torch.Tensor):
+                        raise TypeError(
+                            f"{name} must be a torch.Tensor."
+                        )
+
+                    if not torch.isfinite(tensor).all():
+                        raise FloatingPointError(
+                            f"{name} contains NaN or infinite values."
+                        )
+
+                # -----------------------------------------
+                # Validate reconstruction shape
+                # -----------------------------------------
+
+                if reconstructed_cube.shape != x.shape:
+                    raise ValueError(
+                        "Reconstruction shape must match input shape. "
+                        f"Input: {tuple(x.shape)}, "
+                        f"reconstruction: "
+                        f"{tuple(reconstructed_cube.shape)}."
+                    )
+
+                # -----------------------------------------
+                # Validate log-variance shape
+                # -----------------------------------------
+
+                if log_variance.shape != reconstructed_cube.shape:
+                    raise ValueError(
+                        "log_variance must have the same shape as "
+                        "the reconstruction. "
+                        f"Received {tuple(log_variance.shape)}."
+                    )
+
+                # -----------------------------------------
+                # Store stochastic outputs
+                # -----------------------------------------
+
+                reconstruction_samples.append(
+                    reconstructed_cube
+                )
+
+                travel_time_samples.append(
+                    travel_time
+                )
+
+                log_variance_samples.append(
+                    log_variance
+                )
+
+        finally:
+
+            # ---------------------------------------------
+            # ALWAYS restore original model state
+            # ---------------------------------------------
+
+            self._restore_model_state(
+                original_states
             )
 
         # =================================================
@@ -273,17 +366,17 @@ class MCDropout3D:
 
         reconstruction_samples = torch.stack(
             reconstruction_samples,
-            dim=0
+            dim=0,
         )
 
         travel_time_samples = torch.stack(
             travel_time_samples,
-            dim=0
+            dim=0,
         )
 
         log_variance_samples = torch.stack(
             log_variance_samples,
-            dim=0
+            dim=0,
         )
 
         # =================================================
@@ -291,56 +384,41 @@ class MCDropout3D:
         # =================================================
 
         reconstruction_mean = (
-            reconstruction_samples.mean(
-                dim=0
-            )
+            reconstruction_samples.mean(dim=0)
         )
 
         travel_time_mean = (
-            travel_time_samples.mean(
-                dim=0
-            )
+            travel_time_samples.mean(dim=0)
         )
 
         log_variance_mean = (
-            log_variance_samples.mean(
-                dim=0
-            )
+            log_variance_samples.mean(dim=0)
         )
 
         # =================================================
         # EPISTEMIC VARIANCE
         # =================================================
         #
-        # Population variance:
+        # Population variance across MC predictions:
         #
-        #     σ² = mean((y - μ)²)
+        #     σ² =
+        #         mean((y_i - μ)²)
         #
-        # We use unbiased=False because these MC samples
-        # represent stochastic samples from the predictive
-        # distribution rather than a conventional finite
-        # statistical sample for estimating a population
-        # parameter.
+        # unbiased=False is used because the MC samples
+        # approximate a predictive distribution.
         # =================================================
 
         reconstruction_epistemic_variance = (
             reconstruction_samples.var(
                 dim=0,
-                unbiased=False
+                unbiased=False,
             )
         )
 
         travel_time_epistemic_variance = (
             travel_time_samples.var(
                 dim=0,
-                unbiased=False
-            )
-        )
-
-        log_variance_epistemic_variance = (
-            log_variance_samples.var(
-                dim=0,
-                unbiased=False
+                unbiased=False,
             )
         )
 
@@ -373,7 +451,4 @@ class MCDropout3D:
 
             "travel_time_epistemic_variance":
                 travel_time_epistemic_variance,
-
-            "log_variance_epistemic_variance":
-                log_variance_epistemic_variance
         }

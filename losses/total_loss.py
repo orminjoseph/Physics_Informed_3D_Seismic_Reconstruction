@@ -19,50 +19,26 @@ Training objective:
 
 where:
 
-    L_aleatoric
+    L_aleatoric =
+        1/2 exp(-s)(y - y_hat)^2
+        +
+        1/2 s
 
-is the heteroscedastic Gaussian negative log-likelihood
-associated with the network-predicted log variance.
-
-IMPORTANT UNCERTAINTY DESIGN
-----------------------------
-
-Aleatoric uncertainty is learned during training:
+and:
 
     s = log(sigma_a^2)
 
-    L_aleatoric
-        =
-    1/2 exp(-s)(y - y_hat)^2
-        +
-    1/2 s
+Epistemic uncertainty is NOT included directly in the
+training loss. It is estimated during inference using
+Monte Carlo Dropout.
 
-Epistemic uncertainty is NOT included directly in this
-training loss.
-
-Epistemic uncertainty is estimated after training/inference
-using Monte Carlo Dropout:
-
-    sigma_e^2
-        =
-    Var_MC(y_hat)
-
-Total predictive uncertainty is then:
+Predictive uncertainty:
 
     sigma_predictive^2
         =
-    sigma_a^2
+    sigma_aleatoric^2
         +
-    sigma_e^2
-
-Therefore:
-
-    TotalLoss
-        !=
-    predictive uncertainty
-
-TotalLoss is the optimization objective, whereas predictive
-uncertainty is an inference/evaluation quantity.
+    sigma_epistemic^2
 
 Physics loss:
 
@@ -94,7 +70,8 @@ from losses.Heteroscedastic_Aleatoric_uncertainty_loss import (
 
 from utils.config import (
     LOSS_WEIGHTS,
-    PHYSICS_LOSS_WEIGHTS
+    PHYSICS_LOSS_WEIGHTS,
+    SEISMIC_DATA_RANGE
 )
 
 
@@ -103,31 +80,15 @@ class TotalLoss(nn.Module):
     Composite training loss for the Physics-Informed
     3D Encoder-Decoder framework.
 
-    The loss contains four possible optimization components:
+    Components:
 
         1. MAE reconstruction loss
         2. Physics-informed loss
         3. Heteroscedastic aleatoric uncertainty loss
         4. SSIM structural loss
 
-    The aleatoric uncertainty component can be explicitly
-    enabled or disabled using:
-
-        use_uncertainty=True / False
-
-    This is required for controlled ablation experiments.
-
     Epistemic uncertainty is intentionally excluded from
-    the training loss because it is estimated from multiple
-    stochastic MC-Dropout forward passes during inference.
-
-    Final predictive uncertainty is:
-
-        predictive_variance
-            =
-        aleatoric_variance
-            +
-        epistemic_variance
+    training and estimated separately using MC Dropout.
     """
 
     def __init__(
@@ -149,35 +110,15 @@ class TotalLoss(nn.Module):
         dz : float
             Grid spacing along the depth direction.
 
-        use_uncertainty : bool, default=True
-            Controls whether the heteroscedastic aleatoric
-            uncertainty loss is included in the training
-            objective.
-
-            True:
-                Aleatoric uncertainty loss is calculated
-                and included.
-
-            False:
-                Aleatoric uncertainty loss is disabled and
-                contributes exactly zero to the total loss.
-
-        Notes
-        -----
-        The default value True preserves the existing
-        production behavior and existing calls such as:
-
-            TotalLoss(
-                dx=DX,
-                dy=DY,
-                dz=DZ
-            )
+        use_uncertainty : bool
+            Enables or disables the aleatoric uncertainty
+            training loss.
         """
 
         super().__init__()
 
         # =================================================
-        # VALIDATE GRID SPACING
+        # 1. VALIDATE GRID SPACING
         # =================================================
 
         for value, name in (
@@ -185,6 +126,7 @@ class TotalLoss(nn.Module):
             (dy, "dy"),
             (dz, "dz")
         ):
+
             if not isinstance(
                 value,
                 (int, float)
@@ -193,13 +135,20 @@ class TotalLoss(nn.Module):
                     f"{name} must be a numeric value."
                 )
 
+            if not torch.isfinite(
+                torch.tensor(float(value))
+            ):
+                raise ValueError(
+                    f"{name} must be finite."
+                )
+
             if value <= 0.0:
                 raise ValueError(
                     f"{name} must be greater than zero."
                 )
 
         # =================================================
-        # VALIDATE UNCERTAINTY SWITCH
+        # 2. VALIDATE UNCERTAINTY SWITCH
         # =================================================
 
         if not isinstance(
@@ -210,14 +159,10 @@ class TotalLoss(nn.Module):
                 "use_uncertainty must be a boolean value."
             )
 
-        # =================================================
-        # STORE UNCERTAINTY SWITCH
-        # =================================================
-
         self.use_uncertainty = use_uncertainty
 
         # =================================================
-        # VALIDATE LOSS WEIGHTS
+        # 3. VALIDATE GLOBAL LOSS WEIGHTS
         # =================================================
 
         required_loss_weights = (
@@ -231,7 +176,7 @@ class TotalLoss(nn.Module):
 
             if name not in LOSS_WEIGHTS:
                 raise KeyError(
-                    f"Missing loss weight: '{name}' "
+                    f"Missing loss weight '{name}' "
                     "in LOSS_WEIGHTS."
                 )
 
@@ -242,16 +187,26 @@ class TotalLoss(nn.Module):
                 (int, float)
             ):
                 raise TypeError(
-                    f"LOSS_WEIGHTS['{name}'] must be numeric."
+                    f"LOSS_WEIGHTS['{name}'] "
+                    "must be numeric."
+                )
+
+            if not torch.isfinite(
+                torch.tensor(float(weight))
+            ):
+                raise ValueError(
+                    f"LOSS_WEIGHTS['{name}'] "
+                    "must be finite."
                 )
 
             if weight < 0.0:
                 raise ValueError(
-                    f"LOSS_WEIGHTS['{name}'] cannot be negative."
+                    f"LOSS_WEIGHTS['{name}'] "
+                    "cannot be negative."
                 )
 
         # =================================================
-        # VALIDATE PHYSICS LOSS WEIGHTS
+        # 4. VALIDATE PHYSICS LOSS WEIGHTS
         # =================================================
 
         required_physics_weights = (
@@ -264,8 +219,8 @@ class TotalLoss(nn.Module):
 
             if name not in PHYSICS_LOSS_WEIGHTS:
                 raise KeyError(
-                    f"Missing physics loss weight: '{name}' "
-                    "in PHYSICS_LOSS_WEIGHTS."
+                    f"Missing physics loss weight "
+                    f"'{name}' in PHYSICS_LOSS_WEIGHTS."
                 )
 
             weight = PHYSICS_LOSS_WEIGHTS[name]
@@ -279,6 +234,14 @@ class TotalLoss(nn.Module):
                     "must be numeric."
                 )
 
+            if not torch.isfinite(
+                torch.tensor(float(weight))
+            ):
+                raise ValueError(
+                    f"PHYSICS_LOSS_WEIGHTS['{name}'] "
+                    "must be finite."
+                )
+
             if weight < 0.0:
                 raise ValueError(
                     f"PHYSICS_LOSS_WEIGHTS['{name}'] "
@@ -286,7 +249,32 @@ class TotalLoss(nn.Module):
                 )
 
         # =================================================
-        # STORE GRID SPACING
+        # 5. VALIDATE SEISMIC DATA RANGE
+        # =================================================
+
+        if not isinstance(
+            SEISMIC_DATA_RANGE,
+            (int, float)
+        ):
+            raise TypeError(
+                "SEISMIC_DATA_RANGE must be numeric."
+            )
+
+        if not torch.isfinite(
+            torch.tensor(float(SEISMIC_DATA_RANGE))
+        ):
+            raise ValueError(
+                "SEISMIC_DATA_RANGE must be finite."
+            )
+
+        if SEISMIC_DATA_RANGE <= 0.0:
+            raise ValueError(
+                "SEISMIC_DATA_RANGE must be greater "
+                "than zero."
+            )
+
+        # =================================================
+        # 6. STORE CONFIGURATION
         # =================================================
 
         self.dx = float(dx)
@@ -294,13 +282,13 @@ class TotalLoss(nn.Module):
         self.dz = float(dz)
 
         # =================================================
-        # RECONSTRUCTION LOSS
+        # 7. MAE LOSS
         # =================================================
 
         self.mae_loss = MAELoss()
 
         # =================================================
-        # PHYSICS-INFORMED LOSS
+        # 8. PHYSICS LOSS
         # =================================================
 
         self.physics_loss = PhysicsLoss(
@@ -322,39 +310,25 @@ class TotalLoss(nn.Module):
         )
 
         # =================================================
-        # STRUCTURAL SIMILARITY LOSS
+        # 9. SSIM LOSS
         # =================================================
         #
-        # The current seismic normalization is assumed to
-        # be approximately [-1, 1].
+        # Use the configuration-defined seismic data range
+        # instead of hard-coding 2.0.
         #
-        # Therefore:
+        # Current convention:
         #
-        #     data_range = 2.0
+        #     amplitude range = [-1, 1]
+        #     data range      = 2.0
         #
         # =================================================
 
         self.ssim_loss = SSIMLoss(
-            data_range=2.0
+            data_range=SEISMIC_DATA_RANGE
         )
 
         # =================================================
-        # HETEROSCEDASTIC ALEATORIC UNCERTAINTY LOSS
-        # =================================================
-        #
-        # The loss object is retained even when uncertainty
-        # is disabled.
-        #
-        # This preserves the existing TotalLoss structure
-        # and allows uncertainty to be switched on/off
-        # without changing the rest of the training code.
-        #
-        # IMPORTANT:
-        #
-        # The loss is only CALLED during forward() when:
-        #
-        #     self.use_uncertainty == True
-        #
+        # 10. HETEROSCEDASTIC ALEATORIC LOSS
         # =================================================
 
         self.aleatoric_loss = UncertaintyLoss()
@@ -414,108 +388,26 @@ class TotalLoss(nn.Module):
     ):
         """
         Calculate the complete composite training loss.
-
-        Parameters
-        ----------
-        prediction : torch.Tensor
-            Reconstructed seismic volume.
-
-            Shape:
-
-                [B,C,D,H,W]
-
-        target : torch.Tensor
-            Ground-truth seismic volume.
-
-            Shape:
-
-                [B,C,D,H,W]
-
-        travel_time : torch.Tensor
-            Predicted travel-time field.
-
-            Shape:
-
-                [B,C,D,H,W]
-
-        velocity_model : torch.Tensor
-            P-wave velocity model.
-
-            Shape:
-
-                [B,C,D,H,W]
-
-        log_variance : torch.Tensor
-            Predicted logarithmic aleatoric variance.
-
-            Shape:
-
-                [B,C,D,H,W]
-
-            When uncertainty is disabled by the network,
-            this is expected to be the zero tensor produced
-            by Network3D.
-
-        source_indices : torch.Tensor, optional
-            Source coordinates.
-
-            Expected shape:
-
-                [B,3]
-
-        travel_time_target : torch.Tensor, optional
-            Independently valid travel-time target.
-
-        Returns
-        -------
-        dict
-            Dictionary containing raw, weighted, and total
-            loss components.
-
-        IMPORTANT
-        ---------
-
-        This function calculates the TRAINING OBJECTIVE.
-
-        It does not calculate MC-Dropout epistemic uncertainty.
-
-        Predictive uncertainty is calculated separately using:
-
-            models/mc_dropout.py
-
-        and:
-
-            models/predictive_uncertainty.py
         """
 
         # =================================================
         # 1. VALIDATE MAIN TENSORS
         # =================================================
 
-        self._validate_tensor(
-            prediction,
-            "prediction"
-        )
+        tensors = {
+            "prediction": prediction,
+            "target": target,
+            "travel_time": travel_time,
+            "velocity_model": velocity_model,
+            "log_variance": log_variance
+        }
 
-        self._validate_tensor(
-            target,
-            "target"
-        )
+        for name, tensor in tensors.items():
 
-        self._validate_tensor(
-            travel_time,
-            "travel_time"
-        )
-
-        self._validate_tensor(
-            velocity_model,
-            "velocity_model"
-        )
-
-        self._validate_tensor(
-            log_variance,
-            "log_variance"
-        )
+            self._validate_tensor(
+                tensor,
+                name
+            )
 
         # =================================================
         # 2. VERIFY SHAPE COMPATIBILITY
@@ -523,25 +415,68 @@ class TotalLoss(nn.Module):
 
         expected_shape = prediction.shape
 
-        tensors_to_compare = {
-            "target": target,
-            "travel_time": travel_time,
-            "velocity_model": velocity_model,
-            "log_variance": log_variance
-        }
-
-        for name, tensor in tensors_to_compare.items():
+        for name, tensor in tensors.items():
 
             if tensor.shape != expected_shape:
+
                 raise ValueError(
                     f"{name} and prediction must have "
-                    f"identical shapes. "
-                    f"Prediction: {tuple(expected_shape)}, "
-                    f"{name}: {tuple(tensor.shape)}."
+                    f"identical shapes.\n"
+                    f"Prediction: {tuple(expected_shape)}\n"
+                    f"{name}: {tuple(tensor.shape)}"
                 )
 
         # =================================================
-        # 3. MAE RECONSTRUCTION LOSS
+        # 3. VALIDATE OPTIONAL SOURCE INDICES
+        # =================================================
+
+        if source_indices is not None:
+
+            if not isinstance(
+                source_indices,
+                torch.Tensor
+            ):
+                raise TypeError(
+                    "source_indices must be a "
+                    "torch.Tensor."
+                )
+
+            if source_indices.ndim != 2:
+                raise ValueError(
+                    "source_indices must have shape "
+                    "[B,3]."
+                )
+
+            if source_indices.shape[0] != prediction.shape[0]:
+                raise ValueError(
+                    "source_indices batch dimension must "
+                    "match prediction."
+                )
+
+            if source_indices.shape[1] != 3:
+                raise ValueError(
+                    "source_indices must have shape [B,3]."
+                )
+
+        # =================================================
+        # 4. VALIDATE OPTIONAL TRAVEL-TIME TARGET
+        # =================================================
+
+        if travel_time_target is not None:
+
+            self._validate_tensor(
+                travel_time_target,
+                "travel_time_target"
+            )
+
+            if travel_time_target.shape != expected_shape:
+                raise ValueError(
+                    "travel_time_target must have the "
+                    "same shape as prediction."
+                )
+
+        # =================================================
+        # 5. MAE
         # =================================================
 
         mae = self.mae_loss(
@@ -550,7 +485,7 @@ class TotalLoss(nn.Module):
         )
 
         # =================================================
-        # 4. PHYSICS-INFORMED LOSS
+        # 6. PHYSICS
         # =================================================
 
         physics_components = self.physics_loss(
@@ -560,17 +495,12 @@ class TotalLoss(nn.Module):
             travel_time_target=travel_time_target
         )
 
-        # -------------------------------------------------
-        # Validate physics-loss output.
-        # -------------------------------------------------
-
         if not isinstance(
             physics_components,
             dict
         ):
             raise TypeError(
-                "PhysicsLoss must return a dictionary "
-                "containing the physics loss components."
+                "PhysicsLoss must return a dictionary."
             )
 
         required_physics_outputs = (
@@ -599,7 +529,7 @@ class TotalLoss(nn.Module):
         )
 
         # =================================================
-        # 5. SSIM STRUCTURAL LOSS
+        # 7. SSIM
         # =================================================
 
         ssim = self.ssim_loss(
@@ -608,24 +538,7 @@ class TotalLoss(nn.Module):
         )
 
         # =================================================
-        # 6. HETEROSCEDASTIC ALEATORIC NLL
-        # =================================================
-        #
-        # IMPORTANT UNCERTAINTY SWITCH
-        #
-        # If uncertainty is enabled:
-        #
-        #     L_aleatoric =
-        #     1/2 exp(-s)(y-y_hat)^2 + 1/2 s
-        #
-        # If uncertainty is disabled:
-        #
-        #     L_aleatoric = 0
-        #
-        # This prevents the No_Uncertainty and Plain_UNet
-        # ablation configurations from accidentally receiving
-        # an uncertainty-loss contribution.
-        #
+        # 8. ALEATORIC UNCERTAINTY
         # =================================================
 
         if self.use_uncertainty:
@@ -645,7 +558,7 @@ class TotalLoss(nn.Module):
             )
 
         # =================================================
-        # 7. VALIDATE LOSS VALUES
+        # 9. VALIDATE RAW LOSS COMPONENTS
         # =================================================
 
         loss_components = {
@@ -665,8 +578,14 @@ class TotalLoss(nn.Module):
                 torch.Tensor
             ):
                 raise TypeError(
-                    f"Loss component '{name}' must be "
-                    "a torch.Tensor."
+                    f"Loss component '{name}' must "
+                    "be a torch.Tensor."
+                )
+
+            if value.ndim != 0:
+                raise ValueError(
+                    f"Loss component '{name}' must "
+                    "be scalar."
                 )
 
             if not torch.isfinite(
@@ -678,7 +597,7 @@ class TotalLoss(nn.Module):
                 )
 
         # =================================================
-        # 8. APPLY GLOBAL LOSS WEIGHTS
+        # 10. APPLY GLOBAL WEIGHTS
         # =================================================
 
         weighted_mae = (
@@ -702,7 +621,7 @@ class TotalLoss(nn.Module):
         )
 
         # =================================================
-        # 9. TOTAL TRAINING LOSS
+        # 11. TOTAL LOSS
         # =================================================
 
         total = (
@@ -716,37 +635,27 @@ class TotalLoss(nn.Module):
         )
 
         # =================================================
-        # 10. FINAL TOTAL VALIDATION
+        # 12. VALIDATE TOTAL
         # =================================================
 
         if not torch.isfinite(
             total
         ).all():
+
             raise ValueError(
                 "Total loss contains NaN or Inf values."
             )
 
         # =================================================
-        # 11. RETURN COMPLETE LOSS BREAKDOWN
+        # 13. RETURN COMPLETE LOSS BREAKDOWN
         # =================================================
 
         return {
 
-            # -------------------------------------------------
-            # Raw reconstruction loss
-            # -------------------------------------------------
-
+            # Raw components
             "mae": mae,
 
-            # -------------------------------------------------
-            # Raw physics loss
-            # -------------------------------------------------
-
             "physics": physics,
-
-            # -------------------------------------------------
-            # Physics sub-components
-            # -------------------------------------------------
 
             "eikonal": eikonal,
 
@@ -754,65 +663,24 @@ class TotalLoss(nn.Module):
 
             "travel_time": travel_time_loss,
 
-            # -------------------------------------------------
-            # Raw heteroscedastic aleatoric loss
-            # -------------------------------------------------
-
             "aleatoric_nll": aleatoric_nll,
-
-            # -------------------------------------------------
-            # Backward-compatible uncertainty name
-            # -------------------------------------------------
-            #
-            # Existing Trainer/tests may still access:
-            #
-            #     losses["uncertainty"]
-            #
-            # Keep this alias while making the terminology
-            # explicit through "aleatoric_nll".
-            # -------------------------------------------------
-
-            "uncertainty": aleatoric_nll,
-
-            # -------------------------------------------------
-            # Raw SSIM loss
-            # -------------------------------------------------
 
             "ssim": ssim,
 
-            # -------------------------------------------------
-            # Weighted reconstruction loss
-            # -------------------------------------------------
+            # Backward-compatible aliases
+            "uncertainty": aleatoric_nll,
 
+            # Weighted components
             "weighted_mae": weighted_mae,
-
-            # -------------------------------------------------
-            # Weighted physics loss
-            # -------------------------------------------------
 
             "weighted_physics": weighted_physics,
 
-            # -------------------------------------------------
-            # Weighted aleatoric uncertainty loss
-            # -------------------------------------------------
-
             "weighted_aleatoric": weighted_aleatoric,
-
-            # -------------------------------------------------
-            # Backward-compatible weighted uncertainty name
-            # -------------------------------------------------
 
             "weighted_uncertainty": weighted_aleatoric,
 
-            # -------------------------------------------------
-            # Weighted SSIM loss
-            # -------------------------------------------------
-
             "weighted_ssim": weighted_ssim,
 
-            # -------------------------------------------------
-            # Final composite training loss
-            # -------------------------------------------------
-
+            # Final objective
             "total": total
         }
