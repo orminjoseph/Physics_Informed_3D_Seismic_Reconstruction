@@ -1,478 +1,447 @@
 """
-=========================================================
-Reconstruction Evaluation Metrics
-=========================================================
+=====================================================================
+Reconstruction Metrics
+=====================================================================
 
-Physics-Informed 3D Encoder-Decoder Framework
-with Predictive Uncertainty for Seismic Data Reconstruction.
+Canonical metric implementation for the:
 
-Metrics implemented
+Physics-Informed 3D Encoder–Decoder Framework with Predictive
+Uncertainty for Seismic Data Reconstruction in Complex Geological
+Settings.
 
-1. MAE
-2. MSE
-3. RMSE
-4. PSNR
-5. SNR
-6. SSIM
+This module provides:
+
+1. Global reconstruction metrics
+   - MAE
+   - MSE
+   - RMSE
+   - Relative L2 Error
+   - PSNR
+   - SNR
+   - 3D SSIM
+
+2. Regional reconstruction metrics
+   - Missing-region MAE
+   - Missing-region RMSE
+   - Observed-region MAE
+   - Observed-region RMSE
+
+3. Predictive uncertainty metrics
+   - Aleatoric variance
+   - Epistemic variance
+   - Predictive variance
+   - Predictive standard deviation
+
+4. Metric collection functions
+   - calculate_reconstruction_metrics()
+   - calculate_uncertainty_metrics()
 
 Tensor convention:
 
-    [B, C, D, H, W]
+    Reconstruction / target:
+        [B, C, D, H, W]
 
-Normalized seismic amplitude range:
+    Monte Carlo reconstruction samples:
+        [N, B, C, D, H, W]
 
-    [-1, 1]
+    Observation mask:
+        [B, C, D, H, W]
 
-Therefore:
-
-    data_range = 2.0
+    Mask convention:
+        1 = observed
+        0 = missing
 
 Author: Ormin Joseph
-=========================================================
+=====================================================================
 """
 
+from __future__ import annotations
+
+from typing import Dict
+
 import torch
+import torch.nn.functional as F
 
 
-# =======================================================
-# Mean Absolute Error
-# =======================================================
+# =====================================================================
+# CONSTANTS
+# =====================================================================
 
-def mae(prediction, target):
+# Seismic amplitudes are normalized to [-1, 1].
+# Therefore:
+#
+#     DATA_RANGE = 1 - (-1) = 2
+#
+DATA_RANGE = 2.0
+
+# Numerical safety constant.
+#
+# IMPORTANT:
+# This is NOT added inside RMSE or predictive_std square roots.
+# Doing so would make a mathematically zero result equal to 1e-4.
+#
+# EPSILON is reserved for operations involving division or logarithms.
+EPSILON = 1.0e-8
+
+# Default parameters for the custom 3D SSIM implementation.
+DEFAULT_SSIM_WINDOW_SIZE = 11
+DEFAULT_SSIM_SIGMA = 1.5
+
+
+# =====================================================================
+# VALIDATION UTILITIES
+# =====================================================================
+
+def _validate_prediction_target(
+    prediction: torch.Tensor,
+    target: torch.Tensor
+) -> None:
     """
-    Calculate Mean Absolute Error (MAE).
+    Validate prediction and target tensors.
+    """
 
-    MAE measures the average absolute difference between
-    the reconstructed seismic volume and the ground truth.
+    if not isinstance(prediction, torch.Tensor):
+        raise TypeError(
+            "prediction must be a torch.Tensor."
+        )
+
+    if not isinstance(target, torch.Tensor):
+        raise TypeError(
+            "target must be a torch.Tensor."
+        )
+
+    if prediction.shape != target.shape:
+        raise ValueError(
+            "prediction and target must have identical shapes. "
+            f"Got {prediction.shape} and {target.shape}."
+        )
+
+    if prediction.ndim != 5:
+        raise ValueError(
+            "prediction and target must have shape "
+            "[B, C, D, H, W]. "
+            f"Got {prediction.ndim} dimensions."
+        )
+
+    if not torch.isfinite(prediction).all():
+        raise ValueError(
+            "prediction contains NaN or Inf values."
+        )
+
+    if not torch.isfinite(target).all():
+        raise ValueError(
+            "target contains NaN or Inf values."
+        )
+
+
+def _validate_mask(
+    mask: torch.Tensor,
+    reference: torch.Tensor
+) -> None:
+    """
+    Validate an observation mask.
+
+    Mask convention:
+
+        1 = observed
+        0 = missing
+    """
+
+    if not isinstance(mask, torch.Tensor):
+        raise TypeError(
+            "mask must be a torch.Tensor."
+        )
+
+    if mask.shape != reference.shape:
+        raise ValueError(
+            "mask and reference tensor must have identical shapes. "
+            f"Got {mask.shape} and {reference.shape}."
+        )
+
+    if mask.ndim != 5:
+        raise ValueError(
+            "mask must have shape [B, C, D, H, W]. "
+            f"Got {mask.ndim} dimensions."
+        )
+
+    if not torch.isfinite(mask).all():
+        raise ValueError(
+            "mask contains NaN or Inf values."
+        )
+
+    unique_values = torch.unique(mask)
+
+    valid_values = torch.tensor(
+        [0.0, 1.0],
+        dtype=mask.dtype,
+        device=mask.device
+    )
+
+    for value in unique_values:
+        if not torch.any(
+            torch.isclose(
+                value,
+                valid_values,
+                atol=EPSILON
+            )
+        ):
+            raise ValueError(
+                "mask must contain only 0 and 1 values. "
+                f"Found value: {value.item()}."
+            )
+
+
+def _validate_uncertainty_tensor(
+    tensor: torch.Tensor,
+    name: str
+) -> None:
+    """
+    Validate an uncertainty tensor.
+    """
+
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError(
+            f"{name} must be a torch.Tensor."
+        )
+
+    if not torch.isfinite(tensor).all():
+        raise ValueError(
+            f"{name} contains NaN or Inf values."
+        )
+
+    if torch.any(tensor < 0):
+        raise ValueError(
+            f"{name} contains negative variance values."
+        )
+
+
+# =====================================================================
+# MAE
+# =====================================================================
+
+def mae(
+    prediction: torch.Tensor,
+    target: torch.Tensor
+) -> torch.Tensor:
+    """
+    Mean Absolute Error.
 
     MAE = mean(|prediction - target|)
     """
 
-    if not isinstance(prediction, torch.Tensor):
-
-        raise TypeError(
-            "Prediction must be a torch.Tensor."
-        )
-
-    if not isinstance(target, torch.Tensor):
-
-        raise TypeError(
-            "Target must be a torch.Tensor."
-        )
-
-    if prediction.shape != target.shape:
-
-        raise ValueError(
-            "Prediction and target must have identical shapes "
-            "for MAE calculation."
-        )
+    _validate_prediction_target(
+        prediction,
+        target
+    )
 
     return torch.mean(
-        torch.abs(
-            prediction - target
-        )
+        torch.abs(prediction - target)
     )
 
 
-# =======================================================
-# Mean Squared Error
-# =======================================================
+# =====================================================================
+# MSE
+# =====================================================================
 
-def mse(prediction, target):
+def mse(
+    prediction: torch.Tensor,
+    target: torch.Tensor
+) -> torch.Tensor:
     """
-    Calculate Mean Squared Error (MSE).
-
-    MSE measures the average squared reconstruction error.
+    Mean Squared Error.
 
     MSE = mean((prediction - target)^2)
     """
 
-    if not isinstance(prediction, torch.Tensor):
-
-        raise TypeError(
-            "Prediction must be a torch.Tensor."
-        )
-
-    if not isinstance(target, torch.Tensor):
-
-        raise TypeError(
-            "Target must be a torch.Tensor."
-        )
-
-    if prediction.shape != target.shape:
-
-        raise ValueError(
-            "Prediction and target must have identical shapes "
-            "for MSE calculation."
-        )
+    _validate_prediction_target(
+        prediction,
+        target
+    )
 
     return torch.mean(
-        (
-            prediction - target
-        ) ** 2
+        (prediction - target) ** 2
     )
 
 
-# =======================================================
-# Root Mean Squared Error
-# =======================================================
+# =====================================================================
+# RMSE
+# =====================================================================
 
-def rmse(prediction, target):
+def rmse(
+    prediction: torch.Tensor,
+    target: torch.Tensor
+) -> torch.Tensor:
     """
-    Calculate Root Mean Squared Error (RMSE).
-
-    RMSE is the square root of MSE.
+    Root Mean Squared Error.
 
     RMSE = sqrt(MSE)
+
+    No epsilon is added inside the square root because a perfect
+    reconstruction must produce exactly zero RMSE.
     """
-
-    return torch.sqrt(
-        mse(
-            prediction,
-            target
-        )
-    )
-
-
-# =======================================================
-# Peak Signal-to-Noise Ratio
-# =======================================================
-
-def psnr(
-    prediction,
-    target,
-    data_range=2.0
-):
-    """
-    Calculate Peak Signal-to-Noise Ratio (PSNR).
-
-    For normalized seismic amplitudes in [-1, 1]:
-
-        data_range = 2.0
-
-    A small numerical floor is applied to MSE so that
-    perfect reconstruction produces a large finite PSNR
-    rather than +inf.
-
-    PSNR = 20 log10(data_range)
-           - 10 log10(max(MSE, epsilon))
-    """
-
-    if data_range <= 0:
-
-        raise ValueError(
-            "data_range must be greater than zero."
-        )
 
     mse_value = mse(
         prediction,
         target
     )
 
-    epsilon = torch.finfo(
-        prediction.dtype
-    ).eps
-
-    mse_safe = torch.clamp(
-        mse_value,
-        min=epsilon
+    return torch.sqrt(
+        mse_value
     )
 
-    return (
 
-        20.0
-        * torch.log10(
-            torch.tensor(
-                data_range,
-                device=prediction.device,
-                dtype=prediction.dtype
-            )
-        )
+# =====================================================================
+# RELATIVE L2 ERROR
+# =====================================================================
 
-        -
-
-        10.0
-        * torch.log10(
-            mse_safe
-        )
-    )
-
-# =======================================================
-# Signal-to-Noise Ratio
-# =======================================================
-
-def snr(prediction, target):
+def relative_error(
+    prediction: torch.Tensor,
+    target: torch.Tensor
+) -> torch.Tensor:
     """
-    Calculate Signal-to-Noise Ratio (SNR).
+    Relative L2 Error.
 
-    Signal power:
+    Relative L2 Error =
+        ||prediction - target||_2 /
+        ||target||_2
 
-        mean(target^2)
-
-    Noise power:
-
-        mean((target - prediction)^2)
-
-    A small numerical floor is applied to both signal
-    and noise power to prevent NaN/Inf values during
-    automated evaluation.
-
-    SNR = 10 log10(signal_power / noise_power)
+    EPSILON is used only in the denominator to avoid division by zero.
     """
 
-    if not isinstance(prediction, torch.Tensor):
-
-        raise TypeError(
-            "Prediction must be a torch.Tensor."
-        )
-
-    if not isinstance(target, torch.Tensor):
-
-        raise TypeError(
-            "Target must be a torch.Tensor."
-        )
-
-    if prediction.shape != target.shape:
-
-        raise ValueError(
-            "Prediction and target must have identical shapes "
-            "for SNR calculation."
-        )
-
-    signal_power = torch.mean(
-        target ** 2
-    )
-
-    noise_power = torch.mean(
-        (
-            target - prediction
-        ) ** 2
-    )
-
-    epsilon = torch.finfo(
-        prediction.dtype
-    ).eps
-
-    signal_power_safe = torch.clamp(
-        signal_power,
-        min=epsilon
-    )
-
-    noise_power_safe = torch.clamp(
-        noise_power,
-        min=epsilon
-    )
-
-    return (
-
-        10.0
-        * torch.log10(
-            signal_power_safe
-            /
-            noise_power_safe
-        )
-    )
-
-
-# =======================================================
-# Structural Similarity Index
-# =======================================================
-
-def ssim(
-    prediction,
-    target,
-    data_range=2.0,
-    window_size=11,
-    sigma=1.5
-):
-    """
-    Calculate local 3D Structural Similarity Index (SSIM).
-
-    SSIM evaluates similarity using three components:
-
-        1. Luminance
-        2. Contrast
-        3. Structure
-
-    The local formulation is evaluated over overlapping
-    3D windows rather than over the complete seismic
-    volume.
-
-    Tensor convention:
-
-        [B, C, D, H, W]
-
-    Parameters
-    ----------
-    prediction : torch.Tensor
-        Reconstructed seismic volume.
-
-    target : torch.Tensor
-        Ground-truth seismic volume.
-
-    data_range : float
-        Dynamic range of the seismic amplitudes.
-
-        For normalized amplitudes [-1, 1]:
-
-            data_range = 2.0
-
-    window_size : int
-        Requested size of the local cubic SSIM window.
-
-        Default:
-
-            11 x 11 x 11
-
-        For small input volumes, the window is automatically
-        reduced to the largest valid odd size that fits
-        inside all three spatial dimensions.
-
-        Examples:
-
-            Input 8 x 8 x 8   -> effective window 7
-            Input 10 x 10 x 10 -> effective window 9
-            Input 16 x 16 x 16 -> effective window 11
-            Input 64 x 128 x 128 -> effective window 11
-
-    sigma : float
-        Standard deviation of the Gaussian window.
-
-    Returns
-    -------
-    torch.Tensor
-        Scalar mean SSIM score across batch, channels,
-        and spatial locations.
-    """
-
-    # ===================================================
-    # Validate input types
-    # ===================================================
-
-    if not isinstance(
+    _validate_prediction_target(
         prediction,
-        torch.Tensor
-    ):
-        raise TypeError(
-            "Prediction must be a torch.Tensor."
-        )
+        target
+    )
 
-    if not isinstance(
-        target,
-        torch.Tensor
-    ):
-        raise TypeError(
-            "Target must be a torch.Tensor."
-        )
+    numerator = torch.linalg.vector_norm(
+        prediction - target
+    )
 
-    # ===================================================
-    # Validate shapes
-    # ===================================================
+    denominator = torch.linalg.vector_norm(
+        target
+    )
 
-    if prediction.shape != target.shape:
-        raise ValueError(
-            "Prediction and target must have "
-            "identical shapes for SSIM calculation.\n"
-            f"Prediction shape: {tuple(prediction.shape)}\n"
-            f"Target shape: {tuple(target.shape)}"
-        )
+    return numerator / (
+        denominator + EPSILON
+    )
 
-    # ===================================================
-    # Validate dimensionality
-    #
-    # Expected:
-    #
-    # [B, C, D, H, W]
-    # ===================================================
 
-    if prediction.ndim != 5:
-        raise ValueError(
-            "SSIM expects 5D tensors with shape "
-            "[B, C, D, H, W].\n"
-            f"Received shape: {tuple(prediction.shape)}"
-        )
+# =====================================================================
+# PSNR
+# =====================================================================
 
-    # ===================================================
-    # Validate finite values
-    # ===================================================
+def psnr(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    data_range: float = DATA_RANGE
+) -> torch.Tensor:
+    """
+    Peak Signal-to-Noise Ratio.
 
-    if not torch.isfinite(prediction).all():
-        raise ValueError(
-            "Prediction contains NaN or Inf values."
-        )
+    PSNR = 10 * log10(data_range^2 / MSE)
 
-    if not torch.isfinite(target).all():
-        raise ValueError(
-            "Target contains NaN or Inf values."
-        )
+    A numerical floor is applied to MSE because logarithm of zero
+    is undefined.
 
-    # ===================================================
-    # Validate data range
-    # ===================================================
+    Therefore, a perfect reconstruction returns a very large
+    finite PSNR rather than infinity.
+    """
 
-    if not isinstance(
-        data_range,
-        (int, float)
-    ):
-        raise TypeError(
-            "data_range must be a numeric value."
-        )
-
-    if not torch.isfinite(
-        torch.tensor(
-            float(data_range)
-        )
-    ):
-        raise ValueError(
-            "data_range must be finite."
-        )
+    _validate_prediction_target(
+        prediction,
+        target
+    )
 
     if data_range <= 0:
         raise ValueError(
             "data_range must be greater than zero."
         )
 
-    # ===================================================
-    # Validate requested window size
-    # ===================================================
+    mse_value = torch.mean(
+        (prediction - target) ** 2
+    )
 
-    if not isinstance(
-        window_size,
-        int
-    ):
-        raise TypeError(
-            "window_size must be an integer."
-        )
+    mse_safe = torch.clamp(
+        mse_value,
+        min=EPSILON
+    )
 
-    if window_size < 3:
+    return 10.0 * torch.log10(
+        (data_range ** 2) / mse_safe
+    )
+
+
+# =====================================================================
+# SNR
+# =====================================================================
+
+def snr(
+    prediction: torch.Tensor,
+    target: torch.Tensor
+) -> torch.Tensor:
+    """
+    Signal-to-Noise Ratio.
+
+    SNR = 10 * log10(signal_power / noise_power)
+
+    Signal:
+        target
+
+    Noise:
+        prediction - target
+    """
+
+    _validate_prediction_target(
+        prediction,
+        target
+    )
+
+    signal_power = torch.mean(
+        target ** 2
+    )
+
+    noise_power = torch.mean(
+        (prediction - target) ** 2
+    )
+
+    signal_power = torch.clamp(
+        signal_power,
+        min=EPSILON
+    )
+
+    noise_power = torch.clamp(
+        noise_power,
+        min=EPSILON
+    )
+
+    return 10.0 * torch.log10(
+        signal_power / noise_power
+    )
+
+
+# =====================================================================
+# 3D SSIM
+# =====================================================================
+
+def _create_3d_gaussian_kernel(
+    window_size: int,
+    sigma: float,
+    channels: int,
+    device: torch.device,
+    dtype: torch.dtype
+) -> torch.Tensor:
+    """
+    Create a separable 3D Gaussian kernel.
+    """
+
+    if window_size <= 0:
         raise ValueError(
-            "window_size must be at least 3."
+            "window_size must be greater than zero."
         )
 
     if window_size % 2 == 0:
         raise ValueError(
-            "window_size must be an odd integer."
-        )
-
-    # ===================================================
-    # Validate sigma
-    # ===================================================
-
-    if not isinstance(
-        sigma,
-        (int, float)
-    ):
-        raise TypeError(
-            "sigma must be a numeric value."
-        )
-
-    if not torch.isfinite(
-        torch.tensor(
-            float(sigma)
-        )
-    ):
-        raise ValueError(
-            "sigma must be finite."
+            "window_size must be odd."
         )
 
     if sigma <= 0:
@@ -480,178 +449,36 @@ def ssim(
             "sigma must be greater than zero."
         )
 
-    # ===================================================
-    # Obtain spatial dimensions
-    #
-    # Tensor:
-    #
-    # [B, C, D, H, W]
-    # ===================================================
-
-    _, _, depth, height, width = prediction.shape
-
-    # ===================================================
-    # Determine the largest spatial dimension that is
-    # guaranteed to fit in all three directions.
-    # ===================================================
-
-    minimum_dimension = min(
-        depth,
-        height,
-        width
-    )
-
-    # ===================================================
-    # A minimum 3 x 3 x 3 SSIM neighbourhood is required.
-    # ===================================================
-
-    if minimum_dimension < 3:
-        raise ValueError(
-            "Input volume is too small for SSIM."
-            "\n"
-            f"Input shape: {tuple(prediction.shape)}"
-            "\n"
-            "Minimum spatial dimension must be at least 3."
-        )
-
-    # ===================================================
-    # Adapt the requested window size when the input
-    # volume is smaller than the requested window.
-    #
-    # This is important for unit tests using volumes such
-    # as 8 x 8 x 8.
-    #
-    # Example:
-    #
-    # requested window = 11
-    # minimum dimension = 8
-    #
-    # effective window = 7
-    #
-    # The window must remain odd so that it has a central
-    # voxel and symmetric padding.
-    # ===================================================
-
-    effective_window_size = min(
-        window_size,
-        minimum_dimension
-    )
-
-    # ---------------------------------------------------
-    # Ensure that the effective window is odd.
-    # ---------------------------------------------------
-
-    if effective_window_size % 2 == 0:
-
-        effective_window_size -= 1
-
-    # ===================================================
-    # Final safety check
-    # ===================================================
-
-    if effective_window_size < 3:
-        raise ValueError(
-            "Unable to construct a valid SSIM window."
-            "\n"
-            f"Input shape: {tuple(prediction.shape)}"
-            "\n"
-            f"Requested window size: {window_size}"
-            "\n"
-            f"Effective window size: {effective_window_size}"
-        )
-
-    # ===================================================
-    # SSIM constants
-    # ===================================================
-
-    K1 = 0.01
-    K2 = 0.03
-
-    C1 = (
-        K1 * float(data_range)
-    ) ** 2
-
-    C2 = (
-        K2 * float(data_range)
-    ) ** 2
-
-    # ===================================================
-    # Construct a 3D Gaussian window
-    #
-    # The effective window size is used here rather than
-    # the originally requested window size.
-    # ===================================================
-
-    radius = effective_window_size // 2
-
     coordinates = torch.arange(
-        -radius,
-        radius + 1,
-        device=prediction.device,
-        dtype=prediction.dtype
+        window_size,
+        device=device,
+        dtype=dtype
+    )
+
+    coordinates = (
+        coordinates -
+        window_size // 2
     )
 
     gaussian_1d = torch.exp(
-        -(
-            coordinates ** 2
-        )
-        /
-        (
-            2.0 * float(sigma) ** 2
-        )
+        -(coordinates ** 2) /
+        (2.0 * sigma ** 2)
     )
-
-    # ---------------------------------------------------
-    # Normalize the 1D Gaussian so that its weights sum
-    # to one.
-    # ---------------------------------------------------
 
     gaussian_1d = (
-        gaussian_1d
-        /
-        gaussian_1d.sum()
+        gaussian_1d /
+        torch.sum(gaussian_1d)
     )
 
-    # ===================================================
-    # Convert the 1D Gaussian into a separable 3D kernel
-    #
-    # Result:
-    #
-    # [window, window, window]
-    # ===================================================
-
-    gaussian_3d = (
-        gaussian_1d[:, None, None]
-        *
-        gaussian_1d[None, :, None]
-        *
+    kernel = (
+        gaussian_1d[:, None, None] *
+        gaussian_1d[None, :, None] *
         gaussian_1d[None, None, :]
     )
 
-    # ===================================================
-    # Add dimensions required by conv3d
-    #
-    # Initial shape:
-    #
-    # [1, 1, D, H, W]
-    # ===================================================
+    kernel = kernel.unsqueeze(0).unsqueeze(0)
 
-    window = (
-        gaussian_3d
-        .unsqueeze(0)
-        .unsqueeze(0)
-    )
-
-    # ===================================================
-    # Repeat the kernel for every seismic channel.
-    #
-    # groups=C means that each channel is processed
-    # independently.
-    # ===================================================
-
-    channels = prediction.shape[1]
-
-    window = window.repeat(
+    kernel = kernel.repeat(
         channels,
         1,
         1,
@@ -659,196 +486,834 @@ def ssim(
         1
     )
 
-    # ===================================================
-    # Padding
-    #
-    # Padding is based on the EFFECTIVE window size.
-    # ===================================================
+    return kernel
 
-    padding = radius
 
-    # ===================================================
-    # Local means
-    # ===================================================
+def ssim(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    data_range: float = DATA_RANGE,
+    window_size: int = DEFAULT_SSIM_WINDOW_SIZE,
+    sigma: float = DEFAULT_SSIM_SIGMA
+) -> torch.Tensor:
+    """
+    Compute 3D Structural Similarity Index (SSIM).
 
-    mu_x = torch.nn.functional.conv3d(
+    Expected tensor shape:
+
+        [B, C, D, H, W]
+    """
+
+    _validate_prediction_target(
         prediction,
-        window,
+        target
+    )
+
+    if data_range <= 0:
+        raise ValueError(
+            "data_range must be greater than zero."
+        )
+
+    batch_size, channels, depth, height, width = (
+        prediction.shape
+    )
+
+    # Prevent the SSIM window from being larger than the
+    # smallest spatial dimension.
+    maximum_window = min(
+        depth,
+        height,
+        width
+    )
+
+    if maximum_window < 3:
+        raise ValueError(
+            "All spatial dimensions must be at least 3 "
+            "for 3D SSIM."
+        )
+
+    actual_window_size = min(
+        window_size,
+        maximum_window
+    )
+
+    if actual_window_size % 2 == 0:
+        actual_window_size -= 1
+
+    if actual_window_size < 3:
+        raise ValueError(
+            "SSIM window size must be at least 3."
+        )
+
+    kernel = _create_3d_gaussian_kernel(
+        window_size=actual_window_size,
+        sigma=sigma,
+        channels=channels,
+        device=prediction.device,
+        dtype=prediction.dtype
+    )
+
+    padding = actual_window_size // 2
+
+    mu_prediction = F.conv3d(
+        prediction,
+        kernel,
         padding=padding,
         groups=channels
     )
 
-    mu_y = torch.nn.functional.conv3d(
+    mu_target = F.conv3d(
         target,
-        window,
+        kernel,
         padding=padding,
         groups=channels
     )
 
-    # ===================================================
-    # Squared means
-    # ===================================================
+    mu_prediction_squared = (
+        mu_prediction ** 2
+    )
 
-    mu_x_squared = mu_x ** 2
-    mu_y_squared = mu_y ** 2
-    mu_xy = mu_x * mu_y
+    mu_target_squared = (
+        mu_target ** 2
+    )
 
-    # ===================================================
-    # Local variances
-    # ===================================================
+    mu_prediction_target = (
+        mu_prediction *
+        mu_target
+    )
 
-    sigma_x_squared = (
-        torch.nn.functional.conv3d(
+    sigma_prediction_squared = (
+        F.conv3d(
             prediction ** 2,
-            window,
+            kernel,
             padding=padding,
             groups=channels
         )
         -
-        mu_x_squared
+        mu_prediction_squared
     )
 
-    sigma_y_squared = (
-        torch.nn.functional.conv3d(
+    sigma_target_squared = (
+        F.conv3d(
             target ** 2,
-            window,
+            kernel,
             padding=padding,
             groups=channels
         )
         -
-        mu_y_squared
+        mu_target_squared
     )
 
-    # ===================================================
-    # Local covariance
-    # ===================================================
-
-    sigma_xy = (
-        torch.nn.functional.conv3d(
+    sigma_prediction_target = (
+        F.conv3d(
             prediction * target,
-            window,
+            kernel,
             padding=padding,
             groups=channels
         )
         -
-        mu_xy
+        mu_prediction_target
     )
 
-    # ===================================================
-    # Numerical protection
-    #
-    # Floating-point arithmetic can produce extremely
-    # small negative variance values.
-    #
-    # Variance cannot physically be negative, so clamp
-    # these numerical artifacts to zero.
-    # ===================================================
-
-    sigma_x_squared = torch.clamp(
-        sigma_x_squared,
+    # Numerical protection against tiny negative values introduced
+    # by floating-point round-off.
+    sigma_prediction_squared = torch.clamp(
+        sigma_prediction_squared,
         min=0.0
     )
 
-    sigma_y_squared = torch.clamp(
-        sigma_y_squared,
+    sigma_target_squared = torch.clamp(
+        sigma_target_squared,
         min=0.0
     )
 
-    # ===================================================
-    # Luminance component
-    # ===================================================
+    c1 = (
+        0.01 * data_range
+    ) ** 2
 
-    luminance = (
-        2.0 * mu_xy
-        + C1
-    ) / (
-        mu_x_squared
-        + mu_y_squared
-        + C1
+    c2 = (
+        0.03 * data_range
+    ) ** 2
+
+    numerator_1 = (
+        2.0 * mu_prediction_target +
+        c1
     )
 
-    # ===================================================
-    # Standard deviations
-    # ===================================================
-
-    sigma_x = torch.sqrt(
-        sigma_x_squared
-        + 1e-12
+    denominator_1 = (
+        mu_prediction_squared +
+        mu_target_squared +
+        c1
     )
 
-    sigma_y = torch.sqrt(
-        sigma_y_squared
-        + 1e-12
+    numerator_2 = (
+        2.0 * sigma_prediction_target +
+        c2
     )
 
-    # ===================================================
-    # Contrast component
-    # ===================================================
-
-    contrast = (
-        2.0
-        * sigma_x
-        * sigma_y
-        + C2
-    ) / (
-        sigma_x_squared
-        + sigma_y_squared
-        + C2
+    denominator_2 = (
+        sigma_prediction_squared +
+        sigma_target_squared +
+        c2
     )
 
-    # ===================================================
-    # Structure component
-    # ===================================================
-
-    structure = (
-        sigma_xy
-        + C2 / 2.0
-    ) / (
-        sigma_x
-        * sigma_y
-        + C2 / 2.0
+    ssim_map = (
+        numerator_1 /
+        (denominator_1 + EPSILON)
+    ) * (
+        numerator_2 /
+        (denominator_2 + EPSILON)
     )
 
-    # ===================================================
-    # Complete local SSIM
-    # ===================================================
-
-    score_map = (
-        luminance
-        * contrast
-        * structure
+    return torch.mean(
+        ssim_map
     )
 
-    # ===================================================
-    # Average local SSIM values
-    #
-    # The mean is taken across:
-    #
-    #   1. Batch
-    #   2. Channels
-    #   3. Depth
-    #   4. Height
-    #   5. Width
-    #
-    # The convolution does not mix batch elements.
-    # ===================================================
 
-    score = torch.mean(
-        score_map
+# =====================================================================
+# REGIONAL ERROR UTILITIES
+# =====================================================================
+
+def _regional_error(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    region_value: float
+) -> torch.Tensor:
+    """
+    Calculate mean absolute error in a selected mask region.
+    """
+
+    _validate_prediction_target(
+        prediction,
+        target
     )
 
-    # ===================================================
-    # Final numerical validation
-    # ===================================================
+    _validate_mask(
+        mask,
+        prediction
+    )
 
-    if not torch.isfinite(score):
+    region = (
+        mask == region_value
+    )
 
-        raise FloatingPointError(
-            "SSIM calculation produced a non-finite value."
+    if not torch.any(region):
+        return torch.tensor(
+            0.0,
+            dtype=prediction.dtype,
+            device=prediction.device
         )
 
-    # ===================================================
-    # Return scalar SSIM score
-    # ===================================================
+    return torch.mean(
+        torch.abs(
+            prediction[region] -
+            target[region]
+        )
+    )
 
-    return score
+
+def _regional_rmse(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    region_value: float
+) -> torch.Tensor:
+    """
+    Calculate RMSE in a selected mask region.
+
+    No epsilon is added inside sqrt().
+    """
+
+    _validate_prediction_target(
+        prediction,
+        target
+    )
+
+    _validate_mask(
+        mask,
+        prediction
+    )
+
+    region = (
+        mask == region_value
+    )
+
+    if not torch.any(region):
+        return torch.tensor(
+            0.0,
+            dtype=prediction.dtype,
+            device=prediction.device
+        )
+
+    squared_error = (
+        prediction[region] -
+        target[region]
+    ) ** 2
+
+    return torch.sqrt(
+        torch.mean(
+            squared_error
+        )
+    )
+
+
+# =====================================================================
+# MISSING-REGION METRICS
+# =====================================================================
+
+def missing_mae(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor
+) -> torch.Tensor:
+    """
+    MAE over missing voxels.
+
+    mask = 0 -> missing.
+    """
+
+    return _regional_error(
+        prediction,
+        target,
+        mask,
+        region_value=0.0
+    )
+
+
+def missing_rmse(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor
+) -> torch.Tensor:
+    """
+    RMSE over missing voxels.
+
+    mask = 0 -> missing.
+    """
+
+    return _regional_rmse(
+        prediction,
+        target,
+        mask,
+        region_value=0.0
+    )
+
+
+# =====================================================================
+# OBSERVED-REGION METRICS
+# =====================================================================
+
+def observed_mae(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor
+) -> torch.Tensor:
+    """
+    MAE over observed voxels.
+
+    mask = 1 -> observed.
+    """
+
+    return _regional_error(
+        prediction,
+        target,
+        mask,
+        region_value=1.0
+    )
+
+
+def observed_rmse(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor
+) -> torch.Tensor:
+    """
+    RMSE over observed voxels.
+
+    mask = 1 -> observed.
+    """
+
+    return _regional_rmse(
+        prediction,
+        target,
+        mask,
+        region_value=1.0
+    )
+
+
+# =====================================================================
+# ALEATORIC UNCERTAINTY
+# =====================================================================
+
+def aleatoric_variance(
+    log_variance: torch.Tensor
+) -> torch.Tensor:
+    """
+    Convert predicted log-variance into aleatoric variance.
+
+    variance = exp(log_variance)
+
+    The log-variance is clamped to avoid numerical overflow.
+    """
+
+    if not isinstance(
+        log_variance,
+        torch.Tensor
+    ):
+        raise TypeError(
+            "log_variance must be a torch.Tensor."
+        )
+
+    if not torch.isfinite(
+        log_variance
+    ).all():
+        raise ValueError(
+            "log_variance contains NaN or Inf values."
+        )
+
+    safe_log_variance = torch.clamp(
+        log_variance,
+        min=-30.0,
+        max=30.0
+    )
+
+    variance = torch.exp(
+        safe_log_variance
+    )
+
+    _validate_uncertainty_tensor(
+        variance,
+        "aleatoric variance"
+    )
+
+    return variance
+
+
+# =====================================================================
+# UNCERTAINTY COMPATIBILITY FUNCTION
+# =====================================================================
+
+def uncertainty(
+    log_variance: torch.Tensor
+) -> torch.Tensor:
+    """
+    Compatibility function for aleatoric uncertainty.
+
+    Returns the mean predicted aleatoric variance.
+
+    For the full uncertainty decomposition, use:
+
+        calculate_uncertainty_metrics()
+
+    instead.
+    """
+
+    variance = aleatoric_variance(
+        log_variance
+    )
+
+    return torch.mean(
+        variance
+    )
+
+
+# =====================================================================
+# EPISTEMIC UNCERTAINTY
+# =====================================================================
+
+def epistemic_variance(
+    reconstruction_samples: torch.Tensor
+) -> torch.Tensor:
+    """
+    Calculate epistemic variance from Monte Carlo Dropout samples.
+
+    Expected input:
+
+        [N, B, C, D, H, W]
+
+    where N is the number of stochastic forward passes.
+    """
+
+    if not isinstance(
+        reconstruction_samples,
+        torch.Tensor
+    ):
+        raise TypeError(
+            "reconstruction_samples must be a torch.Tensor."
+        )
+
+    if reconstruction_samples.ndim != 6:
+        raise ValueError(
+            "reconstruction_samples must have shape "
+            "[N, B, C, D, H, W]. "
+            f"Got {reconstruction_samples.shape}."
+        )
+
+    if not torch.isfinite(
+        reconstruction_samples
+    ).all():
+        raise ValueError(
+            "reconstruction_samples contains NaN or Inf values."
+        )
+
+    number_of_samples = (
+        reconstruction_samples.shape[0]
+    )
+
+    if number_of_samples < 2:
+        return torch.zeros_like(
+            reconstruction_samples[0]
+        )
+
+    variance = torch.var(
+        reconstruction_samples,
+        dim=0,
+        unbiased=False
+    )
+
+    _validate_uncertainty_tensor(
+        variance,
+        "epistemic variance"
+    )
+
+    return variance
+
+
+# =====================================================================
+# PREDICTIVE VARIANCE
+# =====================================================================
+
+def predictive_variance(
+    aleatoric_variance_value: torch.Tensor,
+    epistemic_variance_value: torch.Tensor
+) -> torch.Tensor:
+    """
+    Calculate predictive variance.
+
+    Predictive variance =
+        Aleatoric variance +
+        Epistemic variance
+    """
+
+    if not isinstance(
+        aleatoric_variance_value,
+        torch.Tensor
+    ):
+        raise TypeError(
+            "aleatoric_variance_value must be a torch.Tensor."
+        )
+
+    if not isinstance(
+        epistemic_variance_value,
+        torch.Tensor
+    ):
+        raise TypeError(
+            "epistemic_variance_value must be a torch.Tensor."
+        )
+
+    if (
+        aleatoric_variance_value.shape !=
+        epistemic_variance_value.shape
+    ):
+        raise ValueError(
+            "Aleatoric and epistemic variance tensors "
+            "must have identical shapes. "
+            f"Got {aleatoric_variance_value.shape} and "
+            f"{epistemic_variance_value.shape}."
+        )
+
+    _validate_uncertainty_tensor(
+        aleatoric_variance_value,
+        "aleatoric variance"
+    )
+
+    _validate_uncertainty_tensor(
+        epistemic_variance_value,
+        "epistemic variance"
+    )
+
+    predictive = (
+        aleatoric_variance_value +
+        epistemic_variance_value
+    )
+
+    _validate_uncertainty_tensor(
+        predictive,
+        "predictive variance"
+    )
+
+    return predictive
+
+
+# =====================================================================
+# PREDICTIVE STANDARD DEVIATION
+# =====================================================================
+
+def predictive_std(
+    predictive_variance_value: torch.Tensor
+) -> torch.Tensor:
+    """
+    Calculate predictive standard deviation.
+
+    Predictive standard deviation =
+        sqrt(predictive variance)
+
+    No epsilon is added inside sqrt() because zero variance must
+    produce exactly zero standard deviation.
+    """
+
+    _validate_uncertainty_tensor(
+        predictive_variance_value,
+        "predictive variance"
+    )
+
+    return torch.sqrt(
+        predictive_variance_value
+    )
+
+
+# =====================================================================
+# COMPLETE RECONSTRUCTION METRIC COLLECTION
+# =====================================================================
+
+def calculate_reconstruction_metrics(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor | None = None
+) -> Dict[str, torch.Tensor]:
+    """
+    Calculate the complete reconstruction metric set.
+
+    Returns:
+
+        mae
+        mse
+        rmse
+        relative_l2
+        psnr
+        snr
+        ssim
+
+    If a mask is supplied, also returns:
+
+        missing_mae
+        missing_rmse
+        observed_mae
+        observed_rmse
+    """
+
+    _validate_prediction_target(
+        prediction,
+        target
+    )
+
+    metrics = {}
+
+    # -------------------------------------------------------------
+    # Global reconstruction metrics
+    # -------------------------------------------------------------
+
+    metrics["mae"] = mae(
+        prediction,
+        target
+    )
+
+    metrics["mse"] = mse(
+        prediction,
+        target
+    )
+
+    metrics["rmse"] = rmse(
+        prediction,
+        target
+    )
+
+    relative_l2_value = relative_error(
+        prediction,
+        target
+    )
+
+    # Preferred reporting name.
+    metrics["relative_l2"] = relative_l2_value
+
+    # Backward-compatible alias.
+    metrics["relative_error"] = relative_l2_value
+
+    metrics["psnr"] = psnr(
+        prediction,
+        target
+    )
+
+    metrics["snr"] = snr(
+        prediction,
+        target
+    )
+
+    metrics["ssim"] = ssim(
+        prediction,
+        target
+    )
+
+    # -------------------------------------------------------------
+    # Regional metrics
+    # -------------------------------------------------------------
+
+    if mask is not None:
+
+        _validate_mask(
+            mask,
+            prediction
+        )
+
+        metrics["missing_mae"] = missing_mae(
+            prediction,
+            target,
+            mask
+        )
+
+        metrics["missing_rmse"] = missing_rmse(
+            prediction,
+            target,
+            mask
+        )
+
+        metrics["observed_mae"] = observed_mae(
+            prediction,
+            target,
+            mask
+        )
+
+        metrics["observed_rmse"] = observed_rmse(
+            prediction,
+            target,
+            mask
+        )
+
+    return metrics
+
+
+# =====================================================================
+# COMPLETE UNCERTAINTY METRIC COLLECTION
+# =====================================================================
+
+def calculate_uncertainty_metrics(
+    log_variance: torch.Tensor,
+    reconstruction_samples: torch.Tensor
+) -> Dict[str, torch.Tensor]:
+    """
+    Calculate the complete predictive uncertainty decomposition.
+
+    Inputs:
+
+        log_variance:
+            [B, C, D, H, W]
+
+        reconstruction_samples:
+            [N, B, C, D, H, W]
+
+    Returns:
+
+        aleatoric_variance
+        epistemic_variance
+        predictive_variance
+        predictive_std
+    """
+
+    if not isinstance(
+        log_variance,
+        torch.Tensor
+    ):
+        raise TypeError(
+            "log_variance must be a torch.Tensor."
+        )
+
+    if not isinstance(
+        reconstruction_samples,
+        torch.Tensor
+    ):
+        raise TypeError(
+            "reconstruction_samples must be a torch.Tensor."
+        )
+
+    if log_variance.ndim != 5:
+        raise ValueError(
+            "log_variance must have shape "
+            "[B, C, D, H, W]. "
+            f"Got {log_variance.shape}."
+        )
+
+    if reconstruction_samples.ndim != 6:
+        raise ValueError(
+            "reconstruction_samples must have shape "
+            "[N, B, C, D, H, W]. "
+            f"Got {reconstruction_samples.shape}."
+        )
+
+    if (
+        log_variance.shape !=
+        reconstruction_samples.shape[1:]
+    ):
+        raise ValueError(
+            "log_variance and reconstruction_samples must "
+            "have compatible spatial/batch/channel shapes. "
+            f"Got {log_variance.shape} and "
+            f"{reconstruction_samples.shape}."
+        )
+
+    aleatoric = aleatoric_variance(
+        log_variance
+    )
+
+    epistemic = epistemic_variance(
+        reconstruction_samples
+    )
+
+    predictive = predictive_variance(
+        aleatoric,
+        epistemic
+    )
+
+    predictive_standard_deviation = predictive_std(
+        predictive
+    )
+
+    return {
+        "aleatoric_variance": aleatoric,
+        "epistemic_variance": epistemic,
+        "predictive_variance": predictive,
+        "predictive_std": predictive_standard_deviation,
+    }
+
+
+# =====================================================================
+# PUBLIC API
+# =====================================================================
+
+__all__ = [
+    # Global reconstruction metrics
+    "mae",
+    "mse",
+    "rmse",
+    "relative_error",
+    "psnr",
+    "snr",
+    "ssim",
+
+    # Regional metrics
+    "missing_mae",
+    "missing_rmse",
+    "observed_mae",
+    "observed_rmse",
+
+    # Uncertainty metrics
+    "uncertainty",
+    "aleatoric_variance",
+    "epistemic_variance",
+    "predictive_variance",
+    "predictive_std",
+
+    # Metric collections
+    "calculate_reconstruction_metrics",
+    "calculate_uncertainty_metrics",
+]

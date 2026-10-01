@@ -1,6 +1,6 @@
 """
 ======================================================================
-UNCERTAINTY CALIBRATION AND ERROR ALIGNMENT
+UNCERTAINTY EVALUATION
 ======================================================================
 
 Physics-Informed 3D Encoder-Decoder Framework
@@ -8,1229 +8,1848 @@ with Predictive Uncertainty for Seismic Data Reconstruction
 
 Purpose
 -------
-This module evaluates whether predictive uncertainty is aligned with
-reconstruction error.
+Evaluate whether predictive uncertainty is informative about
+reconstruction difficulty.
 
-The analysis includes:
+This module evaluates:
 
-1. Patch-level predictive uncertainty
-2. Patch-level reconstruction error
-3. Missing-region reconstruction error
-4. Pearson correlation
-5. Spearman correlation
-6. Quantile-based uncertainty bins
-7. Uncertainty-Error Alignment Gap (UEAG)
-8. Observed-data preservation verification
-9. Summary CSV files
-10. Calibration plot
+    1. Aleatoric uncertainty
+    2. Epistemic uncertainty from MC-Dropout
+    3. Predictive uncertainty
+    4. Predictive standard deviation
+    5. Global reconstruction error
+    6. Missing-region reconstruction error
+    7. Observed-region reconstruction error
+    8. Patch-level uncertainty/error correlation
+    9. Observed-data preservation
+   10. Measured missing-data rate
 
 Important
 ---------
-This module performs uncertainty-error alignment analysis.
+This module performs PATCH-LEVEL uncertainty/error analysis.
 
-UEAG is NOT Expected Calibration Error (ECE).
+It does not perform formal uncertainty calibration.
 
-Formal probabilistic interval coverage should be evaluated separately
-if required.
+Formal calibration is handled separately by:
+
+    evaluation/uncertainty_calibration.py
+
+Detailed voxel-level uncertainty/error correlation is handled
+separately by:
+
+    evaluation/uncertainty_error_correlation.py
+
+The production Evaluator is used as the authoritative source for
+reconstruction metrics and uncertainty decomposition.
+
+Evaluation modes
+----------------
+FULL_F3
+    Evaluates all available F3 patches.
+
+DIAGNOSTIC_SUBSET
+    Evaluates the number of patches specified by
+    F3_UNCERTAINTY_NUM_PATCHES.
+
+Outputs
+-------
+The following files are saved to the configured REPORT_DIR:
+
+    uncertainty_evaluation.csv
+    uncertainty_error_correlation.csv
+    uncertainty_evaluation_metadata.json
 
 Author: Ormin Joseph
 ======================================================================
 """
 
-# ======================================================================
-# 1. IMPORTS
-# ======================================================================
 
-from pathlib import Path
+# =====================================================================
+# 1. STANDARD-LIBRARY IMPORTS
+# =====================================================================
+
+import csv
+import json
+import os
+import random
+from datetime import datetime, timezone
+
+
+# =====================================================================
+# 2. SCIENTIFIC-COMPUTING IMPORTS
+# =====================================================================
 
 import numpy as np
-import pandas as pd
 import torch
-import matplotlib.pyplot as plt
 
-from scipy.stats import pearsonr, spearmanr
 
-from utils.config import (
-    DATASET_MODE,
-    EXPERIMENT_NAME,
-    REPORT_DIR,
-    BATCH_SIZE,
-    MC_DROPOUT_SAMPLES,
-    DEVICE,
-)
+# =====================================================================
+# 3. STATISTICAL ANALYSIS
+# =====================================================================
 
-from dataset.build_dataset import build_dataset
+from scipy.stats import pearsonr
+from scipy.stats import spearmanr
+
+
+# =====================================================================
+# 4. DATASET
+# =====================================================================
+
+from dataset.f3_dataset import F3Dataset
+
+
+# =====================================================================
+# 5. MODEL
+# =====================================================================
 
 from models.network import Network3D
 
-from inference.predictor import Predictor
 
+# =====================================================================
+# 6. INFERENCE AND EVALUATION
+# =====================================================================
+
+from inference.predictor import Predictor
 from evaluation.evaluator import Evaluator
 
 
-# ======================================================================
-# 2. USER SETTINGS
-# ======================================================================
+# =====================================================================
+# 7. CENTRAL PROJECT CONFIGURATION
+# =====================================================================
 
-# ----------------------------------------------------------------------
-# Number of samples to analyse.
-#
-# None = use the complete dataset.
-#
-# For a quick debugging test, you may temporarily use:
-#
-# NUM_PATCHES = 5
-#
-# For final thesis evaluation:
-#
-# NUM_PATCHES = None
-# ----------------------------------------------------------------------
+from utils.config import (
+    F3_PATH,
+    F3_PATCH_SIZE,
+    F3_STRIDE,
+    F3_MISSING_PROBABILITY,
 
-NUM_PATCHES = None
+    CHECKPOINT_DIR,
+    REPORT_DIR,
 
+    MC_DROPOUT_SAMPLES,
+    DEVICE,
 
-# ----------------------------------------------------------------------
-# Number of uncertainty bins.
-# ----------------------------------------------------------------------
+    USE_ATTENTION,
+    USE_RESIDUAL,
+    USE_UNCERTAINTY,
 
-NUM_BINS = 10
+    OBSERVED_PRESERVATION_TOLERANCE,
 
-
-# ----------------------------------------------------------------------
-# Numerical tolerance.
-# ----------------------------------------------------------------------
-
-EPSILON = 1.0e-8
-
-
-# ----------------------------------------------------------------------
-# Expected observed-data preservation tolerance.
-# ----------------------------------------------------------------------
-
-OBSERVED_PRESERVATION_TOLERANCE = 1.0e-6
-
-
-# ======================================================================
-# 3. OUTPUT PATHS
-# ======================================================================
-
-# Convert REPORT_DIR into a Path object.
-REPORT_PATH = Path(REPORT_DIR)
-
-# Create the directory if it does not already exist.
-REPORT_PATH.mkdir(parents=True, exist_ok=True)
-
-
-# Output files.
-PATCH_RESULTS_FILE = (
-    REPORT_PATH / "uncertainty_calibration.csv"
-)
-
-BIN_RESULTS_FILE = (
-    REPORT_PATH / "uncertainty_calibration_bins.csv"
-)
-
-SUMMARY_FILE = (
-    REPORT_PATH / "uncertainty_calibration_summary.csv"
-)
-
-PLOT_FILE = (
-    REPORT_PATH / "uncertainty_calibration.png"
+    F3_UNCERTAINTY_NUM_PATCHES,
+    UNCERTAINTY_EVALUATION_SEED,
 )
 
 
-# ======================================================================
-# 4. DATASET ADAPTER
-# ======================================================================
+# =====================================================================
+# 8. REPRODUCIBILITY
+# =====================================================================
 
-class SingleSampleDataset(torch.utils.data.Dataset):
+def set_reproducibility_seed(seed):
     """
-    Converts one dataset sample into the dictionary format expected
-    by evaluation.Evaluator.
-    """
-
-    def __init__(self, sample):
-        """
-        Parameters
-        ----------
-        sample : tuple
-            Expected dataset output:
-
-            (
-                input_cube,
-                target_cube,
-                mask,
-                velocity,
-                mask_type,
-                geological_mode
-            )
-        """
-
-        # Store the sample.
-        self.sample = sample
-
-    def __len__(self):
-        """
-        Return the number of samples.
-
-        This adapter contains exactly one sample.
-        """
-
-        return 1
-
-    def __getitem__(self, index):
-        """
-        Return one sample in Evaluator-compatible dictionary format.
-        """
-
-        # Prevent invalid indexing.
-        if index != 0:
-            raise IndexError("SingleSampleDataset contains one sample.")
-
-        # Unpack the original dataset tuple.
-        (
-            input_cube,
-            target_cube,
-            mask,
-            velocity,
-            mask_type,
-            geological_mode,
-        ) = self.sample
-
-        # Return the dictionary expected by Evaluator.
-        return {
-            "input": input_cube,
-            "target": target_cube,
-            "mask": mask,
-            "velocity": velocity,
-            "mask_type": mask_type,
-            "geological_mode": geological_mode,
-        }
-
-
-# ======================================================================
-# 5. NUMERICAL VALIDATION
-# ======================================================================
-
-def validate_finite_dataframe(dataframe):
-    """
-    Check that all numeric columns contain finite values.
-    """
-
-    # Select numeric columns only.
-    numeric_columns = dataframe.select_dtypes(
-        include=[np.number]
-    ).columns
-
-    # Check every numeric column.
-    for column in numeric_columns:
-
-        # Convert the column to NumPy values.
-        values = dataframe[column].to_numpy(
-            dtype=float
-        )
-
-        # Check for NaN or infinite values.
-        if not np.all(np.isfinite(values)):
-
-            raise ValueError(
-                f"Non-finite values detected in column: {column}"
-            )
-
-
-# ======================================================================
-# 6. CORRELATION ANALYSIS
-# ======================================================================
-
-def calculate_correlations(
-    uncertainty,
-    reconstruction_error,
-    missing_error,
-):
-    """
-    Calculate Pearson and Spearman correlations.
+    Set random seeds for reproducible evaluation.
 
     Parameters
     ----------
-    uncertainty : array-like
-        Patch-level predictive standard deviation.
+    seed : int
+        Random seed.
+    """
 
-    reconstruction_error : array-like
-        Patch-level global MAE.
+    # Python random generator.
+    random.seed(seed)
 
-    missing_error : array-like
-        Patch-level missing-region MAE.
+    # NumPy random generator.
+    np.random.seed(seed)
+
+    # PyTorch CPU generator.
+    torch.manual_seed(seed)
+
+    # PyTorch CUDA generator.
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+# =====================================================================
+# 9. SAFE SCALAR CONVERSION
+# =====================================================================
+
+def to_float(value):
+    """
+    Convert a scalar tensor or numerical scalar to Python float.
+
+    Parameters
+    ----------
+    value : scalar tensor or numerical value
+
+    Returns
+    -------
+    float
+    """
+
+    if torch.is_tensor(value):
+
+        return float(
+            value.detach().cpu().item()
+        )
+
+    return float(value)
+
+
+# =====================================================================
+# 10. SAFE CORRELATION
+# =====================================================================
+
+def safe_correlation(
+    uncertainty_values,
+    error_values,
+):
+    """
+    Calculate Pearson and Spearman correlations safely.
+
+    Parameters
+    ----------
+    uncertainty_values : array-like
+        Patch-level uncertainty values.
+
+    error_values : array-like
+        Corresponding patch-level reconstruction errors.
 
     Returns
     -------
     dict
-        Correlation statistics.
-    """
-
-    # Convert all inputs to NumPy arrays.
-    uncertainty = np.asarray(
-        uncertainty,
-        dtype=float,
-    )
-
-    reconstruction_error = np.asarray(
-        reconstruction_error,
-        dtype=float,
-    )
-
-    missing_error = np.asarray(
-        missing_error,
-        dtype=float,
-    )
-
-    # --------------------------------------------------------------
-    # Pearson correlation:
-    # uncertainty versus global reconstruction error.
-    # --------------------------------------------------------------
-
-    if len(uncertainty) >= 2:
-
-        pearson_global, pearson_global_p = pearsonr(
-            uncertainty,
-            reconstruction_error,
-        )
-
-    else:
-
-        pearson_global = np.nan
-        pearson_global_p = np.nan
-
-    # --------------------------------------------------------------
-    # Spearman correlation:
-    # uncertainty versus global reconstruction error.
-    # --------------------------------------------------------------
-
-    if len(uncertainty) >= 2:
-
-        spearman_global, spearman_global_p = spearmanr(
-            uncertainty,
-            reconstruction_error,
-        )
-
-    else:
-
-        spearman_global = np.nan
-        spearman_global_p = np.nan
-
-    # --------------------------------------------------------------
-    # Pearson correlation:
-    # uncertainty versus missing-region error.
-    # --------------------------------------------------------------
-
-    if len(uncertainty) >= 2:
-
-        pearson_missing, pearson_missing_p = pearsonr(
-            uncertainty,
-            missing_error,
-        )
-
-    else:
-
-        pearson_missing = np.nan
-        pearson_missing_p = np.nan
-
-    # --------------------------------------------------------------
-    # Spearman correlation:
-    # uncertainty versus missing-region error.
-    # --------------------------------------------------------------
-
-    if len(uncertainty) >= 2:
-
-        spearman_missing, spearman_missing_p = spearmanr(
-            uncertainty,
-            missing_error,
-        )
-
-    else:
-
-        spearman_missing = np.nan
-        spearman_missing_p = np.nan
-
-    # Return all statistics.
-    return {
-        "pearson_global_r": pearson_global,
-        "pearson_global_p": pearson_global_p,
-        "spearman_global_r": spearman_global,
-        "spearman_global_p": spearman_global_p,
-        "pearson_missing_r": pearson_missing,
-        "pearson_missing_p": pearson_missing_p,
-        "spearman_missing_r": spearman_missing,
-        "spearman_missing_p": spearman_missing_p,
-    }
-
-
-# ======================================================================
-# 7. UNCERTAINTY BINNING
-# ======================================================================
-
-def calculate_uncertainty_bins(
-    dataframe,
-    number_of_bins=10,
-):
-    """
-    Divide patches into uncertainty quantile bins.
-
-    The bins are based on predictive standard deviation.
-
-    Returns
-    -------
-    calibration_table : pandas.DataFrame
-        Statistics for every uncertainty bin.
-
-    global_gap : float
-        Mean absolute difference between normalized uncertainty
-        and normalized global MAE.
-
-    missing_gap : float
-        Mean absolute difference between normalized uncertainty
-        and normalized missing-region MAE.
+        Pearson and Spearman coefficients,
+        p-values, and number of valid observations.
 
     Notes
     -----
-    These gaps are descriptive alignment measures.
-
-    They are NOT Expected Calibration Error (ECE).
+    Correlation is undefined if either variable is constant.
+    In that situation NaN is returned rather than creating
+    an artificial numerical result.
     """
 
-    # Work on a copy so the original dataframe is not modified.
-    data = dataframe.copy()
+    # ---------------------------------------------------------------
+    # Convert inputs to NumPy arrays.
+    # ---------------------------------------------------------------
 
-    # --------------------------------------------------------------
-    # Create quantile-based bins.
-    # --------------------------------------------------------------
-
-    data["Uncertainty_Bin"] = pd.qcut(
-        data["Predictive_Std"],
-        q=number_of_bins,
-        labels=False,
-        duplicates="drop",
+    uncertainty_values = np.asarray(
+        uncertainty_values,
+        dtype=np.float64,
     )
 
-    # --------------------------------------------------------------
-    # Calculate statistics for each bin.
-    # --------------------------------------------------------------
+    error_values = np.asarray(
+        error_values,
+        dtype=np.float64,
+    )
 
-    calibration_table = (
-        data
-        .groupby(
-            "Uncertainty_Bin",
-            observed=True,
+    # ---------------------------------------------------------------
+    # Check matching dimensions.
+    # ---------------------------------------------------------------
+
+    if uncertainty_values.shape != error_values.shape:
+
+        raise ValueError(
+            "Uncertainty and error arrays must have identical "
+            "shapes. "
+            f"Uncertainty shape = "
+            f"{uncertainty_values.shape}; "
+            f"Error shape = "
+            f"{error_values.shape}."
         )
-        .agg(
-            Number_of_Patches=(
-                "Predictive_Std",
-                "count",
-            ),
-            Mean_Predictive_Std=(
-                "Predictive_Std",
-                "mean",
-            ),
-            Mean_MAE=(
-                "MAE",
-                "mean",
-            ),
-            Mean_Missing_MAE=(
-                "Missing_MAE",
-                "mean",
-            ),
-        )
-        .reset_index()
+
+    # ---------------------------------------------------------------
+    # Keep only finite paired observations.
+    # ---------------------------------------------------------------
+
+    valid = (
+        np.isfinite(uncertainty_values)
+        &
+        np.isfinite(error_values)
     )
 
-    # --------------------------------------------------------------
-    # Calculate normalized alignment gaps.
-    # --------------------------------------------------------------
+    uncertainty_values = uncertainty_values[valid]
 
-    uncertainty_values = (
-        calibration_table["Mean_Predictive_Std"]
-        .to_numpy(dtype=float)
+    error_values = error_values[valid]
+
+    # ---------------------------------------------------------------
+    # At least two observations are required.
+    # ---------------------------------------------------------------
+
+    if len(uncertainty_values) < 2:
+
+        return {
+            "pearson_r": np.nan,
+            "pearson_p": np.nan,
+            "spearman_rho": np.nan,
+            "spearman_p": np.nan,
+            "n": len(uncertainty_values),
+        }
+
+    # ---------------------------------------------------------------
+    # Correlation is undefined for constant variables.
+    # ---------------------------------------------------------------
+
+    if (
+        np.std(uncertainty_values) == 0.0
+        or
+        np.std(error_values) == 0.0
+    ):
+
+        return {
+            "pearson_r": np.nan,
+            "pearson_p": np.nan,
+            "spearman_rho": np.nan,
+            "spearman_p": np.nan,
+            "n": len(uncertainty_values),
+        }
+
+    # ---------------------------------------------------------------
+    # Pearson correlation.
+    # ---------------------------------------------------------------
+
+    pearson_result = pearsonr(
+        uncertainty_values,
+        error_values,
     )
 
-    mae_values = (
-        calibration_table["Mean_MAE"]
-        .to_numpy(dtype=float)
+    # ---------------------------------------------------------------
+    # Spearman rank correlation.
+    # ---------------------------------------------------------------
+
+    spearman_result = spearmanr(
+        uncertainty_values,
+        error_values,
     )
 
-    missing_mae_values = (
-        calibration_table["Mean_Missing_MAE"]
-        .to_numpy(dtype=float)
-    )
+    # ---------------------------------------------------------------
+    # Return standardized results.
+    # ---------------------------------------------------------------
 
-    # --------------------------------------------------------------
-    # Normalization helper.
-    # --------------------------------------------------------------
+    return {
+        "pearson_r":
+            float(pearson_result.statistic),
 
-    def normalize(values):
-        """
-        Min-max normalization with protection against
-        zero range.
-        """
+        "pearson_p":
+            float(pearson_result.pvalue),
 
-        minimum = np.min(values)
-        maximum = np.max(values)
+        "spearman_rho":
+            float(spearman_result.statistic),
 
-        denominator = maximum - minimum
+        "spearman_p":
+            float(spearman_result.pvalue),
 
-        if denominator < EPSILON:
-            return np.zeros_like(values)
-
-        return (
-            values - minimum
-        ) / denominator
-
-    # Normalize uncertainty.
-    uncertainty_normalized = normalize(
-        uncertainty_values
-    )
-
-    # Normalize global MAE.
-    mae_normalized = normalize(
-        mae_values
-    )
-
-    # Normalize missing-region MAE.
-    missing_mae_normalized = normalize(
-        missing_mae_values
-    )
-
-    # --------------------------------------------------------------
-    # Calculate alignment gaps.
-    # --------------------------------------------------------------
-
-    global_gap = float(
-        np.mean(
-            np.abs(
-                uncertainty_normalized
-                - mae_normalized
-            )
-        )
-    )
-
-    missing_gap = float(
-        np.mean(
-            np.abs(
-                uncertainty_normalized
-                - missing_mae_normalized
-            )
-        )
-    )
-
-    # --------------------------------------------------------------
-    # Add gap columns to the table.
-    # --------------------------------------------------------------
-
-    calibration_table[
-        "Global_Alignment_Gap"
-    ] = np.abs(
-        uncertainty_normalized
-        - mae_normalized
-    )
-
-    calibration_table[
-        "Missing_Alignment_Gap"
-    ] = np.abs(
-        uncertainty_normalized
-        - missing_mae_normalized
-    )
-
-    # Return all three outputs.
-    return (
-        calibration_table,
-        global_gap,
-        missing_gap,
-    )
+        "n":
+            len(uncertainty_values),
+    }
 
 
-# ======================================================================
-# 8. PLOT GENERATION
-# ======================================================================
+# =====================================================================
+# 11. SINGLE-SAMPLE DATASET ADAPTER
+# =====================================================================
 
-def generate_calibration_plot(
-    dataframe,
-    calibration_table,
+class SingleSampleDataset(torch.utils.data.Dataset):
+    """
+    Wrap one F3 sample in the dictionary format expected by
+    the production Evaluator.
+
+    The production Evaluator expects:
+
+        {
+            "input":  [C,D,H,W],
+            "target": [C,D,H,W],
+            "mask":   [C,D,H,W]
+        }
+
+    DataLoader adds the batch dimension:
+
+        [B,C,D,H,W]
+    """
+
+    def __init__(
+        self,
+        corrupted,
+        target,
+        mask,
+    ):
+
+        self.sample = {
+            "input": corrupted,
+            "target": target,
+            "mask": mask,
+        }
+
+    def __len__(self):
+
+        return 1
+
+    def __getitem__(
+        self,
+        index,
+    ):
+
+        return self.sample
+
+
+# =====================================================================
+# 12. F3 SAMPLE VALIDATION
+# =====================================================================
+
+def validate_f3_sample(
+    corrupted,
+    target,
+    mask,
+    patch_index,
 ):
     """
-    Generate uncertainty-error alignment plots.
+    Validate one F3 dataset sample before evaluation.
     """
 
-    # Create a figure.
-    plt.figure(
-        figsize=(12, 5)
+    # ---------------------------------------------------------------
+    # Tensor-type validation.
+    # ---------------------------------------------------------------
+
+    if not torch.is_tensor(corrupted):
+
+        raise TypeError(
+            f"Corrupted input for patch {patch_index} "
+            "is not a torch.Tensor."
+        )
+
+    if not torch.is_tensor(target):
+
+        raise TypeError(
+            f"Target for patch {patch_index} "
+            "is not a torch.Tensor."
+        )
+
+    if not torch.is_tensor(mask):
+
+        raise TypeError(
+            f"Mask for patch {patch_index} "
+            "is not a torch.Tensor."
+        )
+
+    # ---------------------------------------------------------------
+    # Dimension validation.
+    #
+    # Individual dataset samples must be:
+    #
+    #     [C,D,H,W]
+    # ---------------------------------------------------------------
+
+    if corrupted.ndim != 4:
+
+        raise ValueError(
+            f"Corrupted input for patch {patch_index} "
+            "must have shape [C,D,H,W]. "
+            f"Received {tuple(corrupted.shape)}."
+        )
+
+    if target.ndim != 4:
+
+        raise ValueError(
+            f"Target for patch {patch_index} "
+            "must have shape [C,D,H,W]. "
+            f"Received {tuple(target.shape)}."
+        )
+
+    if mask.ndim != 4:
+
+        raise ValueError(
+            f"Mask for patch {patch_index} "
+            "must have shape [C,D,H,W]. "
+            f"Received {tuple(mask.shape)}."
+        )
+
+    # ---------------------------------------------------------------
+    # Shape consistency.
+    # ---------------------------------------------------------------
+
+    if not (
+        corrupted.shape
+        ==
+        target.shape
+        ==
+        mask.shape
+    ):
+
+        raise ValueError(
+            f"Input, target, and mask shapes do not match "
+            f"for patch {patch_index}. "
+            f"Input={tuple(corrupted.shape)}, "
+            f"Target={tuple(target.shape)}, "
+            f"Mask={tuple(mask.shape)}."
+        )
+
+    # ---------------------------------------------------------------
+    # Finite-value validation.
+    # ---------------------------------------------------------------
+
+    if not torch.isfinite(corrupted).all():
+
+        raise ValueError(
+            f"Non-finite values detected in corrupted "
+            f"input for patch {patch_index}."
+        )
+
+    if not torch.isfinite(target).all():
+
+        raise ValueError(
+            f"Non-finite values detected in target "
+            f"for patch {patch_index}."
+        )
+
+    if not torch.isfinite(mask).all():
+
+        raise ValueError(
+            f"Non-finite values detected in mask "
+            f"for patch {patch_index}."
+        )
+
+    # ---------------------------------------------------------------
+    # Binary-mask validation.
+    # ---------------------------------------------------------------
+
+    unique_values = torch.unique(mask)
+
+    valid_mask = torch.all(
+        (unique_values == 0)
+        |
+        (unique_values == 1)
     )
 
-    # --------------------------------------------------------------
-    # Panel 1: Predictive uncertainty versus error.
-    # --------------------------------------------------------------
+    if not valid_mask:
 
-    ax1 = plt.subplot(
-        1,
-        2,
-        1,
+        raise ValueError(
+            f"Mask for patch {patch_index} must contain only "
+            f"0 and 1. Found {unique_values.tolist()}."
+        )
+
+
+# =====================================================================
+# 13. MAIN EVALUATION
+# =====================================================================
+
+def main():
+
+    # =================================================================
+    # REPRODUCIBILITY
+    # =================================================================
+
+    set_reproducibility_seed(
+        UNCERTAINTY_EVALUATION_SEED
     )
 
-    ax1.scatter(
-        dataframe["Predictive_Std"],
-        dataframe["MAE"],
-        alpha=0.7,
-        label="Global MAE",
-    )
-
-    ax1.scatter(
-        dataframe["Predictive_Std"],
-        dataframe["Missing_MAE"],
-        alpha=0.7,
-        label="Missing-region MAE",
-    )
-
-    ax1.set_xlabel(
-        "Predictive Standard Deviation"
-    )
-
-    ax1.set_ylabel(
-        "Reconstruction Error"
-    )
-
-    ax1.set_title(
-        "Uncertainty versus Reconstruction Error"
-    )
-
-    ax1.legend()
-
-    ax1.grid(
-        True,
-        alpha=0.3,
-    )
-
-    # --------------------------------------------------------------
-    # Panel 2: Mean uncertainty and error by bin.
-    # --------------------------------------------------------------
-
-    ax2 = plt.subplot(
-        1,
-        2,
-        2,
-    )
-
-    x = np.arange(
-        len(calibration_table)
-    )
-
-    ax2.plot(
-        x,
-        calibration_table[
-            "Mean_Predictive_Std"
-        ],
-        marker="o",
-        label="Predictive Std",
-    )
-
-    ax2.plot(
-        x,
-        calibration_table[
-            "Mean_MAE"
-        ],
-        marker="s",
-        label="MAE",
-    )
-
-    ax2.plot(
-        x,
-        calibration_table[
-            "Mean_Missing_MAE"
-        ],
-        marker="^",
-        label="Missing MAE",
-    )
-
-    ax2.set_xlabel(
-        "Uncertainty Quantile Bin"
-    )
-
-    ax2.set_ylabel(
-        "Mean Value"
-    )
-
-    ax2.set_title(
-        "Uncertainty-Error Alignment"
-    )
-
-    ax2.set_xticks(x)
-
-    ax2.legend()
-
-    ax2.grid(
-        True,
-        alpha=0.3,
-    )
-
-    # Adjust spacing.
-    plt.tight_layout()
-
-    # Save the figure.
-    plt.savefig(
-        PLOT_FILE,
-        dpi=300,
-        bbox_inches="tight",
-    )
-
-    # Close the figure.
-    plt.close()
-
-
-# ======================================================================
-# 9. MAIN CALIBRATION FUNCTION
-# ======================================================================
-
-def run_uncertainty_calibration():
-    """
-    Execute the complete uncertainty calibration/error alignment
-    analysis.
-    """
+    # =================================================================
+    # HEADER
+    # =================================================================
 
     print()
-    print("=" * 80)
-    print("UNCERTAINTY CALIBRATION AND ERROR ALIGNMENT")
-    print("=" * 80)
-
-    print()
-    print(f"Dataset mode       : {DATASET_MODE}")
-    print(f"Experiment         : {EXPERIMENT_NAME}")
-    print(f"Device             : {DEVICE}")
-    print(f"MC samples         : {MC_DROPOUT_SAMPLES}")
-    print(f"Number of bins     : {NUM_BINS}")
-
-    # --------------------------------------------------------------
-    # STEP 1: BUILD DATASET
-    # --------------------------------------------------------------
-
-    print()
-    print("-" * 80)
-    print("STEP 1: BUILD DATASET")
-    print("-" * 80)
-
-    dataset = build_dataset()
-
-    total_samples = len(dataset)
-
+    print("=" * 78)
     print(
-        f"Total dataset samples: {total_samples}"
+        "UNCERTAINTY–RECONSTRUCTION ERROR EVALUATION"
     )
+    print("=" * 78)
 
-    # Determine how many samples to evaluate.
-    if NUM_PATCHES is None:
+    # =================================================================
+    # DETERMINE EVALUATION MODE
+    # =================================================================
 
-        number_of_samples = total_samples
+    if F3_UNCERTAINTY_NUM_PATCHES is None:
+
+        evaluation_mode = "FULL_F3"
 
     else:
 
-        number_of_samples = min(
-            NUM_PATCHES,
-            total_samples,
+        if (
+            not isinstance(
+                F3_UNCERTAINTY_NUM_PATCHES,
+                int,
+            )
+            or
+            F3_UNCERTAINTY_NUM_PATCHES <= 0
+        ):
+
+            raise ValueError(
+                "F3_UNCERTAINTY_NUM_PATCHES must be "
+                "a positive integer or None."
+            )
+
+        evaluation_mode = "DIAGNOSTIC_SUBSET"
+
+    # =================================================================
+    # DISPLAY CONFIGURATION
+    # =================================================================
+
+    print()
+    print("Configuration")
+    print("-" * 78)
+
+    print(
+        f"Device                    : "
+        f"{DEVICE}"
+    )
+
+    print(
+        f"MC-Dropout samples        : "
+        f"{MC_DROPOUT_SAMPLES}"
+    )
+
+    print(
+        f"Attention                 : "
+        f"{USE_ATTENTION}"
+    )
+
+    print(
+        f"Residual                  : "
+        f"{USE_RESIDUAL}"
+    )
+
+    print(
+        f"Uncertainty               : "
+        f"{USE_UNCERTAINTY}"
+    )
+
+    print(
+        f"F3 patch size             : "
+        f"{F3_PATCH_SIZE}"
+    )
+
+    print(
+        f"F3 stride                 : "
+        f"{F3_STRIDE}"
+    )
+
+    print(
+        f"Missing probability       : "
+        f"{F3_MISSING_PROBABILITY}"
+    )
+
+    print(
+        f"Evaluation seed           : "
+        f"{UNCERTAINTY_EVALUATION_SEED}"
+    )
+
+    print(
+        f"Evaluation mode           : "
+        f"{evaluation_mode}"
+    )
+
+    if F3_UNCERTAINTY_NUM_PATCHES is None:
+
+        print(
+            "Patch limit               : "
+            "ALL AVAILABLE PATCHES"
         )
 
-    print(
-        f"Samples to evaluate: {number_of_samples}"
-    )
+    else:
 
-    # --------------------------------------------------------------
-    # STEP 2: CREATE MODEL
-    # --------------------------------------------------------------
+        print(
+            f"Patch limit               : "
+            f"{F3_UNCERTAINTY_NUM_PATCHES}"
+        )
+
+    # =================================================================
+    # CHECKPOINT
+    # =================================================================
+
+    checkpoint = os.path.join(
+        CHECKPOINT_DIR,
+        "best_model.pth",
+    )
 
     print()
-    print("-" * 80)
-    print("STEP 2: CREATE MODEL")
-    print("-" * 80)
-
-    model = Network3D(
-        use_attention=True,
-        use_residual=True,
-        use_uncertainty=True,
-    )
-
     print(
-        "Network3D created successfully."
+        f"Checkpoint                : "
+        f"{checkpoint}"
     )
 
-    # --------------------------------------------------------------
-    # STEP 3: LOAD CHECKPOINT THROUGH PREDICTOR
-    # --------------------------------------------------------------
-
-    print()
-    print("-" * 80)
-    print("STEP 3: LOAD MODEL CHECKPOINT")
-    print("-" * 80)
-
-    checkpoint_path = (
-        Path.cwd()
-        / "OUTPUTS"
-        / EXPERIMENT_NAME
-        / "checkpoints"
-        / "best_model.pth"
-    )
-
-    if not checkpoint_path.exists():
+    if not os.path.isfile(checkpoint):
 
         raise FileNotFoundError(
-            "Model checkpoint was not found:\n"
-            f"{checkpoint_path}"
+            "The trained model checkpoint was not found:\n"
+            f"{checkpoint}\n\n"
+            "Ensure that best_model.pth exists in the "
+            "configured checkpoint directory."
         )
 
-    # Predictor handles checkpoint loading.
+    # =================================================================
+    # BUILD F3 DATASET
+    # =================================================================
+
+    print()
+    print("=" * 78)
+    print("BUILDING F3 DATASET")
+    print("=" * 78)
+
+    dataset = F3Dataset(
+        segy_path=F3_PATH,
+        patch_size=F3_PATCH_SIZE,
+        stride=F3_STRIDE,
+        missing_probability=F3_MISSING_PROBABILITY,
+    )
+
+    # =================================================================
+    # DETERMINE NUMBER OF PATCHES
+    # =================================================================
+
+    if len(dataset) == 0:
+
+        raise RuntimeError(
+            "The F3 dataset contains no available patches."
+        )
+
+    if F3_UNCERTAINTY_NUM_PATCHES is None:
+
+        number_of_patches = len(dataset)
+
+    else:
+
+        number_of_patches = min(
+            F3_UNCERTAINTY_NUM_PATCHES,
+            len(dataset),
+        )
+
+    print()
+    print(
+        f"Available F3 patches       : "
+        f"{len(dataset)}"
+    )
+
+    print(
+        f"Patches to evaluate        : "
+        f"{number_of_patches}"
+    )
+
+    # =================================================================
+    # BUILD MODEL
+    # =================================================================
+
+    print()
+    print("=" * 78)
+    print("BUILDING PRODUCTION MODEL")
+    print("=" * 78)
+
+    model = Network3D(
+        use_attention=USE_ATTENTION,
+        use_residual=USE_RESIDUAL,
+        use_uncertainty=USE_UNCERTAINTY,
+    )
+
+    # =================================================================
+    # LOAD BEST CHECKPOINT
+    # =================================================================
+
     predictor = Predictor(
         model=model,
-        checkpoint_path=str(checkpoint_path),
+        checkpoint=checkpoint,
         device=DEVICE,
     )
 
-    # Use the loaded model.
-    loaded_model = predictor.model
+    trained_model = predictor.model
 
-    print(
-        f"Checkpoint loaded:\n{checkpoint_path}"
-    )
-
-    # --------------------------------------------------------------
-    # STEP 4: CREATE EVALUATOR
-    # --------------------------------------------------------------
-
-    print()
-    print("-" * 80)
-    print("STEP 4: CREATE EVALUATOR")
-    print("-" * 80)
+    # =================================================================
+    # CREATE PRODUCTION EVALUATOR
+    # =================================================================
 
     evaluator = Evaluator(
-        model=loaded_model,
+        model=trained_model,
         device=DEVICE,
         mc_samples=MC_DROPOUT_SAMPLES,
     )
 
-    print(
-        "Evaluator created successfully."
-    )
-
-    # --------------------------------------------------------------
-    # STEP 5: EVALUATE PATCHES
-    # --------------------------------------------------------------
-
-    print()
-    print("-" * 80)
-    print("STEP 5: EVALUATE PATCHES")
-    print("-" * 80)
+    # =================================================================
+    # STORAGE
+    # =================================================================
 
     results = []
 
-    for sample_index in range(
-        number_of_samples
+    # =================================================================
+    # PATCH-BY-PATCH EVALUATION
+    # =================================================================
+
+    for patch_index in range(
+        number_of_patches
     ):
 
+        print()
+        print("-" * 78)
+
         print(
-            f"Evaluating sample "
-            f"{sample_index + 1}/"
-            f"{number_of_samples}"
+            f"Evaluating patch "
+            f"{patch_index + 1}/"
+            f"{number_of_patches}"
         )
 
-        # ----------------------------------------------------------
-        # Obtain one dataset sample.
-        # ----------------------------------------------------------
+        # -------------------------------------------------------------
+        # Retrieve sample.
+        # -------------------------------------------------------------
 
-        sample = dataset[sample_index]
+        sample = dataset[
+            patch_index
+        ]
 
-        # ----------------------------------------------------------
-        # Convert sample to Evaluator format.
-        # ----------------------------------------------------------
+        # -------------------------------------------------------------
+        # Current F3Dataset structure:
+        #
+        #     input
+        #     target
+        #     mask
+        #     velocity
+        #
+        # Only input, target, and mask are required by Evaluator.
+        # -------------------------------------------------------------
 
-        single_dataset = SingleSampleDataset(
-            sample
+        corrupted = sample[0]
+        target = sample[1]
+        mask = sample[2]
+
+        # -------------------------------------------------------------
+        # Validate sample.
+        # -------------------------------------------------------------
+
+        validate_f3_sample(
+            corrupted=corrupted,
+            target=target,
+            mask=mask,
+            patch_index=patch_index,
         )
 
-        # ----------------------------------------------------------
-        # Create DataLoader.
-        # ----------------------------------------------------------
+        # -------------------------------------------------------------
+        # Build Evaluator-compatible dataset.
+        # -------------------------------------------------------------
+
+        single_sample_dataset = SingleSampleDataset(
+            corrupted=corrupted,
+            target=target,
+            mask=mask,
+        )
+
+        # -------------------------------------------------------------
+        # Build DataLoader.
+        # -------------------------------------------------------------
 
         dataloader = torch.utils.data.DataLoader(
-            single_dataset,
-            batch_size=BATCH_SIZE,
+            single_sample_dataset,
+            batch_size=1,
             shuffle=False,
             num_workers=0,
         )
 
-        # ----------------------------------------------------------
-        # Run production evaluator.
-        # ----------------------------------------------------------
+        # -------------------------------------------------------------
+        # Run production evaluation.
+        # -------------------------------------------------------------
 
         evaluation_result = evaluator.evaluate(
             dataloader
         )
 
-        # ----------------------------------------------------------
-        # Extract required values.
-        # ----------------------------------------------------------
+        # =============================================================
+        # RECONSTRUCTION METRICS
+        # =============================================================
 
-        row = {
-            "Sample_ID": sample_index,
-            "MAE": float(
-                evaluation_result["mae"]
-            ),
-            "RMSE": float(
-                evaluation_result["rmse"]
-            ),
-            "Missing_MAE": float(
-                evaluation_result["missing_mae"]
-            ),
-            "Missing_RMSE": float(
-                evaluation_result["missing_rmse"]
-            ),
-            "Predictive_Variance": float(
-                evaluation_result[
-                    "predictive_variance"
-                ]
-            ),
-            "Predictive_Std": float(
-                evaluation_result[
-                    "predictive_std"
-                ]
-            ),
-            "Aleatoric_Variance": float(
-                evaluation_result[
-                    "aleatoric_variance"
-                ]
-            ),
-            "Epistemic_Variance": float(
-                evaluation_result[
-                    "epistemic_variance"
-                ]
-            ),
-            "Observed_Preservation_Error": float(
-                evaluation_result[
-                    "observed_preservation_error"
-                ]
-            ),
-            "Measured_Missing_Rate": float(
-                evaluation_result[
-                    "measured_missing_rate"
-                ]
-            ),
-            "MC_Samples": int(
-                evaluation_result.get(
-                    "mc_samples",
-                    MC_DROPOUT_SAMPLES,
-                )
-            ),
-        }
-
-        # ----------------------------------------------------------
-        # Validate uncertainty decomposition.
-        # ----------------------------------------------------------
-
-        decomposition_difference = abs(
-            row["Predictive_Variance"]
-            - (
-                row["Aleatoric_Variance"]
-                + row["Epistemic_Variance"]
-            )
+        global_mae = to_float(
+            evaluation_result["mae"]
         )
 
-        if (
-            decomposition_difference
-            > 1.0e-5
-        ):
+        global_rmse = to_float(
+            evaluation_result["rmse"]
+        )
 
-            raise ValueError(
-                "Predictive uncertainty decomposition "
-                "failed for sample "
-                f"{sample_index}."
-            )
+        global_psnr = to_float(
+            evaluation_result["psnr"]
+        )
 
-        # ----------------------------------------------------------
-        # Validate observed-data preservation.
-        # ----------------------------------------------------------
+        global_snr = to_float(
+            evaluation_result["snr"]
+        )
 
-        if (
+        global_ssim = to_float(
+            evaluation_result["ssim"]
+        )
+
+        # =============================================================
+        # MISSING-REGION METRICS
+        # =============================================================
+
+        missing_mae = to_float(
+            evaluation_result["missing_mae"]
+        )
+
+        missing_rmse = to_float(
+            evaluation_result["missing_rmse"]
+        )
+
+        # =============================================================
+        # OBSERVED-REGION METRICS
+        # =============================================================
+
+        observed_mae = to_float(
+            evaluation_result["observed_mae"]
+        )
+
+        observed_rmse = to_float(
+            evaluation_result["observed_rmse"]
+        )
+
+        # =============================================================
+        # UNCERTAINTY DECOMPOSITION
+        # =============================================================
+
+        aleatoric_variance = to_float(
+            evaluation_result[
+                "aleatoric_variance"
+            ]
+        )
+
+        epistemic_variance = to_float(
+            evaluation_result[
+                "epistemic_variance"
+            ]
+        )
+
+        predictive_variance = to_float(
+            evaluation_result[
+                "predictive_variance"
+            ]
+        )
+
+        predictive_std = to_float(
+            evaluation_result[
+                "predictive_std"
+            ]
+        )
+
+        # =============================================================
+        # QUALITY CONTROL
+        # =============================================================
+
+        observed_preservation_error = to_float(
+            evaluation_result[
+                "observed_preservation_error"
+            ]
+        )
+
+        measured_missing_rate = to_float(
+            evaluation_result[
+                "measured_missing_rate"
+            ]
+        )
+
+        # =============================================================
+        # STORE RESULT
+        # =============================================================
+
+        row = {
+
+            "Patch":
+                patch_index,
+
+            "MAE":
+                global_mae,
+
+            "RMSE":
+                global_rmse,
+
+            "PSNR":
+                global_psnr,
+
+            "SNR":
+                global_snr,
+
+            "SSIM":
+                global_ssim,
+
+            "Missing_MAE":
+                missing_mae,
+
+            "Missing_RMSE":
+                missing_rmse,
+
+            "Observed_MAE":
+                observed_mae,
+
+            "Observed_RMSE":
+                observed_rmse,
+
+            "Aleatoric_Variance":
+                aleatoric_variance,
+
+            "Epistemic_Variance":
+                epistemic_variance,
+
+            "Predictive_Variance":
+                predictive_variance,
+
+            "Predictive_Std":
+                predictive_std,
+
+            "Observed_Preservation_Error":
+                observed_preservation_error,
+
+            "Measured_Missing_Rate":
+                measured_missing_rate,
+
+            "MC_Samples":
+                MC_DROPOUT_SAMPLES,
+        }
+
+        results.append(
+            row
+        )
+
+        # =============================================================
+        # DISPLAY PATCH RESULT
+        # =============================================================
+
+        print(
+            f"MAE                       : "
+            f"{global_mae:.6f}"
+        )
+
+        print(
+            f"Missing MAE               : "
+            f"{missing_mae:.6f}"
+        )
+
+        print(
+            f"Missing RMSE              : "
+            f"{missing_rmse:.6f}"
+        )
+
+        print(
+            f"Aleatoric variance        : "
+            f"{aleatoric_variance:.6f}"
+        )
+
+        print(
+            f"Epistemic variance        : "
+            f"{epistemic_variance:.10e}"
+        )
+
+        print(
+            f"Predictive variance       : "
+            f"{predictive_variance:.6f}"
+        )
+
+        print(
+            f"Predictive standard dev.  : "
+            f"{predictive_std:.6f}"
+        )
+
+        print(
+            f"Measured missing rate     : "
+            f"{measured_missing_rate:.6f}"
+        )
+
+        print(
+            f"Observed preservation     : "
+            f"{observed_preservation_error:.6e}"
+        )
+
+    # =================================================================
+    # ENSURE RESULTS EXIST
+    # =================================================================
+
+    if not results:
+
+        raise RuntimeError(
+            "No uncertainty evaluation results were generated."
+        )
+
+    # =================================================================
+    # CONVERT RESULTS TO ARRAYS
+    # =================================================================
+
+    predictive_uncertainty = np.array(
+        [
+            row["Predictive_Std"]
+            for row in results
+        ],
+        dtype=np.float64,
+    )
+
+    aleatoric_uncertainty = np.sqrt(
+        np.maximum(
+            np.array(
+                [
+                    row["Aleatoric_Variance"]
+                    for row in results
+                ],
+                dtype=np.float64,
+            ),
+            0.0,
+        )
+    )
+
+    epistemic_uncertainty = np.sqrt(
+        np.maximum(
+            np.array(
+                [
+                    row["Epistemic_Variance"]
+                    for row in results
+                ],
+                dtype=np.float64,
+            ),
+            0.0,
+        )
+    )
+
+    global_mae_values = np.array(
+        [
+            row["MAE"]
+            for row in results
+        ],
+        dtype=np.float64,
+    )
+
+    missing_mae_values = np.array(
+        [
+            row["Missing_MAE"]
+            for row in results
+        ],
+        dtype=np.float64,
+    )
+
+    global_rmse_values = np.array(
+        [
+            row["RMSE"]
+            for row in results
+        ],
+        dtype=np.float64,
+    )
+
+    missing_rmse_values = np.array(
+        [
+            row["Missing_RMSE"]
+            for row in results
+        ],
+        dtype=np.float64,
+    )
+
+    observed_preservation_values = np.array(
+        [
             row[
                 "Observed_Preservation_Error"
             ]
-            > OBSERVED_PRESERVATION_TOLERANCE
-        ):
+            for row in results
+        ],
+        dtype=np.float64,
+    )
 
-            raise ValueError(
-                "Observed-data preservation failed "
-                f"for sample {sample_index}."
-            )
+    measured_missing_rates = np.array(
+        [
+            row[
+                "Measured_Missing_Rate"
+            ]
+            for row in results
+        ],
+        dtype=np.float64,
+    )
 
-        # Add row to results.
-        results.append(row)
-
-    # --------------------------------------------------------------
-    # STEP 6: CREATE DATAFRAME
-    # --------------------------------------------------------------
+    # =================================================================
+    # PATCH-LEVEL CORRELATION ANALYSIS
+    # =================================================================
 
     print()
-    print("-" * 80)
-    print("STEP 6: CREATE RESULTS TABLE")
-    print("-" * 80)
+    print("=" * 78)
+    print("PATCH-LEVEL UNCERTAINTY–ERROR CORRELATION")
+    print("=" * 78)
 
-    results_dataframe = pd.DataFrame(
-        results
+    # -----------------------------------------------------------------
+    # Predictive uncertainty vs global MAE.
+    # -----------------------------------------------------------------
+
+    global_mae_correlation = safe_correlation(
+        predictive_uncertainty,
+        global_mae_values,
     )
 
-    # Validate numerical values.
-    validate_finite_dataframe(
-        results_dataframe
+    # -----------------------------------------------------------------
+    # Predictive uncertainty vs missing-region MAE.
+    # -----------------------------------------------------------------
+
+    missing_mae_correlation = safe_correlation(
+        predictive_uncertainty,
+        missing_mae_values,
     )
 
-    # Save patch-level results.
-    results_dataframe.to_csv(
-        PATCH_RESULTS_FILE,
-        index=False,
+    # -----------------------------------------------------------------
+    # Predictive uncertainty vs global RMSE.
+    # -----------------------------------------------------------------
+
+    global_rmse_correlation = safe_correlation(
+        predictive_uncertainty,
+        global_rmse_values,
+    )
+
+    # -----------------------------------------------------------------
+    # Predictive uncertainty vs missing-region RMSE.
+    # -----------------------------------------------------------------
+
+    missing_rmse_correlation = safe_correlation(
+        predictive_uncertainty,
+        missing_rmse_values,
+    )
+
+    # =================================================================
+    # DISPLAY CORRELATION RESULTS
+    # =================================================================
+
+    print()
+    print("Predictive uncertainty vs Global MAE")
+
+    print(
+        f"  Pearson r       = "
+        f"{global_mae_correlation['pearson_r']:.6f}"
     )
 
     print(
-        f"Patch results saved:\n"
-        f"{PATCH_RESULTS_FILE}"
-    )
-
-    # --------------------------------------------------------------
-    # STEP 7: CORRELATION ANALYSIS
-    # --------------------------------------------------------------
-
-    print()
-    print("-" * 80)
-    print("STEP 7: CORRELATION ANALYSIS")
-    print("-" * 80)
-
-    correlation_results = calculate_correlations(
-        results_dataframe[
-            "Predictive_Std"
-        ].values,
-        results_dataframe[
-            "MAE"
-        ].values,
-        results_dataframe[
-            "Missing_MAE"
-        ].values,
-    )
-
-    # --------------------------------------------------------------
-    # STEP 8: UNCERTAINTY BINNING
-    # --------------------------------------------------------------
-
-    print()
-    print("-" * 80)
-    print("STEP 8: UNCERTAINTY BINNING")
-    print("-" * 80)
-
-    (
-        calibration_table,
-        global_gap,
-        missing_gap,
-    ) = calculate_uncertainty_bins(
-        results_dataframe,
-        number_of_bins=NUM_BINS,
-    )
-
-    # Save calibration bins.
-    calibration_table.to_csv(
-        BIN_RESULTS_FILE,
-        index=False,
+        f"  Pearson p-value = "
+        f"{global_mae_correlation['pearson_p']:.6e}"
     )
 
     print(
-        f"Calibration bins saved:\n"
-        f"{BIN_RESULTS_FILE}"
+        f"  Spearman rho    = "
+        f"{global_mae_correlation['spearman_rho']:.6f}"
     )
 
-    # --------------------------------------------------------------
-    # STEP 9: SUMMARY
-    # --------------------------------------------------------------
+    print(
+        f"  Spearman p-value= "
+        f"{global_mae_correlation['spearman_p']:.6e}"
+    )
 
     print()
-    print("-" * 80)
-    print("STEP 9: CREATE SUMMARY")
-    print("-" * 80)
+    print("Predictive uncertainty vs Missing-region MAE")
 
-    summary = {
-        "Dataset_Mode": DATASET_MODE,
-        "Experiment_Name": EXPERIMENT_NAME,
-        "Number_of_Patches": len(
-            results_dataframe
-        ),
-        "MC_Samples": MC_DROPOUT_SAMPLES,
-        "Mean_MAE": results_dataframe[
-            "MAE"
-        ].mean(),
-        "Mean_RMSE": results_dataframe[
-            "RMSE"
-        ].mean(),
-        "Mean_Missing_MAE": results_dataframe[
-            "Missing_MAE"
-        ].mean(),
-        "Mean_Missing_RMSE": results_dataframe[
-            "Missing_RMSE"
-        ].mean(),
-        "Mean_Predictive_Variance": results_dataframe[
-            "Predictive_Variance"
-        ].mean(),
-        "Mean_Predictive_Std": results_dataframe[
-            "Predictive_Std"
-        ].mean(),
-        "Mean_Aleatoric_Variance": results_dataframe[
-            "Aleatoric_Variance"
-        ].mean(),
-        "Mean_Epistemic_Variance": results_dataframe[
-            "Epistemic_Variance"
-        ].mean(),
-        "Mean_Missing_Rate": results_dataframe[
-            "Measured_Missing_Rate"
-        ].mean(),
-        "Mean_Observed_Preservation_Error": results_dataframe[
-            "Observed_Preservation_Error"
-        ].mean(),
-        "Pearson_Global_r": correlation_results[
-            "pearson_global_r"
-        ],
-        "Pearson_Global_p": correlation_results[
-            "pearson_global_p"
-        ],
-        "Spearman_Global_r": correlation_results[
-            "spearman_global_r"
-        ],
-        "Spearman_Global_p": correlation_results[
-            "spearman_global_p"
-        ],
-        "Pearson_Missing_r": correlation_results[
-            "pearson_missing_r"
-        ],
-        "Pearson_Missing_p": correlation_results[
-            "pearson_missing_p"
-        ],
-        "Spearman_Missing_r": correlation_results[
-            "spearman_missing_r"
-        ],
-        "Spearman_Missing_p": correlation_results[
-            "spearman_missing_p"
-        ],
-        "Uncertainty_Error_Alignment_Gap_Global": global_gap,
-        "Uncertainty_Error_Alignment_Gap_Missing": missing_gap,
+    print(
+        f"  Pearson r       = "
+        f"{missing_mae_correlation['pearson_r']:.6f}"
+    )
+
+    print(
+        f"  Pearson p-value = "
+        f"{missing_mae_correlation['pearson_p']:.6e}"
+    )
+
+    print(
+        f"  Spearman rho    = "
+        f"{missing_mae_correlation['spearman_rho']:.6f}"
+    )
+
+    print(
+        f"  Spearman p-value= "
+        f"{missing_mae_correlation['spearman_p']:.6e}"
+    )
+
+    print()
+    print("Predictive uncertainty vs Global RMSE")
+
+    print(
+        f"  Pearson r       = "
+        f"{global_rmse_correlation['pearson_r']:.6f}"
+    )
+
+    print(
+        f"  Spearman rho    = "
+        f"{global_rmse_correlation['spearman_rho']:.6f}"
+    )
+
+    print()
+    print("Predictive uncertainty vs Missing-region RMSE")
+
+    print(
+        f"  Pearson r       = "
+        f"{missing_rmse_correlation['pearson_r']:.6f}"
+    )
+
+    print(
+        f"  Spearman rho    = "
+        f"{missing_rmse_correlation['spearman_rho']:.6f}"
+    )
+
+    # =================================================================
+    # CREATE REPORT DIRECTORY
+    # =================================================================
+
+    os.makedirs(
+        REPORT_DIR,
+        exist_ok=True,
+    )
+
+    # =================================================================
+    # SAVE PATCH-LEVEL RESULTS
+    # =================================================================
+
+    csv_file = os.path.join(
+        REPORT_DIR,
+        "uncertainty_evaluation.csv",
+    )
+
+    with open(
+        csv_file,
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as file:
+
+        writer = csv.DictWriter(
+            file,
+            fieldnames=results[0].keys(),
+        )
+
+        writer.writeheader()
+
+        writer.writerows(
+            results
+        )
+
+    # =================================================================
+    # SAVE CORRELATION RESULTS
+    # =================================================================
+
+    correlation_file = os.path.join(
+        REPORT_DIR,
+        "uncertainty_error_correlation.csv",
+    )
+
+    correlation_rows = [
+
+        {
+            "Uncertainty_Type":
+                "Predictive_Std",
+
+            "Error_Type":
+                "Global_MAE",
+
+            "N":
+                global_mae_correlation["n"],
+
+            "Pearson_r":
+                global_mae_correlation["pearson_r"],
+
+            "Pearson_p":
+                global_mae_correlation["pearson_p"],
+
+            "Spearman_rho":
+                global_mae_correlation["spearman_rho"],
+
+            "Spearman_p":
+                global_mae_correlation["spearman_p"],
+        },
+
+        {
+            "Uncertainty_Type":
+                "Predictive_Std",
+
+            "Error_Type":
+                "Missing_MAE",
+
+            "N":
+                missing_mae_correlation["n"],
+
+            "Pearson_r":
+                missing_mae_correlation["pearson_r"],
+
+            "Pearson_p":
+                missing_mae_correlation["pearson_p"],
+
+            "Spearman_rho":
+                missing_mae_correlation["spearman_rho"],
+
+            "Spearman_p":
+                missing_mae_correlation["spearman_p"],
+        },
+
+        {
+            "Uncertainty_Type":
+                "Predictive_Std",
+
+            "Error_Type":
+                "Global_RMSE",
+
+            "N":
+                global_rmse_correlation["n"],
+
+            "Pearson_r":
+                global_rmse_correlation["pearson_r"],
+
+            "Pearson_p":
+                global_rmse_correlation["pearson_p"],
+
+            "Spearman_rho":
+                global_rmse_correlation["spearman_rho"],
+
+            "Spearman_p":
+                global_rmse_correlation["spearman_p"],
+        },
+
+        {
+            "Uncertainty_Type":
+                "Predictive_Std",
+
+            "Error_Type":
+                "Missing_RMSE",
+
+            "N":
+                missing_rmse_correlation["n"],
+
+            "Pearson_r":
+                missing_rmse_correlation["pearson_r"],
+
+            "Pearson_p":
+                missing_rmse_correlation["pearson_p"],
+
+            "Spearman_rho":
+                missing_rmse_correlation["spearman_rho"],
+
+            "Spearman_p":
+                missing_rmse_correlation["spearman_p"],
+        },
+    ]
+
+    with open(
+        correlation_file,
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as file:
+
+        writer = csv.DictWriter(
+            file,
+            fieldnames=correlation_rows[0].keys(),
+        )
+
+        writer.writeheader()
+
+        writer.writerows(
+            correlation_rows
+        )
+
+    # =================================================================
+    # QUALITY CONTROL
+    # =================================================================
+
+    all_uncertainty_values = np.concatenate(
+        [
+            predictive_uncertainty,
+            aleatoric_uncertainty,
+            epistemic_uncertainty,
+        ]
+    )
+
+    all_error_values = np.concatenate(
+        [
+            global_mae_values,
+            missing_mae_values,
+            global_rmse_values,
+            missing_rmse_values,
+        ]
+    )
+
+    # -----------------------------------------------------------------
+    # Finite-value check.
+    # -----------------------------------------------------------------
+
+    if not np.all(
+        np.isfinite(
+            all_uncertainty_values
+        )
+    ):
+
+        raise RuntimeError(
+            "Non-finite uncertainty values detected."
+        )
+
+    if not np.all(
+        np.isfinite(
+            all_error_values
+        )
+    ):
+
+        raise RuntimeError(
+            "Non-finite reconstruction-error values detected."
+        )
+
+    # -----------------------------------------------------------------
+    # Non-negative uncertainty check.
+    # -----------------------------------------------------------------
+
+    if np.any(
+        predictive_uncertainty < 0.0
+    ):
+
+        raise RuntimeError(
+            "Negative predictive standard deviation detected."
+        )
+
+    if np.any(
+        aleatoric_uncertainty < 0.0
+    ):
+
+        raise RuntimeError(
+            "Negative aleatoric standard deviation detected."
+        )
+
+    if np.any(
+        epistemic_uncertainty < 0.0
+    ):
+
+        raise RuntimeError(
+            "Negative epistemic standard deviation detected."
+        )
+
+    # -----------------------------------------------------------------
+    # Observed-data preservation check.
+    # -----------------------------------------------------------------
+
+    maximum_observed_error = np.max(
+        observed_preservation_values
+    )
+
+    if (
+        maximum_observed_error
+        >
+        OBSERVED_PRESERVATION_TOLERANCE
+    ):
+
+        raise RuntimeError(
+            "Observed-data preservation tolerance exceeded.\n"
+            f"Maximum observed preservation error = "
+            f"{maximum_observed_error:.6e}\n"
+            f"Configured tolerance = "
+            f"{OBSERVED_PRESERVATION_TOLERANCE:.6e}"
+        )
+
+    # =================================================================
+    # SUMMARY STATISTICS
+    # =================================================================
+
+    mean_predictive_uncertainty = np.mean(
+        predictive_uncertainty
+    )
+
+    mean_aleatoric_uncertainty = np.mean(
+        aleatoric_uncertainty
+    )
+
+    mean_epistemic_uncertainty = np.mean(
+        epistemic_uncertainty
+    )
+
+    mean_global_mae = np.mean(
+        global_mae_values
+    )
+
+    mean_missing_mae = np.mean(
+        missing_mae_values
+    )
+
+    mean_global_rmse = np.mean(
+        global_rmse_values
+    )
+
+    mean_missing_rmse = np.mean(
+        missing_rmse_values
+    )
+
+    maximum_predictive_uncertainty = np.max(
+        predictive_uncertainty
+    )
+
+    mean_missing_rate = np.mean(
+        measured_missing_rates
+    )
+
+    # =================================================================
+    # SAVE REPRODUCIBILITY METADATA
+    # =================================================================
+
+    metadata_file = os.path.join(
+        REPORT_DIR,
+        "uncertainty_evaluation_metadata.json",
+    )
+
+    metadata = {
+
+        "evaluation": {
+
+            "name":
+                "uncertainty_evaluation",
+
+            "evaluation_mode":
+                evaluation_mode,
+
+            "patches_available":
+                len(dataset),
+
+            "patches_evaluated":
+                number_of_patches,
+
+            "seed":
+                UNCERTAINTY_EVALUATION_SEED,
+        },
+
+        "dataset": {
+
+            "name":
+                "F3",
+
+            "path":
+                F3_PATH,
+
+            "patch_size":
+                list(F3_PATCH_SIZE),
+
+            "stride":
+                list(F3_STRIDE),
+
+            "missing_probability":
+                F3_MISSING_PROBABILITY,
+        },
+
+        "model": {
+
+            "architecture":
+                "Physics-Informed 3D Encoder-Decoder",
+
+            "attention":
+                USE_ATTENTION,
+
+            "residual":
+                USE_RESIDUAL,
+
+            "uncertainty":
+                USE_UNCERTAINTY,
+
+            "checkpoint":
+                checkpoint,
+        },
+
+        "uncertainty": {
+
+            "method":
+                "MC-Dropout",
+
+            "mc_samples":
+                MC_DROPOUT_SAMPLES,
+
+            "components": [
+                "aleatoric",
+                "epistemic",
+                "predictive",
+            ],
+        },
+
+        "quality_control": {
+
+            "observed_preservation_tolerance":
+                OBSERVED_PRESERVATION_TOLERANCE,
+
+            "maximum_observed_preservation_error":
+                float(
+                    maximum_observed_error
+                ),
+
+            "mean_measured_missing_rate":
+                float(
+                    mean_missing_rate
+                ),
+        },
+
+        "summary": {
+
+            "mean_predictive_std":
+                float(
+                    mean_predictive_uncertainty
+                ),
+
+            "maximum_predictive_std":
+                float(
+                    maximum_predictive_uncertainty
+                ),
+
+            "mean_aleatoric_std":
+                float(
+                    mean_aleatoric_uncertainty
+                ),
+
+            "mean_epistemic_std":
+                float(
+                    mean_epistemic_uncertainty
+                ),
+
+            "mean_global_mae":
+                float(
+                    mean_global_mae
+                ),
+
+            "mean_missing_mae":
+                float(
+                    mean_missing_mae
+                ),
+
+            "mean_global_rmse":
+                float(
+                    mean_global_rmse
+                ),
+
+            "mean_missing_rmse":
+                float(
+                    mean_missing_rmse
+                ),
+        },
+
+        "software": {
+
+            "device":
+                str(DEVICE),
+
+            "pytorch_version":
+                torch.__version__,
+
+            "numpy_version":
+                np.__version__,
+        },
+
+        "timestamp_utc":
+            datetime.now(
+                timezone.utc
+            ).isoformat(),
     }
 
-    summary_dataframe = pd.DataFrame(
-        [summary]
-    )
+    with open(
+        metadata_file,
+        "w",
+        encoding="utf-8",
+    ) as file:
 
-    # Validate summary.
-    validate_finite_dataframe(
-        summary_dataframe
-    )
+        json.dump(
+            metadata,
+            file,
+            indent=4,
+        )
 
-    # Save summary.
-    summary_dataframe.to_csv(
-        SUMMARY_FILE,
-        index=False,
-    )
-
-    print(
-        f"Summary saved:\n"
-        f"{SUMMARY_FILE}"
-    )
-
-    # --------------------------------------------------------------
-    # STEP 10: GENERATE PLOT
-    # --------------------------------------------------------------
+    # =================================================================
+    # FINAL SUMMARY
+    # =================================================================
 
     print()
-    print("-" * 80)
-    print("STEP 10: GENERATE CALIBRATION PLOT")
-    print("-" * 80)
-
-    generate_calibration_plot(
-        results_dataframe,
-        calibration_table,
-    )
-
-    print(
-        f"Plot saved:\n"
-        f"{PLOT_FILE}"
-    )
-
-    # --------------------------------------------------------------
-    # STEP 11: DISPLAY RESULTS
-    # --------------------------------------------------------------
-
-    print()
-    print("=" * 80)
-    print("UNCERTAINTY CALIBRATION COMPLETE")
-    print("=" * 80)
+    print("=" * 78)
+    print("UNCERTAINTY EVALUATION SUMMARY")
+    print("=" * 78)
 
     print()
     print(
-        "Pearson correlation "
-        "(Global MAE): "
-        f"{correlation_results['pearson_global_r']:.6f}"
+        f"Evaluation mode                 : "
+        f"{evaluation_mode}"
     )
 
     print(
-        "Spearman correlation "
-        "(Global MAE): "
-        f"{correlation_results['spearman_global_r']:.6f}"
+        f"Patches evaluated               : "
+        f"{number_of_patches}"
     )
 
     print(
-        "Pearson correlation "
-        "(Missing MAE): "
-        f"{correlation_results['pearson_missing_r']:.6f}"
+        f"MC-Dropout samples              : "
+        f"{MC_DROPOUT_SAMPLES}"
     )
 
     print(
-        "Spearman correlation "
-        "(Missing MAE): "
-        f"{correlation_results['spearman_missing_r']:.6f}"
+        f"Mean predictive std             : "
+        f"{mean_predictive_uncertainty:.6f}"
+    )
+
+    print(
+        f"Maximum predictive std          : "
+        f"{maximum_predictive_uncertainty:.6f}"
+    )
+
+    print(
+        f"Mean aleatoric std              : "
+        f"{mean_aleatoric_uncertainty:.6f}"
+    )
+
+    print(
+        f"Mean epistemic std              : "
+        f"{mean_epistemic_uncertainty:.6e}"
+    )
+
+    print(
+        f"Mean global MAE                 : "
+        f"{mean_global_mae:.6f}"
+    )
+
+    print(
+        f"Mean missing-region MAE         : "
+        f"{mean_missing_mae:.6f}"
+    )
+
+    print(
+        f"Mean global RMSE                : "
+        f"{mean_global_rmse:.6f}"
+    )
+
+    print(
+        f"Mean missing-region RMSE        : "
+        f"{mean_missing_rmse:.6f}"
+    )
+
+    print(
+        f"Mean measured missing rate      : "
+        f"{mean_missing_rate:.6f}"
+    )
+
+    print(
+        f"Maximum observed preservation   : "
+        f"{maximum_observed_error:.6e}"
     )
 
     print()
     print(
-        "Global uncertainty-error alignment gap: "
-        f"{global_gap:.6f}"
+        "Predictive uncertainty vs "
+        "missing-region MAE:"
     )
 
     print(
-        "Missing-region uncertainty-error "
-        f"alignment gap: {missing_gap:.6f}"
+        f"  Pearson r  = "
+        f"{missing_mae_correlation['pearson_r']:.6f}"
+    )
+
+    print(
+        f"  Spearman rho = "
+        f"{missing_mae_correlation['spearman_rho']:.6f}"
+    )
+
+    print(
+        f"  N = "
+        f"{missing_mae_correlation['n']}"
     )
 
     print()
+    print("Saved files:")
     print(
-        "Output files:"
+        f"  {csv_file}"
     )
 
     print(
-        f"  1. {PATCH_RESULTS_FILE}"
+        f"  {correlation_file}"
     )
 
     print(
-        f"  2. {BIN_RESULTS_FILE}"
-    )
-
-    print(
-        f"  3. {SUMMARY_FILE}"
-    )
-
-    print(
-        f"  4. {PLOT_FILE}"
+        f"  {metadata_file}"
     )
 
     print()
-    print("=" * 80)
+    print("=" * 78)
+    print(
+        "UNCERTAINTY EVALUATION COMPLETE"
+    )
+    print("=" * 78)
 
 
-# ======================================================================
-# 10. SCRIPT ENTRY POINT
-# ======================================================================
+# =====================================================================
+# 13. SCRIPT ENTRY POINT
+# =====================================================================
 
 if __name__ == "__main__":
 
-    run_uncertainty_calibration()
+    main()

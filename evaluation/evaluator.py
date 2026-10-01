@@ -6,18 +6,45 @@ Model Evaluator
 PhD-standard evaluator for the Physics-Informed 3D Encoder-Decoder
 Framework with Predictive Uncertainty for Seismic Data Reconstruction.
 
-The evaluator:
+This evaluator is responsible for:
 
-    1. Evaluates the model over an entire DataLoader.
-    2. Computes global reconstruction metrics.
-    3. Computes missing-region reconstruction metrics.
-    4. Computes observed-region reconstruction metrics.
-    5. Evaluates observed-data preservation.
-    6. Computes aleatoric uncertainty.
-    7. Optionally computes epistemic uncertainty from MC predictions.
-    8. Computes total predictive uncertainty.
-    9. Aggregates results using sample-weighted statistics.
-   10. Performs numerical validation throughout evaluation.
+    1. Evaluating the trained model over a complete DataLoader.
+    2. Computing global reconstruction metrics.
+    3. Computing missing-region reconstruction metrics.
+    4. Computing observed-region reconstruction metrics.
+    5. Evaluating exact observed-data preservation.
+    6. Computing aleatoric uncertainty.
+    7. Computing epistemic uncertainty using MC-Dropout.
+    8. Computing predictive uncertainty.
+    9. Computing missing-region uncertainty.
+   10. Aggregating metrics over the evaluation dataset.
+   11. Performing numerical and structural validation.
+
+IMPORTANT METRICS ARCHITECTURE
+--------------------------------
+
+All reconstruction and uncertainty metric mathematics are delegated
+to the canonical project-wide implementation:
+
+    metrics/reconstruction_metrics.py
+
+This evaluator does NOT maintain a second implementation of:
+
+    MAE
+    MSE
+    RMSE
+    Relative L2 Error
+    PSNR
+    SNR
+    SSIM
+    Missing MAE
+    Missing RMSE
+    Observed MAE
+    Observed RMSE
+    Aleatoric Variance
+    Epistemic Variance
+    Predictive Variance
+    Predictive Standard Deviation
 
 Tensor convention:
 
@@ -37,27 +64,37 @@ Mask convention:
 
 Model output convention:
 
-    reconstruction
-    log_variance
+    Common three-output model:
 
-For MC uncertainty estimation, the model may be evaluated repeatedly
-with stochastic dropout enabled.
+        reconstruction
+        travel_time
+        log_variance
 
-MC-Dropout policy:
+    Two-output model:
+
+        reconstruction
+        log_variance
+
+For MC-Dropout:
 
     The complete model remains in evaluation mode while only dropout
     modules are activated for stochastic forward passes.
 
-    This prevents other training-dependent layers, such as BatchNorm,
-    from changing behavior during uncertainty estimation.
+    This prevents BatchNorm and other training-dependent modules from
+    changing behavior during uncertainty estimation.
 
 Author: Ormin Joseph
 ======================================================================
 """
 
+from __future__ import annotations
+
 import torch
 
-from evaluation.metrics import EvaluationMetrics
+from metrics.reconstruction_metrics import (
+    calculate_reconstruction_metrics,
+    calculate_uncertainty_metrics,
+)
 
 
 # =====================================================================
@@ -67,11 +104,15 @@ from evaluation.metrics import EvaluationMetrics
 class Evaluator:
     """
     Evaluate a trained seismic reconstruction model.
+
+    Metric calculations are delegated to:
+
+        metrics.reconstruction_metrics
     """
 
-    # -----------------------------------------------------------------
-    # Constructor
-    # -----------------------------------------------------------------
+    # =================================================================
+    # CONSTRUCTOR
+    # =================================================================
 
     def __init__(
         self,
@@ -83,14 +124,13 @@ class Evaluator:
         Parameters
         ----------
         model:
-            Trained reconstruction model.
+            Trained seismic reconstruction model.
 
         device:
             torch.device used for evaluation.
 
         mc_samples:
-            Number of stochastic forward passes used for uncertainty
-            estimation.
+            Number of stochastic forward passes for MC-Dropout.
 
             mc_samples = 1:
                 Deterministic evaluation.
@@ -98,6 +138,12 @@ class Evaluator:
             mc_samples > 1:
                 MC-Dropout uncertainty estimation.
         """
+
+        if model is None:
+
+            raise ValueError(
+                "model cannot be None."
+            )
 
         if not isinstance(
             device,
@@ -108,22 +154,16 @@ class Evaluator:
                 "device must be an instance of torch.device."
             )
 
-        if mc_samples < 1:
+        if int(mc_samples) < 1:
 
             raise ValueError(
                 "mc_samples must be at least 1."
             )
 
-        if model is None:
-
-            raise ValueError(
-                "model cannot be None."
-            )
-
         self.device = device
 
-        self.model = (
-            model.to(self.device)
+        self.model = model.to(
+            self.device
         )
 
         self.mc_samples = int(
@@ -146,7 +186,7 @@ class Evaluator:
         dataloader:
             PyTorch DataLoader containing evaluation samples.
 
-            Each batch must contain at least:
+            Each batch must contain:
 
                 input
                 target
@@ -157,6 +197,10 @@ class Evaluator:
         dict
             Aggregated evaluation metrics.
         """
+
+        # -------------------------------------------------------------
+        # Validate DataLoader.
+        # -------------------------------------------------------------
 
         if dataloader is None:
 
@@ -173,17 +217,14 @@ class Evaluator:
         # -------------------------------------------------------------
         # Complete model enters evaluation mode.
         #
-        # MC-Dropout mode is handled separately inside _predict().
+        # MC-Dropout is controlled separately inside _predict().
         # -------------------------------------------------------------
 
         self.model.eval()
 
-        # -------------------------------------------------------------
-        # Accumulators
-        #
-        # Metrics are accumulated using batch-size weighting rather
-        # than assigning identical weight to every batch.
-        # -------------------------------------------------------------
+        # =============================================================
+        # ACCUMULATORS
+        # =============================================================
 
         accumulators = {
 
@@ -194,9 +235,10 @@ class Evaluator:
             "mae": 0.0,
             "mse": 0.0,
             "rmse": 0.0,
+            "relative_l2": 0.0,
             "relative_error": 0.0,
-            "snr": 0.0,
             "psnr": 0.0,
+            "snr": 0.0,
             "ssim": 0.0,
 
             # ---------------------------------------------------------
@@ -220,7 +262,7 @@ class Evaluator:
             "observed_preservation_error": 0.0,
 
             # ---------------------------------------------------------
-            # Predictive uncertainty
+            # Global uncertainty
             # ---------------------------------------------------------
 
             "aleatoric_variance": 0.0,
@@ -254,9 +296,9 @@ class Evaluator:
                 dataloader
             ):
 
-                # -----------------------------------------------------
-                # Validate batch structure
-                # -----------------------------------------------------
+                # =====================================================
+                # VALIDATE BATCH
+                # =====================================================
 
                 if not isinstance(
                     batch,
@@ -287,9 +329,9 @@ class Evaluator:
                         f"{missing_keys}"
                     )
 
-                # -----------------------------------------------------
-                # Prepare tensors
-                # -----------------------------------------------------
+                # =====================================================
+                # MOVE DATA TO DEVICE
+                # =====================================================
 
                 input_cube = (
                     batch["input"]
@@ -306,17 +348,9 @@ class Evaluator:
                     .to(self.device)
                 )
 
-                # -----------------------------------------------------
-                # Ensure channel dimension
-                #
-                # Dataset convention:
-                #
-                #     [B, D, H, W]
-                #
-                # Network convention:
-                #
-                #     [B, C, D, H, W]
-                # -----------------------------------------------------
+                # =====================================================
+                # ENSURE CHANNEL DIMENSION
+                # =====================================================
 
                 if input_cube.ndim == 4:
 
@@ -336,42 +370,37 @@ class Evaluator:
                         mask.unsqueeze(1)
                     )
 
-                # -----------------------------------------------------
-                # Validate dimensions
-                # -----------------------------------------------------
+                # =====================================================
+                # VALIDATE SHAPES
+                # =====================================================
 
                 if input_cube.ndim != 5:
 
                     raise ValueError(
                         "Input tensor must have shape "
                         "[B, C, D, H, W]. "
-                        f"Received: "
-                        f"{tuple(input_cube.shape)}"
+                        f"Received: {tuple(input_cube.shape)}"
                     )
 
                 if target_cube.shape != input_cube.shape:
 
                     raise ValueError(
                         "Input and target shapes differ. "
-                        f"Input: "
-                        f"{tuple(input_cube.shape)}, "
-                        f"Target: "
-                        f"{tuple(target_cube.shape)}"
+                        f"Input: {tuple(input_cube.shape)}, "
+                        f"Target: {tuple(target_cube.shape)}"
                     )
 
                 if mask.shape != input_cube.shape:
 
                     raise ValueError(
                         "Input and mask shapes differ. "
-                        f"Input: "
-                        f"{tuple(input_cube.shape)}, "
-                        f"Mask: "
-                        f"{tuple(mask.shape)}"
+                        f"Input: {tuple(input_cube.shape)}, "
+                        f"Mask: {tuple(mask.shape)}"
                     )
 
-                # -----------------------------------------------------
-                # Validate finite values
-                # -----------------------------------------------------
+                # =====================================================
+                # VALIDATE NUMERICAL VALUES
+                # =====================================================
 
                 self._validate_finite(
                     input_cube,
@@ -388,9 +417,9 @@ class Evaluator:
                     "mask",
                 )
 
-                # -----------------------------------------------------
-                # Validate mask
-                # -----------------------------------------------------
+                # =====================================================
+                # VALIDATE MASK
+                # =====================================================
 
                 if not torch.all(
                     (mask == 0)
@@ -415,9 +444,9 @@ class Evaluator:
                     input_cube
                 )
 
-                # -----------------------------------------------------
-                # Validate reconstruction
-                # -----------------------------------------------------
+                # =====================================================
+                # VALIDATE MODEL OUTPUT
+                # =====================================================
 
                 self._validate_finite(
                     reconstruction,
@@ -449,7 +478,6 @@ class Evaluator:
                 # DATA-CONSISTENCY PROJECTION
                 # =====================================================
 
-                # -----------------------------------------------------
                 # Observed samples are preserved exactly.
                 #
                 # mask = 1:
@@ -459,7 +487,6 @@ class Evaluator:
                 # mask = 0:
                 #
                 #     reconstruction = model prediction
-                # -----------------------------------------------------
 
                 reconstruction = (
                     reconstruction
@@ -470,10 +497,6 @@ class Evaluator:
                     *
                     mask
                 )
-
-                # -----------------------------------------------------
-                # Validate projected reconstruction.
-                # -----------------------------------------------------
 
                 self._validate_finite(
                     reconstruction,
@@ -499,9 +522,7 @@ class Evaluator:
                 if observed_difference.numel() > 0:
 
                     observed_preservation_error = float(
-                        observed_difference
-                        .max()
-                        .item()
+                        observed_difference.max().item()
                     )
 
                 else:
@@ -509,146 +530,111 @@ class Evaluator:
                     observed_preservation_error = 0.0
 
                 # =====================================================
-                # COMMON METRICS
+                # CANONICAL RECONSTRUCTION METRICS
                 # =====================================================
 
-                batch_metrics = {
+                reconstruction_metrics = (
+                    calculate_reconstruction_metrics(
+                        prediction=reconstruction,
+                        target=target_cube,
+                        mask=mask,
+                    )
+                )
 
-                    "mae":
-                        EvaluationMetrics.mae(
-                            reconstruction,
-                            target_cube,
-                        ),
+                # -----------------------------------------------------
+                # Validate returned metrics.
+                # -----------------------------------------------------
 
-                    "mse":
-                        EvaluationMetrics.mse(
-                            reconstruction,
-                            target_cube,
-                        ),
-
-                    "rmse":
-                        EvaluationMetrics.rmse(
-                            reconstruction,
-                            target_cube,
-                        ),
-
-                    "relative_error":
-                        EvaluationMetrics.relative_error(
-                            reconstruction,
-                            target_cube,
-                        ),
-
-                    "snr":
-                        EvaluationMetrics.snr(
-                            reconstruction,
-                            target_cube,
-                        ),
-
-                    "psnr":
-                        EvaluationMetrics.psnr(
-                            reconstruction,
-                            target_cube,
-                        ),
-
-                    "ssim":
-                        EvaluationMetrics.ssim(
-                            reconstruction,
-                            target_cube,
-                        ),
-
-                    "missing_mae":
-                        EvaluationMetrics.missing_mae(
-                            reconstruction,
-                            target_cube,
-                            mask,
-                        ),
-
-                    "missing_rmse":
-                        EvaluationMetrics.missing_rmse(
-                            reconstruction,
-                            target_cube,
-                            mask,
-                        ),
-
-                    "observed_mae":
-                        EvaluationMetrics.observed_mae(
-                            reconstruction,
-                            target_cube,
-                            mask,
-                        ),
-
-                    "observed_rmse":
-                        EvaluationMetrics.observed_rmse(
-                            reconstruction,
-                            target_cube,
-                            mask,
-                        ),
-                }
+                self._validate_metric_dictionary(
+                    reconstruction_metrics,
+                    "reconstruction metrics",
+                )
 
                 # =====================================================
-                # EPISTEMIC UNCERTAINTY
+                # CANONICAL UNCERTAINTY METRICS
                 # =====================================================
 
                 if reconstruction_samples is not None:
 
-                    epistemic_variance = (
-                        EvaluationMetrics.epistemic_variance(
-                            reconstruction_samples
+                    uncertainty_metrics = (
+                        calculate_uncertainty_metrics(
+                            log_variance=log_variance,
+                            reconstruction_samples=
+                                reconstruction_samples,
                         )
                     )
 
                 else:
 
+                    # -------------------------------------------------
+                    # Deterministic evaluation:
+                    #
+                    # No stochastic MC samples means epistemic
+                    # uncertainty is zero.
+                    # -------------------------------------------------
+
                     epistemic_variance = torch.zeros_like(
                         aleatoric_variance
                     )
 
-                # -----------------------------------------------------
-                # Validate epistemic variance.
-                # -----------------------------------------------------
-
-                self._validate_finite(
-                    epistemic_variance,
-                    "epistemic_variance",
-                )
-
-                # =====================================================
-                # PREDICTIVE UNCERTAINTY
-                # =====================================================
-
-                predictive_variance = (
-                    EvaluationMetrics.predictive_variance(
-                        aleatoric_variance,
-                        epistemic_variance,
-                    )
-                )
-
-                self._validate_finite(
-                    predictive_variance,
-                    "predictive_variance",
-                )
-
-                # -----------------------------------------------------
-                # Predictive variance should never be negative.
-                # -----------------------------------------------------
-
-                if torch.any(
-                    predictive_variance < 0
-                ):
-
-                    raise RuntimeError(
-                        "Predictive variance contains negative values."
+                    predictive_variance = (
+                        aleatoric_variance
+                        +
+                        epistemic_variance
                     )
 
-                predictive_std = (
-                    EvaluationMetrics.predictive_std(
+                    predictive_std = torch.sqrt(
                         predictive_variance
                     )
+
+                    uncertainty_metrics = {
+                        "aleatoric_variance":
+                            aleatoric_variance,
+
+                        "epistemic_variance":
+                            epistemic_variance,
+
+                        "predictive_variance":
+                            predictive_variance,
+
+                        "predictive_std":
+                            predictive_std,
+                    }
+
+                # =====================================================
+                # VALIDATE UNCERTAINTY
+                # =====================================================
+
+                self._validate_uncertainty_dictionary(
+                    uncertainty_metrics
                 )
 
-                self._validate_finite(
-                    predictive_std,
-                    "predictive_std",
+                # -----------------------------------------------------
+                # Extract uncertainty tensors.
+                # -----------------------------------------------------
+
+                aleatoric_variance = (
+                    uncertainty_metrics[
+                        "aleatoric_variance"
+                    ]
+                )
+
+                epistemic_variance = (
+                    uncertainty_metrics[
+                        "epistemic_variance"
+                    ]
+                )
+
+                predictive_variance = (
+                    uncertainty_metrics[
+                        "predictive_variance"
+                    ]
+                )
+
+                predictive_std = (
+                    uncertainty_metrics[
+                        "predictive_std"
+                    ]
                 )
 
                 # =====================================================
@@ -710,7 +696,7 @@ class Evaluator:
                     )
 
                 # =====================================================
-                # SAMPLE WEIGHT
+                # BATCH SIZE
                 # =====================================================
 
                 batch_size = (
@@ -721,9 +707,9 @@ class Evaluator:
                     batch_size
                 )
 
-                # -----------------------------------------------------
-                # Count missing and observed voxels.
-                # -----------------------------------------------------
+                # =====================================================
+                # VOXEL COUNTS
+                # =====================================================
 
                 batch_missing_voxels = int(
                     torch.sum(
@@ -746,12 +732,26 @@ class Evaluator:
                 )
 
                 # =====================================================
-                # ACCUMULATE GLOBAL AND REGIONAL METRICS
+                # ACCUMULATE RECONSTRUCTION METRICS
                 # =====================================================
 
-                for key, value in (
-                    batch_metrics.items()
+                for key in (
+                    "mae",
+                    "mse",
+                    "rmse",
+                    "relative_l2",
+                    "psnr",
+                    "snr",
+                    "ssim",
+                    "missing_mae",
+                    "missing_rmse",
+                    "observed_mae",
+                    "observed_rmse",
                 ):
+
+                    value = reconstruction_metrics[
+                        key
+                    ]
 
                     accumulators[key] += (
                         float(
@@ -761,70 +761,118 @@ class Evaluator:
                         batch_size
                     )
 
+                # -----------------------------------------------------
+                # Backward-compatible relative_error alias.
+                # -----------------------------------------------------
+
+                accumulators[
+                    "relative_error"
+                ] += (
+                    float(
+                        reconstruction_metrics[
+                            "relative_l2"
+                        ].item()
+                    )
+                    *
+                    batch_size
+                )
+
                 # =====================================================
-                # ACCUMULATE UNCERTAINTY
+                # ACCUMULATE OBSERVED PRESERVATION
                 # =====================================================
-
-                accumulators[
-                    "aleatoric_variance"
-                ] += float(
-                    aleatoric_variance.mean().item()
-                ) * batch_size
-
-                accumulators[
-                    "epistemic_variance"
-                ] += float(
-                    epistemic_variance.mean().item()
-                ) * batch_size
-
-                accumulators[
-                    "predictive_variance"
-                ] += float(
-                    predictive_variance.mean().item()
-                ) * batch_size
-
-                accumulators[
-                    "predictive_std"
-                ] += float(
-                    predictive_std.mean().item()
-                ) * batch_size
-
-                # -----------------------------------------------------
-                # Missing-region uncertainty.
-                # -----------------------------------------------------
-
-                accumulators[
-                    "missing_aleatoric_variance"
-                ] += float(
-                    missing_aleatoric.item()
-                ) * batch_size
-
-                accumulators[
-                    "missing_epistemic_variance"
-                ] += float(
-                    missing_epistemic.item()
-                ) * batch_size
-
-                accumulators[
-                    "missing_predictive_variance"
-                ] += float(
-                    missing_predictive.item()
-                ) * batch_size
-
-                accumulators[
-                    "missing_predictive_std"
-                ] += float(
-                    missing_std.item()
-                ) * batch_size
-
-                # -----------------------------------------------------
-                # Observed-data preservation.
-                # -----------------------------------------------------
 
                 accumulators[
                     "observed_preservation_error"
                 ] += (
                     observed_preservation_error
+                    *
+                    batch_size
+                )
+
+                # =====================================================
+                # ACCUMULATE GLOBAL UNCERTAINTY
+                # =====================================================
+
+                accumulators[
+                    "aleatoric_variance"
+                ] += (
+                    float(
+                        aleatoric_variance.mean().item()
+                    )
+                    *
+                    batch_size
+                )
+
+                accumulators[
+                    "epistemic_variance"
+                ] += (
+                    float(
+                        epistemic_variance.mean().item()
+                    )
+                    *
+                    batch_size
+                )
+
+                accumulators[
+                    "predictive_variance"
+                ] += (
+                    float(
+                        predictive_variance.mean().item()
+                    )
+                    *
+                    batch_size
+                )
+
+                accumulators[
+                    "predictive_std"
+                ] += (
+                    float(
+                        predictive_std.mean().item()
+                    )
+                    *
+                    batch_size
+                )
+
+                # =====================================================
+                # ACCUMULATE MISSING-REGION UNCERTAINTY
+                # =====================================================
+
+                accumulators[
+                    "missing_aleatoric_variance"
+                ] += (
+                    float(
+                        missing_aleatoric.item()
+                    )
+                    *
+                    batch_size
+                )
+
+                accumulators[
+                    "missing_epistemic_variance"
+                ] += (
+                    float(
+                        missing_epistemic.item()
+                    )
+                    *
+                    batch_size
+                )
+
+                accumulators[
+                    "missing_predictive_variance"
+                ] += (
+                    float(
+                        missing_predictive.item()
+                    )
+                    *
+                    batch_size
+                )
+
+                accumulators[
+                    "missing_predictive_std"
+                ] += (
+                    float(
+                        missing_std.item()
+                    )
                     *
                     batch_size
                 )
@@ -928,7 +976,7 @@ class Evaluator:
         return results
 
     # =================================================================
-    # MC-DROPOUT MODE CONTROL
+    # MC-DROPOUT CONTROL
     # =================================================================
 
     @staticmethod
@@ -936,25 +984,14 @@ class Evaluator:
         model,
     ):
         """
-        Enable only dropout modules for MC-Dropout inference.
+        Put the complete model in evaluation mode and activate only
+        dropout modules.
 
-        The complete model is first placed in evaluation mode.
-
-        Only dropout modules are subsequently returned to training mode.
-
-        This ensures that stochasticity is introduced specifically by
-        dropout rather than by the entire network.
+        This keeps BatchNorm and other training-dependent layers in
+        evaluation mode while allowing MC-Dropout stochasticity.
         """
 
-        # -------------------------------------------------------------
-        # Put the complete network in evaluation mode.
-        # -------------------------------------------------------------
-
         model.eval()
-
-        # -------------------------------------------------------------
-        # Activate only dropout layers.
-        # -------------------------------------------------------------
 
         for module in model.modules():
 
@@ -981,7 +1018,7 @@ class Evaluator:
         input_cube,
     ):
         """
-        Perform deterministic or controlled MC-Dropout prediction.
+        Perform deterministic or MC-Dropout prediction.
 
         Returns
         -------
@@ -989,25 +1026,13 @@ class Evaluator:
             Mean reconstruction.
 
         log_variance:
-            Mean log-variance representation.
+            Mean predicted log-variance.
 
         reconstruction_samples:
-            MC reconstruction samples, or None when deterministic
-            evaluation is requested.
+            MC reconstruction samples when mc_samples > 1.
 
         aleatoric_variance:
             Predicted aleatoric variance.
-
-            For deterministic evaluation:
-
-                exp(log_variance)
-
-            For MC evaluation:
-
-                mean(exp(log_variance_samples))
-
-            The MC case is aggregated in variance space to avoid
-            replacing E[variance] with exp(E[log_variance]).
         """
 
         # =============================================================
@@ -1015,10 +1040,6 @@ class Evaluator:
         # =============================================================
 
         if self.mc_samples == 1:
-
-            # ---------------------------------------------------------
-            # Keep the complete model in evaluation mode.
-            # ---------------------------------------------------------
 
             self.model.eval()
 
@@ -1034,16 +1055,28 @@ class Evaluator:
             )
 
             # ---------------------------------------------------------
-            # Convert predicted log-variance to variance.
+            # Convert log variance to variance.
             # ---------------------------------------------------------
 
-            aleatoric_variance = torch.exp(
-                log_variance
+            safe_log_variance = torch.clamp(
+                log_variance,
+                min=-30.0,
+                max=30.0,
             )
 
-            # ---------------------------------------------------------
-            # Validate numerical stability.
-            # ---------------------------------------------------------
+            aleatoric_variance = torch.exp(
+                safe_log_variance
+            )
+
+            self._validate_finite(
+                reconstruction,
+                "reconstruction",
+            )
+
+            self._validate_finite(
+                log_variance,
+                "log_variance",
+            )
 
             self._validate_finite(
                 aleatoric_variance,
@@ -1061,29 +1094,10 @@ class Evaluator:
         # MC-DROPOUT EVALUATION
         # =============================================================
 
-        # -------------------------------------------------------------
-        # Preserve the model's original top-level training state.
-        # -------------------------------------------------------------
-
-        was_training = (
-            self.model.training
-        )
-
-        # -------------------------------------------------------------
-        # Store the original training/evaluation state of every module.
-        #
-        # This allows us to restore mixed module states accurately after
-        # MC inference.
-        # -------------------------------------------------------------
-
         original_module_states = {
             module: module.training
             for module in self.model.modules()
         }
-
-        # -------------------------------------------------------------
-        # Enable controlled MC-Dropout.
-        # -------------------------------------------------------------
 
         self._enable_mc_dropout(
             self.model
@@ -1094,10 +1108,6 @@ class Evaluator:
         log_variance_samples = []
 
         try:
-
-            # =========================================================
-            # STOCHASTIC FORWARD PASSES
-            # =========================================================
 
             for _ in range(
                 self.mc_samples
@@ -1113,10 +1123,6 @@ class Evaluator:
                 ) = self._extract_model_output(
                     output
                 )
-
-                # -----------------------------------------------------
-                # Validate each stochastic prediction immediately.
-                # -----------------------------------------------------
 
                 self._validate_finite(
                     reconstruction,
@@ -1139,8 +1145,7 @@ class Evaluator:
         finally:
 
             # ---------------------------------------------------------
-            # Restore every module to its original training/evaluation
-            # state.
+            # Restore every module's original state.
             # ---------------------------------------------------------
 
             for module, training_state in (
@@ -1151,35 +1156,19 @@ class Evaluator:
                     training_state
                 )
 
-            # ---------------------------------------------------------
-            # Explicitly restore the original top-level state.
-            # ---------------------------------------------------------
-
-            self.model.train(
-                was_training
-            )
-
         # =============================================================
         # STACK MC SAMPLES
         # =============================================================
 
-        reconstruction_samples = (
-            torch.stack(
-                reconstruction_samples,
-                dim=0,
-            )
+        reconstruction_samples = torch.stack(
+            reconstruction_samples,
+            dim=0,
         )
 
-        log_variance_samples = (
-            torch.stack(
-                log_variance_samples,
-                dim=0,
-            )
+        log_variance_samples = torch.stack(
+            log_variance_samples,
+            dim=0,
         )
-
-        # -------------------------------------------------------------
-        # Validate stacked samples.
-        # -------------------------------------------------------------
 
         self._validate_finite(
             reconstruction_samples,
@@ -1202,7 +1191,7 @@ class Evaluator:
         )
 
         # =============================================================
-        # MEAN LOG-VARIANCE
+        # MEAN LOG VARIANCE
         # =============================================================
 
         log_variance = (
@@ -1215,24 +1204,25 @@ class Evaluator:
         # ALEATORIC VARIANCE
         # =============================================================
 
-        # -------------------------------------------------------------
-        # Each MC prediction supplies its own heteroscedastic variance:
+        # Each stochastic forward pass has its own predicted
+        # heteroscedastic variance.
         #
-        #     variance_i = exp(log_variance_i)
-        #
-        # The MC aggregate is:
+        # Therefore:
         #
         #     E[variance]
         #
-        # rather than:
+        # is calculated rather than:
         #
         #     exp(E[log_variance])
-        #
-        # These two expressions are not generally identical.
-        # -------------------------------------------------------------
+
+        safe_log_variance_samples = torch.clamp(
+            log_variance_samples,
+            min=-30.0,
+            max=30.0,
+        )
 
         aleatoric_variance_samples = torch.exp(
-            log_variance_samples
+            safe_log_variance_samples
         )
 
         aleatoric_variance = (
@@ -1260,10 +1250,6 @@ class Evaluator:
             "MC aleatoric_variance",
         )
 
-        # -------------------------------------------------------------
-        # Variance must not be negative.
-        # -------------------------------------------------------------
-
         if torch.any(
             aleatoric_variance < 0
         ):
@@ -1271,10 +1257,6 @@ class Evaluator:
             raise RuntimeError(
                 "Aleatoric variance contains negative values."
             )
-
-        # =============================================================
-        # RETURN
-        # =============================================================
 
         return (
             reconstruction,
@@ -1284,7 +1266,7 @@ class Evaluator:
         )
 
     # =================================================================
-    # MODEL OUTPUT HANDLING
+    # MODEL OUTPUT EXTRACTION
     # =================================================================
 
     @staticmethod
@@ -1294,25 +1276,34 @@ class Evaluator:
         """
         Extract reconstruction and log-variance from model output.
 
-        Supported conventions:
+        Supported model outputs:
 
-            (reconstruction, log_variance)
+        1. Two-output tuple/list:
 
-        or:
+            reconstruction
+            log_variance
+
+        2. Three-output tuple/list:
+
+            reconstruction
+            travel_time
+            log_variance
+
+        3. Dictionary:
 
             {
                 "reconstruction": ...,
                 "log_variance": ...
             }
 
-        If the model returns additional outputs, such as travel time,
-        they are ignored by this evaluator because reconstruction and
-        uncertainty are the quantities required here.
+        Travel time is intentionally not used as a reconstruction
+        metric in this evaluator. It remains available to separate
+        physics-informed diagnostic workflows.
         """
 
-        # -------------------------------------------------------------
-        # Tuple/list model output
-        # -------------------------------------------------------------
+        # =============================================================
+        # TUPLE / LIST OUTPUT
+        # =============================================================
 
         if isinstance(
             output,
@@ -1328,37 +1319,32 @@ class Evaluator:
 
             reconstruction = output[0]
 
-            # ---------------------------------------------------------
-            # IMPORTANT:
-            #
-            # Your current Network3D / Predictor convention has:
-            #
-            #     reconstruction
-            #     travel_time
-            #     log_variance
-            #
-            # Therefore, when three or more outputs are returned,
-            # log_variance is output[2].
-            #
-            # For a two-output model:
-            #
-            #     reconstruction
-            #     log_variance
-            #
-            # log_variance is output[1].
-            # ---------------------------------------------------------
-
             if len(output) >= 3:
+
+                # -----------------------------------------------------
+                # Current three-output convention:
+                #
+                #     reconstruction
+                #     travel_time
+                #     log_variance
+                # -----------------------------------------------------
 
                 log_variance = output[2]
 
             else:
 
+                # -----------------------------------------------------
+                # Two-output convention:
+                #
+                #     reconstruction
+                #     log_variance
+                # -----------------------------------------------------
+
                 log_variance = output[1]
 
-        # -------------------------------------------------------------
-        # Dictionary model output
-        # -------------------------------------------------------------
+        # =============================================================
+        # DICTIONARY OUTPUT
+        # =============================================================
 
         elif isinstance(
             output,
@@ -1387,10 +1373,6 @@ class Evaluator:
                 output["log_variance"]
             )
 
-        # -------------------------------------------------------------
-        # Unsupported model output
-        # -------------------------------------------------------------
-
         else:
 
             raise TypeError(
@@ -1398,9 +1380,9 @@ class Evaluator:
                 f"{type(output)}"
             )
 
-        # -------------------------------------------------------------
-        # Validate output objects.
-        # -------------------------------------------------------------
+        # =============================================================
+        # OUTPUT TYPE VALIDATION
+        # =============================================================
 
         if not isinstance(
             reconstruction,
@@ -1428,6 +1410,120 @@ class Evaluator:
         )
 
     # =================================================================
+    # METRIC DICTIONARY VALIDATION
+    # =================================================================
+
+    @staticmethod
+    def _validate_metric_dictionary(
+        metrics,
+        name,
+    ):
+        """
+        Validate a dictionary of scalar metric tensors.
+        """
+
+        if not isinstance(
+            metrics,
+            dict,
+        ):
+
+            raise TypeError(
+                f"{name} must be a dictionary."
+            )
+
+        for key, value in metrics.items():
+
+            if not isinstance(
+                value,
+                torch.Tensor,
+            ):
+
+                raise TypeError(
+                    f"{name}['{key}'] must be a torch.Tensor."
+                )
+
+            if value.numel() != 1:
+
+                raise ValueError(
+                    f"{name}['{key}'] must be scalar. "
+                    f"Shape: {tuple(value.shape)}"
+                )
+
+            if not torch.isfinite(
+                value
+            ).all():
+
+                raise RuntimeError(
+                    f"{name}['{key}'] contains NaN or Inf."
+                )
+
+    # =================================================================
+    # UNCERTAINTY DICTIONARY VALIDATION
+    # =================================================================
+
+    @staticmethod
+    def _validate_uncertainty_dictionary(
+        uncertainty_metrics,
+    ):
+        """
+        Validate uncertainty tensors returned by the canonical
+        uncertainty metric implementation.
+        """
+
+        required_keys = {
+            "aleatoric_variance",
+            "epistemic_variance",
+            "predictive_variance",
+            "predictive_std",
+        }
+
+        missing_keys = (
+            required_keys
+            -
+            set(uncertainty_metrics.keys())
+        )
+
+        if missing_keys:
+
+            raise KeyError(
+                "Uncertainty metric dictionary is missing keys: "
+                f"{missing_keys}"
+            )
+
+        for key in required_keys:
+
+            value = uncertainty_metrics[
+                key
+            ]
+
+            if not isinstance(
+                value,
+                torch.Tensor,
+            ):
+
+                raise TypeError(
+                    f"Uncertainty metric '{key}' must be a tensor."
+                )
+
+            if not torch.isfinite(
+                value
+            ).all():
+
+                raise RuntimeError(
+                    f"Uncertainty metric '{key}' contains "
+                    "NaN or Inf values."
+                )
+
+            if torch.any(
+                value < 0
+            ):
+
+                raise RuntimeError(
+                    f"Uncertainty metric '{key}' contains "
+                    "negative values."
+                )
+
+    # =================================================================
     # FINITE-VALUE VALIDATION
     # =================================================================
 
@@ -1437,7 +1533,7 @@ class Evaluator:
         name,
     ):
         """
-        Ensure a tensor contains only finite values.
+        Ensure that a tensor contains only finite values.
         """
 
         if not isinstance(

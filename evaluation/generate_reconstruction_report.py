@@ -1,71 +1,143 @@
 """
 =========================================================
-Reconstruction Report
+RECONSTRUCTION REPORT GENERATOR
 =========================================================
 
 Physics-Informed 3D Encoder-Decoder Framework
 with Predictive Uncertainty for Seismic Data Reconstruction
 
-Purpose
+PURPOSE
 -------
-Generate reconstruction visualizations for the currently
-configured dataset mode.
+Generate representative reconstruction visualizations
+for the currently configured dataset mode.
 
 The script is DATA-MODE AGNOSTIC.
 
-It does NOT hard-code:
-    - F3 dataset paths
-    - F3Dataset
-    - checkpoint directories
-    - report directories
-    - dataset-specific patch construction
+It obtains:
 
-Instead, it obtains these from the project configuration
-and dataset factory.
+    Dataset
+    Experiment name
+    Device
+    Checkpoint directory
+    Report directory
+    Network configuration
 
-Supported workflow
+from the central project configuration and dataset factory.
+
+IMPORTANT
+---------
+This script performs MODEL INFERENCE.
+
+It does NOT:
+
+    - train the model
+    - modify model parameters
+    - retrain the model
+    - modify the checkpoint
+    - recompute training losses
+    - perform statistical significance testing
+    - perform ablation training
+
+It uses the already trained:
+
+    best_model.pth
+
+from the active experiment.
+
+CURRENT PREDICTOR API
+---------------------
+The current deterministic Predictor returns:
+
+    reconstruction
+    travel_time
+    log_variance
+    aleatoric_std
+
+The deterministic Predictor does NOT estimate epistemic
+uncertainty.
+
+Therefore this report uses:
+
+    aleatoric_std
+
+for the uncertainty visualization.
+
+Predictive uncertainty requires the separate MC-Dropout
+evaluation pipeline.
+
+SUPPORTED WORKFLOW
 ------------------
-config.py
-    |
-    +--> DATASET_MODE
-    +--> EXPERIMENT_NAME
-    +--> CHECKPOINT_DIR
-    +--> REPORT_DIR
-            |
-            v
-     build_dataset()
-            |
-            v
-       Predictor
-            |
-            v
-    Reconstruction + Uncertainty
-            |
-            v
-     Report visualizations
 
-Outputs
+utils/config.py
+       |
+       +--> DATASET_MODE
+       +--> EXPERIMENT_NAME
+       +--> DEVICE
+       +--> CHECKPOINT_DIR
+       +--> REPORT_DIR
+       +--> USE_ATTENTION
+       +--> USE_RESIDUAL
+       +--> USE_UNCERTAINTY
+       |
+       v
+build_dataset()
+       |
+       v
+Network3D
+       |
+       v
+Predictor
+       |
+       v
+Reconstruction
++
+Aleatoric Uncertainty
+       |
+       v
+Representative Figures
+
+OUTPUTS
 -------
 REPORT_DIR/
     reconstruction/
         best_patch.png
         median_patch.png
         worst_patch.png
-        highest_uncertainty_patch.png
+        highest_aleatoric_uncertainty_patch.png
 
-Author: Ormin Joseph
+        reconstruction_patch_summary.csv
+
+AUTHOR
+------
+Ormin Joseph
 =========================================================
 """
 
-import os
+# =========================================================
+# STANDARD LIBRARY
+# =========================================================
+
+from pathlib import Path
+
+
+# =========================================================
+# THIRD-PARTY LIBRARIES
+# =========================================================
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import torch
 
+
+# =========================================================
+# PROJECT IMPORTS
+# =========================================================
+
 from dataset.build_dataset import build_dataset
+
 from inference.predictor import Predictor
+
 from models.network import Network3D
 
 from utils.config import (
@@ -76,37 +148,107 @@ from utils.config import (
     USE_ATTENTION,
     USE_RESIDUAL,
     USE_UNCERTAINTY,
+    DEVICE as CONFIG_DEVICE,
 )
 
 
 # =========================================================
-# Configuration
+# CONFIGURATION
 # =========================================================
 
+# ---------------------------------------------------------
 # Number of dataset patches to inspect.
+# ---------------------------------------------------------
+#
+# This is intentionally kept local to the report script
+# because it controls only how many representative patches
+# are visualized.
+#
+# It does NOT affect training or model parameters.
+# ---------------------------------------------------------
+
 NUM_PATCHES = 20
 
-# Device used for evaluation.
-DEVICE = "cpu"
 
-# Best trained model.
-CHECKPOINT_PATH = os.path.join(
-    CHECKPOINT_DIR,
-    "best_model.pth"
+# ---------------------------------------------------------
+# Device
+# ---------------------------------------------------------
+#
+# The device is obtained from utils.config.
+#
+# Supported configuration values in the project are:
+#
+#     "cpu"
+#     "cuda"
+#     "auto"
+#
+# Resolve "auto" here.
+# ---------------------------------------------------------
+
+if CONFIG_DEVICE == "auto":
+
+    DEVICE = torch.device(
+        "cuda"
+        if torch.cuda.is_available()
+        else "cpu"
+    )
+
+elif CONFIG_DEVICE == "cuda":
+
+    if not torch.cuda.is_available():
+
+        raise RuntimeError(
+            "DEVICE='cuda' was requested in config.py, "
+            "but CUDA is not available."
+        )
+
+    DEVICE = torch.device(
+        "cuda"
+    )
+
+elif CONFIG_DEVICE == "cpu":
+
+    DEVICE = torch.device(
+        "cpu"
+    )
+
+else:
+
+    raise ValueError(
+        "Unsupported DEVICE configuration: "
+        f"{CONFIG_DEVICE}"
+    )
+
+
+# ---------------------------------------------------------
+# Best trained model checkpoint
+# ---------------------------------------------------------
+
+CHECKPOINT_PATH = (
+    Path(CHECKPOINT_DIR)
+    / "best_model.pth"
 )
 
-# Reconstruction-report output directory.
-RECONSTRUCTION_REPORT_DIR = os.path.join(
-    REPORT_DIR,
-    "reconstruction"
+
+# ---------------------------------------------------------
+# Reconstruction report directory
+# ---------------------------------------------------------
+
+RECONSTRUCTION_REPORT_DIR = (
+    Path(REPORT_DIR)
+    / "reconstruction"
 )
 
 
 # =========================================================
-# Utility Functions
+# UTILITY FUNCTIONS
 # =========================================================
 
-def compute_mae(prediction, target):
+
+def compute_mae(
+        prediction,
+        target
+):
     """
     Compute Mean Absolute Error between prediction and target.
 
@@ -124,179 +266,252 @@ def compute_mae(prediction, target):
         MAE value.
     """
 
-    # Ensure both tensors have compatible dimensions.
     if prediction.shape != target.shape:
 
         raise ValueError(
             "Prediction and target shapes do not match: "
-            f"{prediction.shape} vs {target.shape}"
+            f"{tuple(prediction.shape)} vs "
+            f"{tuple(target.shape)}"
         )
 
-    # Calculate MAE.
+    if not torch.isfinite(
+        prediction
+    ).all():
+
+        raise ValueError(
+            "Prediction contains NaN or Inf values."
+        )
+
+    if not torch.isfinite(
+        target
+    ).all():
+
+        raise ValueError(
+            "Target contains NaN or Inf values."
+        )
+
     mae = torch.mean(
         torch.abs(
             prediction - target
         )
     )
 
-    # Return a Python float.
-    return mae.item()
-
-
-def prepare_batch(tensor):
-    """
-    Convert a single dataset sample into the batch format
-    expected by the Predictor.
-
-    Expected dataset sample:
-        [C, D, H, W]
-
-    Predictor input:
-        [B, C, D, H, W]
-    """
-
-    # Validate tensor type.
-    if not isinstance(tensor, torch.Tensor):
-
-        raise TypeError(
-            "Expected torch.Tensor, "
-            f"received {type(tensor)}"
-        )
-
-    # Add batch dimension if necessary.
-    if tensor.ndim == 4:
-
-        return tensor.unsqueeze(0)
-
-    # If already batched, keep it unchanged.
-    if tensor.ndim == 5:
-
-        return tensor
-
-    raise ValueError(
-        "Expected tensor with 4 or 5 dimensions, "
-        f"received shape {tuple(tensor.shape)}"
+    return float(
+        mae.item()
     )
 
 
-def detach_cpu(tensor):
+# ---------------------------------------------------------
+# Prepare batch
+# ---------------------------------------------------------
+
+def prepare_batch(
+        tensor
+):
     """
-    Safely detach a tensor and move it to CPU.
+    Convert a dataset tensor into [B,C,D,H,W].
+
+    Accepted input:
+        [C,D,H,W]
+
+    or:
+        [B,C,D,H,W]
+
+    Returns
+    -------
+    torch.Tensor
+        Tensor with shape [B,C,D,H,W].
     """
 
-    if not isinstance(tensor, torch.Tensor):
+    if not isinstance(
+        tensor,
+        torch.Tensor
+    ):
+
+        raise TypeError(
+            "Expected torch.Tensor, "
+            f"received {type(tensor)}."
+        )
+
+    if tensor.ndim == 4:
+
+        tensor = tensor.unsqueeze(0)
+
+    elif tensor.ndim != 5:
+
+        raise ValueError(
+            "Expected tensor with shape "
+            "[C,D,H,W] or [B,C,D,H,W]. "
+            f"Received {tuple(tensor.shape)}"
+        )
+
+    if not torch.isfinite(
+        tensor
+    ).all():
+
+        raise ValueError(
+            "Input tensor contains NaN or Inf values."
+        )
+
+    return tensor
+
+
+# ---------------------------------------------------------
+# Detach and move to CPU
+# ---------------------------------------------------------
+
+def detach_cpu(
+        tensor
+):
+    """
+    Detach tensor from computation graph and move to CPU.
+    """
+
+    if not isinstance(
+        tensor,
+        torch.Tensor
+    ):
 
         raise TypeError(
             "Expected torch.Tensor."
         )
 
-    return tensor.detach().cpu()
-
-
-def get_central_depth_slice(tensor):
-    """
-    Extract the central depth slice from a seismic tensor.
-
-    Handles:
-        [B, C, D, H, W]
-        [B, D, H, W]
-        [C, D, H, W]
-        [D, H, W]
-    """
-
-    tensor = detach_cpu(tensor)
-
-    # [B, C, D, H, W]
-    if tensor.ndim == 5:
-
-        return tensor[0, 0, tensor.shape[2] // 2].numpy()
-
-    # [B, D, H, W]
-    if tensor.ndim == 4:
-
-        return tensor[0, tensor.shape[1] // 2].numpy()
-
-    # [C, D, H, W]
-    if tensor.ndim == 4:
-
-        return tensor[0, tensor.shape[1] // 2].numpy()
-
-    # [D, H, W]
-    if tensor.ndim == 3:
-
-        return tensor[tensor.shape[0] // 2].numpy()
-
-    raise ValueError(
-        "Unsupported tensor shape for visualization: "
-        f"{tuple(tensor.shape)}"
+    return (
+        tensor.detach()
+        .cpu()
     )
 
 
+# ---------------------------------------------------------
+# Normalize reconstruction and target shapes
+# ---------------------------------------------------------
+
 def normalize_reconstruction_shape(
-    reconstruction,
-    target
+        reconstruction,
+        target
 ):
     """
-    Ensure reconstruction and target have the same shape.
+    Ensure reconstruction and target both have shape:
 
-    The current Predictor normally returns:
-
-        reconstruction: [B, 1, D, H, W]
-
-    while dataset targets are normally:
-
-        target: [C, D, H, W]
-
-    This function converts the target into the same
-    batched/channel format as the reconstruction.
+        [B,C,D,H,W]
     """
 
-    reconstruction = detach_cpu(reconstruction)
-    target = detach_cpu(target)
+    reconstruction = detach_cpu(
+        reconstruction
+    )
 
-    # Target [C, D, H, W] -> [B, C, D, H, W]
+    target = detach_cpu(
+        target
+    )
+
+    # -----------------------------------------------------
+    # Target [C,D,H,W] -> [B,C,D,H,W]
+    # -----------------------------------------------------
+
     if target.ndim == 4:
 
         target = target.unsqueeze(0)
 
+    # -----------------------------------------------------
+    # Validate dimensions
+    # -----------------------------------------------------
+
     if reconstruction.ndim != 5:
 
         raise ValueError(
-            "Expected reconstruction shape "
-            "[B, C, D, H, W], received "
-            f"{tuple(reconstruction.shape)}"
+            "Expected reconstruction with shape "
+            "[B,C,D,H,W]. "
+            f"Received {tuple(reconstruction.shape)}"
         )
 
     if target.ndim != 5:
 
         raise ValueError(
-            "Expected target shape "
-            "[B, C, D, H, W], received "
-            f"{tuple(target.shape)}"
+            "Expected target with shape "
+            "[B,C,D,H,W]. "
+            f"Received {tuple(target.shape)}"
         )
+
+    # -----------------------------------------------------
+    # Validate shape equality
+    # -----------------------------------------------------
 
     if reconstruction.shape != target.shape:
 
         raise ValueError(
-            "Reconstruction and target shapes do not match: "
-            f"{tuple(reconstruction.shape)} vs "
-            f"{tuple(target.shape)}"
+            "Reconstruction and target shapes do not match:\n"
+            f"Reconstruction: {tuple(reconstruction.shape)}\n"
+            f"Target        : {tuple(target.shape)}"
         )
 
-    return reconstruction, target
+    return (
+        reconstruction,
+        target
+    )
 
 
 # =========================================================
-# Visualization
+# VISUALIZATION
 # =========================================================
+
+
+def extract_central_slice(
+        tensor
+):
+    """
+    Extract the central depth slice from a seismic tensor.
+
+    Expected final format:
+
+        [B,C,D,H,W]
+
+    Returns
+    -------
+    numpy.ndarray
+        Central depth slice with shape [H,W].
+    """
+
+    tensor = detach_cpu(
+        tensor
+    )
+
+    if tensor.ndim == 4:
+
+        tensor = tensor.unsqueeze(0)
+
+    if tensor.ndim != 5:
+
+        raise ValueError(
+            "Expected tensor with shape "
+            "[B,C,D,H,W]. "
+            f"Received {tuple(tensor.shape)}"
+        )
+
+    depth_index = (
+        tensor.shape[2] // 2
+    )
+
+    return (
+        tensor[
+            0,
+            0,
+            depth_index
+        ]
+        .numpy()
+    )
+
+
+# ---------------------------------------------------------
+# Save reconstruction visualization
+# ---------------------------------------------------------
 
 def save_visualization(
-    corrupted,
-    target,
-    reconstruction,
-    uncertainty,
-    save_path,
-    title
+        corrupted,
+        target,
+        reconstruction,
+        uncertainty,
+        save_path,
+        title
 ):
     """
     Save a five-panel reconstruction visualization.
@@ -307,31 +522,19 @@ def save_visualization(
     2. Ground truth
     3. Reconstruction
     4. Absolute error
-    5. Predictive uncertainty
+    5. Aleatoric uncertainty
 
-    Parameters
-    ----------
-    corrupted : torch.Tensor
-        Corrupted/input seismic volume.
-
-    target : torch.Tensor
-        Ground-truth seismic volume.
-
-    reconstruction : torch.Tensor
-        Model reconstruction.
-
-    uncertainty : torch.Tensor
-        Predictive uncertainty standard deviation.
-
-    save_path : str
-        Output image path.
-
-    title : str
-        Figure title.
+    IMPORTANT
+    ---------
+    The fifth panel is explicitly labelled ALEATORIC
+    UNCERTAINTY because the deterministic Predictor does
+    not estimate epistemic uncertainty.
     """
 
-    # Convert target and reconstruction to matching
-    # [B, C, D, H, W] shapes.
+    # -----------------------------------------------------
+    # Normalize reconstruction/target shapes
+    # -----------------------------------------------------
+
     reconstruction, target = (
         normalize_reconstruction_shape(
             reconstruction,
@@ -339,217 +542,279 @@ def save_visualization(
         )
     )
 
-    # Convert tensors to CPU.
-    corrupted = detach_cpu(corrupted)
-    uncertainty = detach_cpu(uncertainty)
+    # -----------------------------------------------------
+    # Prepare corrupted input
+    # -----------------------------------------------------
 
-    # Extract central slices.
-    target_slice = (
-        target[
-            0,
-            0,
-            target.shape[2] // 2
-        ].numpy()
+    corrupted = prepare_batch(
+        corrupted
     )
 
-    reconstruction_slice = (
-        reconstruction[
-            0,
-            0,
-            reconstruction.shape[2] // 2
-        ].numpy()
+    corrupted = detach_cpu(
+        corrupted
     )
 
-    # Handle corrupted input.
-    if corrupted.ndim == 4:
+    # -----------------------------------------------------
+    # Prepare uncertainty
+    # -----------------------------------------------------
 
-        corrupted_slice = (
-            corrupted[
-                0,
-                corrupted.shape[1] // 2
-            ].numpy()
-        )
+    uncertainty = prepare_batch(
+        uncertainty
+    )
 
-    elif corrupted.ndim == 5:
+    uncertainty = detach_cpu(
+        uncertainty
+    )
 
-        corrupted_slice = (
-            corrupted[
-                0,
-                0,
-                corrupted.shape[2] // 2
-            ].numpy()
-        )
+    # -----------------------------------------------------
+    # Validate uncertainty shape
+    # -----------------------------------------------------
 
-    else:
+    if uncertainty.shape != reconstruction.shape:
 
         raise ValueError(
-            "Unsupported corrupted tensor shape: "
-            f"{tuple(corrupted.shape)}"
+            "Aleatoric uncertainty shape does not match "
+            "reconstruction shape:\n"
+            f"Uncertainty   : {tuple(uncertainty.shape)}\n"
+            f"Reconstruction: {tuple(reconstruction.shape)}"
         )
 
-    # Calculate absolute reconstruction error.
+    # -----------------------------------------------------
+    # Extract central slices
+    # -----------------------------------------------------
+
+    corrupted_slice = extract_central_slice(
+        corrupted
+    )
+
+    target_slice = extract_central_slice(
+        target
+    )
+
+    reconstruction_slice = extract_central_slice(
+        reconstruction
+    )
+
+    uncertainty_slice = extract_central_slice(
+        uncertainty
+    )
+
+    # -----------------------------------------------------
+    # Absolute reconstruction error
+    # -----------------------------------------------------
+
     error_slice = np.abs(
         target_slice -
         reconstruction_slice
     )
 
-    # Extract uncertainty slice.
-    if uncertainty.ndim == 5:
+    # -----------------------------------------------------
+    # Create figure
+    # -----------------------------------------------------
 
-        uncertainty_slice = (
-            uncertainty[
-                0,
-                0,
-                uncertainty.shape[2] // 2
-            ].numpy()
-        )
-
-    elif uncertainty.ndim == 4:
-
-        uncertainty_slice = (
-            uncertainty[
-                0,
-                uncertainty.shape[1] // 2
-            ].numpy()
-        )
-
-    else:
-
-        raise ValueError(
-            "Unsupported uncertainty tensor shape: "
-            f"{tuple(uncertainty.shape)}"
-        )
-
-    # Create output figure.
     fig, axes = plt.subplots(
         1,
         5,
         figsize=(22, 5)
     )
 
-    # Images to display.
+    # -----------------------------------------------------
+    # Image data
+    # -----------------------------------------------------
+
     images = [
+
         corrupted_slice,
+
         target_slice,
+
         reconstruction_slice,
+
         error_slice,
+
         uncertainty_slice,
+
     ]
 
-    # Panel titles.
-    titles = [
+    # -----------------------------------------------------
+    # Panel titles
+    # -----------------------------------------------------
+
+    panel_titles = [
+
         "Corrupted",
+
         "Ground Truth",
+
         "Reconstruction",
+
         "Absolute Error",
-        "Predictive Uncertainty",
+
+        "Aleatoric Uncertainty",
+
     ]
 
-    # Draw each panel.
-    for ax, image, name in zip(
+    # -----------------------------------------------------
+    # Draw panels
+    # -----------------------------------------------------
+
+    for axis, image, panel_title in zip(
         axes,
         images,
-        titles
+        panel_titles
     ):
 
-        ax.imshow(
+        axis.imshow(
             image,
             cmap="gray",
             aspect="auto"
         )
 
-        ax.set_title(name)
+        axis.set_title(
+            panel_title
+        )
 
-        ax.axis("off")
+        axis.axis(
+            "off"
+        )
 
-    # Overall figure title.
-    fig.suptitle(title)
+    # -----------------------------------------------------
+    # Overall title
+    # -----------------------------------------------------
 
-    # Improve spacing.
+    fig.suptitle(
+        title
+    )
+
+    # -----------------------------------------------------
+    # Layout
+    # -----------------------------------------------------
+
     plt.tight_layout()
 
-    # Ensure destination directory exists.
-    os.makedirs(
-        os.path.dirname(save_path),
+    # -----------------------------------------------------
+    # Ensure output directory exists
+    # -----------------------------------------------------
+
+    save_path = Path(
+        save_path
+    )
+
+    save_path.parent.mkdir(
+        parents=True,
         exist_ok=True
     )
 
-    # Save figure.
-    plt.savefig(
+    # -----------------------------------------------------
+    # Save figure
+    # -----------------------------------------------------
+
+    fig.savefig(
         save_path,
         dpi=300,
         bbox_inches="tight"
     )
 
-    # Close figure to prevent memory accumulation.
-    plt.close(fig)
+    # -----------------------------------------------------
+    # Close figure
+    # -----------------------------------------------------
+
+    plt.close(
+        fig
+    )
 
 
 # =========================================================
-# Model Construction
+# MODEL CONSTRUCTION
 # =========================================================
+
 
 def create_model():
     """
-    Create Network3D using the current configuration.
+    Create Network3D using the active project configuration.
     """
 
     model = Network3D(
-        use_attention=USE_ATTENTION,
-        use_residual=USE_RESIDUAL,
-        use_uncertainty=USE_UNCERTAINTY,
+
+        use_attention=
+            USE_ATTENTION,
+
+        use_residual=
+            USE_RESIDUAL,
+
+        use_uncertainty=
+            USE_UNCERTAINTY,
+
     )
 
     return model
 
 
 # =========================================================
-# Main Report Generation
+# MAIN REPORT GENERATION
 # =========================================================
+
 
 def main():
 
     print()
-    print("=" * 60)
+    print("=" * 70)
     print("RECONSTRUCTION REPORT")
-    print("=" * 60)
+    print("=" * 70)
 
     print(
-        f"Experiment    : {EXPERIMENT_NAME}"
+        f"Experiment       : {EXPERIMENT_NAME}"
     )
 
     print(
-        f"Dataset Mode  : {DATASET_MODE}"
+        f"Dataset Mode     : {DATASET_MODE}"
     )
 
     print(
-        f"Device        : {DEVICE}"
+        f"Configured Device: {CONFIG_DEVICE}"
     )
 
     print(
-        f"Checkpoint    : {CHECKPOINT_PATH}"
+        f"Resolved Device  : {DEVICE}"
     )
 
     print(
-        f"Output        : {RECONSTRUCTION_REPORT_DIR}"
+        f"Checkpoint       : {CHECKPOINT_PATH}"
     )
 
-    print("=" * 60)
+    print(
+        f"Output Directory : "
+        f"{RECONSTRUCTION_REPORT_DIR}"
+    )
 
-    # -----------------------------------------------------
-    # Validate checkpoint
-    # -----------------------------------------------------
+    print("=" * 70)
 
-    if not os.path.isfile(CHECKPOINT_PATH):
+    # =====================================================
+    # VALIDATE CHECKPOINT
+    # =====================================================
+
+    if not CHECKPOINT_PATH.is_file():
 
         raise FileNotFoundError(
             "Best model checkpoint was not found:\n"
             f"{CHECKPOINT_PATH}"
         )
 
-    # -----------------------------------------------------
-    # Build dataset according to DATASET_MODE
-    # -----------------------------------------------------
+    if CHECKPOINT_PATH.stat().st_size == 0:
+
+        raise RuntimeError(
+            "Best model checkpoint exists but is empty:\n"
+            f"{CHECKPOINT_PATH}"
+        )
+
+    # =====================================================
+    # BUILD DATASET
+    # =====================================================
+
+    print()
+    print("-" * 70)
+    print("STEP 1: BUILD DATASET")
+    print("-" * 70)
 
     dataset = build_dataset()
 
@@ -566,355 +831,476 @@ def main():
         )
 
     print(
-        f"Dataset Length: {len(dataset)}"
+        f"Dataset length: {len(dataset)}"
     )
-
-    # -----------------------------------------------------
-    # Create model
-    # -----------------------------------------------------
-
-    model = create_model()
-
-    # -----------------------------------------------------
-    # Create predictor
-    # -----------------------------------------------------
-
-    predictor = Predictor(
-        model=model,
-        checkpoint=CHECKPOINT_PATH,
-        device=DEVICE
-    )
-
-    # -----------------------------------------------------
-    # Store patch results
-    # -----------------------------------------------------
-
-    patch_results = []
 
     number_to_evaluate = min(
         NUM_PATCHES,
         len(dataset)
     )
 
-    # -----------------------------------------------------
-    # Evaluate selected patches
-    # -----------------------------------------------------
+    print(
+        f"Patches to inspect: "
+        f"{number_to_evaluate}"
+    )
 
-    with torch.no_grad():
+    # =====================================================
+    # CREATE MODEL
+    # =====================================================
 
-        for patch_index in range(
-            number_to_evaluate
+    print()
+    print("-" * 70)
+    print("STEP 2: CREATE MODEL")
+    print("-" * 70)
+
+    model = create_model()
+
+    print(
+        "Network3D created successfully."
+    )
+
+    print(
+        f"Attention    : {USE_ATTENTION}"
+    )
+
+    print(
+        f"Residual     : {USE_RESIDUAL}"
+    )
+
+    print(
+        f"Uncertainty  : {USE_UNCERTAINTY}"
+    )
+
+    # =====================================================
+    # CREATE PREDICTOR
+    # =====================================================
+
+    print()
+    print("-" * 70)
+    print("STEP 3: LOAD BEST MODEL")
+    print("-" * 70)
+
+    predictor = Predictor(
+
+        model=model,
+
+        checkpoint=str(
+            CHECKPOINT_PATH
+        ),
+
+        device=DEVICE,
+
+    )
+
+    print(
+        "Best model checkpoint loaded successfully."
+    )
+
+    # =====================================================
+    # STORAGE
+    # =====================================================
+
+    patch_results = []
+
+    # =====================================================
+    # EVALUATE PATCHES
+    # =====================================================
+
+    print()
+    print("-" * 70)
+    print("STEP 4: GENERATE RECONSTRUCTIONS")
+    print("-" * 70)
+
+    for patch_index in range(
+        number_to_evaluate
+    ):
+
+        print(
+            f"Evaluating patch "
+            f"{patch_index + 1}/"
+            f"{number_to_evaluate}"
+        )
+
+        # -------------------------------------------------
+        # Obtain dataset sample
+        # -------------------------------------------------
+
+        sample = dataset[
+            patch_index
+        ]
+
+        if not isinstance(
+            sample,
+            (tuple, list)
         ):
 
-            print(
-                f"Evaluating patch "
-                f"{patch_index + 1}/"
-                f"{number_to_evaluate}"
+            raise TypeError(
+                "Dataset sample must be a "
+                "tuple or list."
             )
 
-            # ---------------------------------------------
-            # Obtain dataset sample
-            # ---------------------------------------------
+        if len(sample) < 2:
 
-            sample = dataset[patch_index]
-
-            if not isinstance(
-                sample,
-                (tuple, list)
-            ):
-
-                raise TypeError(
-                    "Dataset must return a tuple/list."
-                )
-
-            if len(sample) < 2:
-
-                raise ValueError(
-                    "Dataset sample must contain at "
-                    "least input and target."
-                )
-
-            # Current project convention:
-            #
-            # sample[0] = corrupted/input seismic
-            # sample[1] = target seismic
-            # sample[2] = mask
-            # sample[3] = velocity model
-            corrupted = sample[0]
-            target = sample[1]
-
-            # ---------------------------------------------
-            # Prepare model input
-            # ---------------------------------------------
-
-            corrupted_batch = prepare_batch(
-                corrupted
+            raise ValueError(
+                "Dataset sample must contain at least "
+                "input and target."
             )
 
-            target_batch = prepare_batch(
-                target
-            )
+        # -------------------------------------------------
+        # Current dataset convention
+        #
+        # sample[0] = input/corrupted cube
+        # sample[1] = target cube
+        # sample[2] = mask
+        # sample[3] = velocity model
+        # -------------------------------------------------
 
-            # ---------------------------------------------
-            # Model prediction
-            # ---------------------------------------------
+        corrupted = sample[0]
 
-            prediction_result = (
-                predictor.predict(
-                    corrupted_batch
-                )
-            )
+        target = sample[1]
 
-            # ---------------------------------------------
-            # Current Predictor API
-            #
-            # reconstruction,
-            # travel_time,
-            # aleatoric_std,
-            # epistemic_std
-            # ---------------------------------------------
+        # -------------------------------------------------
+        # Prepare model input
+        # -------------------------------------------------
 
-            if not isinstance(
-                prediction_result,
-                (tuple, list)
-            ):
+        corrupted_batch = prepare_batch(
+            corrupted
+        )
 
-                raise TypeError(
-                    "Predictor.predict() must return "
-                    "a tuple/list."
-                )
+        target_batch = prepare_batch(
+            target
+        )
 
-            if len(prediction_result) != 4:
+        # -------------------------------------------------
+        # Model inference
+        # -------------------------------------------------
+        #
+        # Predictor.predict() returns:
+        #
+        #     reconstruction
+        #     travel_time
+        #     log_variance
+        #     aleatoric_std
+        #
+        # It does NOT return epistemic uncertainty.
+        # -------------------------------------------------
 
-                raise ValueError(
-                    "Expected Predictor.predict() "
-                    "to return four values:\n"
-                    "(reconstruction, travel_time, "
-                    "aleatoric_std, epistemic_std)\n"
-                    f"Received {len(prediction_result)} values."
-                )
+        (
+            reconstruction,
+            travel_time,
+            log_variance,
+            aleatoric_std,
+        ) = predictor.predict(
+            corrupted_batch
+        )
 
-            (
-                reconstruction,
-                travel_time,
-                aleatoric_std,
-                epistemic_std,
-            ) = prediction_result
+        # -------------------------------------------------
+        # Normalize reconstruction and target
+        # -------------------------------------------------
 
-            # ---------------------------------------------
-            # Validate reconstruction
-            # ---------------------------------------------
-
-            reconstruction, target_batch = (
-                normalize_reconstruction_shape(
-                    reconstruction,
-                    target_batch
-                )
-            )
-
-            # ---------------------------------------------
-            # Predictive uncertainty
-            #
-            # Predictive variance:
-            #
-            #   Var_predictive =
-            #       Var_aleatoric +
-            #       Var_epistemic
-            #
-            # Therefore predictive standard deviation:
-            #
-            #   Std_predictive =
-            #       sqrt(
-            #           aleatoric_std² +
-            #           epistemic_std²
-            #       )
-            # ---------------------------------------------
-
-            aleatoric_std = detach_cpu(
-                aleatoric_std
-            )
-
-            epistemic_std = detach_cpu(
-                epistemic_std
-            )
-
-            predictive_std = torch.sqrt(
-                torch.clamp(
-                    aleatoric_std ** 2 +
-                    epistemic_std ** 2,
-                    min=0.0
-                )
-            )
-
-            # ---------------------------------------------
-            # Compute reconstruction MAE
-            # ---------------------------------------------
-
-            mae_value = compute_mae(
+        reconstruction, target_batch = (
+            normalize_reconstruction_shape(
                 reconstruction,
                 target_batch
             )
+        )
 
-            # ---------------------------------------------
-            # Compute mean predictive uncertainty
-            # ---------------------------------------------
+        # -------------------------------------------------
+        # Prepare aleatoric uncertainty
+        # -------------------------------------------------
 
-            mean_uncertainty = (
-                predictive_std.mean().item()
+        aleatoric_std = prepare_batch(
+            aleatoric_std
+        )
+
+        # -------------------------------------------------
+        # Validate uncertainty dimensions
+        # -------------------------------------------------
+
+        if (
+            aleatoric_std.shape
+            != reconstruction.shape
+        ):
+
+            raise ValueError(
+                "Aleatoric uncertainty shape does not "
+                "match reconstruction shape:\n"
+                f"Aleatoric: "
+                f"{tuple(aleatoric_std.shape)}\n"
+                f"Reconstruction: "
+                f"{tuple(reconstruction.shape)}"
             )
 
-            # ---------------------------------------------
-            # Store results
-            # ---------------------------------------------
+        # -------------------------------------------------
+        # Move outputs to CPU
+        # -------------------------------------------------
 
-            patch_results.append(
-                {
-                    "index": patch_index,
+        reconstruction_cpu = detach_cpu(
+            reconstruction
+        )
 
-                    "mae": mae_value,
+        target_cpu = detach_cpu(
+            target_batch
+        )
 
-                    "uncertainty":
-                        mean_uncertainty,
+        aleatoric_std_cpu = detach_cpu(
+            aleatoric_std
+        )
 
-                    "corrupted":
-                        corrupted.detach().cpu(),
+        corrupted_cpu = detach_cpu(
+            corrupted_batch
+        )
 
-                    "target":
-                        target.detach().cpu(),
+        # -------------------------------------------------
+        # Compute MAE
+        # -------------------------------------------------
 
-                    "reconstruction":
-                        reconstruction.detach().cpu(),
+        mae_value = compute_mae(
+            reconstruction_cpu,
+            target_cpu
+        )
 
-                    "uncertainty_map":
-                        predictive_std.detach().cpu(),
+        # -------------------------------------------------
+        # Mean aleatoric uncertainty
+        # -------------------------------------------------
 
-                    "aleatoric_std":
-                        aleatoric_std.detach().cpu(),
+        mean_aleatoric_std = float(
+            aleatoric_std_cpu.mean().item()
+        )
 
-                    "epistemic_std":
-                        epistemic_std.detach().cpu(),
-                }
+        # -------------------------------------------------
+        # Validate uncertainty
+        # -------------------------------------------------
+
+        if not torch.isfinite(
+            aleatoric_std_cpu
+        ).all():
+
+            raise ValueError(
+                "Aleatoric uncertainty contains "
+                "NaN or Inf values."
             )
 
-    # -----------------------------------------------------
-    # Ensure results exist
-    # -----------------------------------------------------
+        # -------------------------------------------------
+        # Store result
+        # -------------------------------------------------
+
+        patch_results.append(
+            {
+
+                "Patch_Index":
+                    patch_index,
+
+                "MAE":
+                    mae_value,
+
+                "Mean_Aleatoric_STD":
+                    mean_aleatoric_std,
+
+                "Corrupted":
+                    corrupted_cpu,
+
+                "Target":
+                    target_cpu,
+
+                "Reconstruction":
+                    reconstruction_cpu,
+
+                "Aleatoric_STD":
+                    aleatoric_std_cpu,
+
+            }
+        )
+
+    # =====================================================
+    # VALIDATE RESULTS
+    # =====================================================
 
     if not patch_results:
 
         raise RuntimeError(
-            "No patch results were generated."
+            "No reconstruction results were generated."
         )
 
-    # -----------------------------------------------------
-    # Create output directory
-    # -----------------------------------------------------
+    # =====================================================
+    # CREATE OUTPUT DIRECTORY
+    # =====================================================
 
-    os.makedirs(
-        RECONSTRUCTION_REPORT_DIR,
+    RECONSTRUCTION_REPORT_DIR.mkdir(
+        parents=True,
         exist_ok=True
     )
 
+    # =====================================================
+    # IDENTIFY REPRESENTATIVE PATCHES
+    # =====================================================
+
     # -----------------------------------------------------
-    # Identify representative patches
+    # Best reconstruction
     # -----------------------------------------------------
 
-    # Lowest MAE = best reconstruction.
     best_patch = min(
         patch_results,
-        key=lambda x: x["mae"]
+        key=lambda result:
+        result["MAE"]
     )
 
-    # Highest MAE = worst reconstruction.
+    # -----------------------------------------------------
+    # Worst reconstruction
+    # -----------------------------------------------------
+
     worst_patch = max(
         patch_results,
-        key=lambda x: x["mae"]
+        key=lambda result:
+        result["MAE"]
     )
 
-    # Highest predictive uncertainty.
-    uncertainty_patch = max(
+    # -----------------------------------------------------
+    # Highest aleatoric uncertainty
+    # -----------------------------------------------------
+
+    highest_uncertainty_patch = max(
         patch_results,
-        key=lambda x: x["uncertainty"]
+        key=lambda result:
+        result["Mean_Aleatoric_STD"]
     )
 
-    # Median MAE patch.
+    # -----------------------------------------------------
+    # Median MAE patch
+    # -----------------------------------------------------
+
     sorted_results = sorted(
         patch_results,
-        key=lambda x: x["mae"]
+        key=lambda result:
+        result["MAE"]
     )
 
     median_patch = sorted_results[
         len(sorted_results) // 2
     ]
 
+    # =====================================================
+    # SAVE FIGURES
+    # =====================================================
+
+    print()
+    print("-" * 70)
+    print("STEP 5: SAVE REPRESENTATIVE FIGURES")
+    print("-" * 70)
+
     # -----------------------------------------------------
-    # Save visualizations
+    # Best patch
     # -----------------------------------------------------
 
     save_visualization(
-        best_patch["corrupted"],
-        best_patch["target"],
-        best_patch["reconstruction"],
-        best_patch["uncertainty_map"],
-        os.path.join(
-            RECONSTRUCTION_REPORT_DIR,
-            "best_patch.png"
-        ),
+
+        best_patch["Corrupted"],
+
+        best_patch["Target"],
+
+        best_patch["Reconstruction"],
+
+        best_patch["Aleatoric_STD"],
+
         (
-            f"Best Patch | "
-            f"MAE = {best_patch['mae']:.6f}"
-        )
+            RECONSTRUCTION_REPORT_DIR
+            / "best_patch.png"
+        ),
+
+        (
+            "Best Reconstruction Patch | "
+            f"MAE = {best_patch['MAE']:.6f}"
+        ),
+
     )
 
-    save_visualization(
-        median_patch["corrupted"],
-        median_patch["target"],
-        median_patch["reconstruction"],
-        median_patch["uncertainty_map"],
-        os.path.join(
-            RECONSTRUCTION_REPORT_DIR,
-            "median_patch.png"
-        ),
-        (
-            f"Median Patch | "
-            f"MAE = {median_patch['mae']:.6f}"
-        )
-    )
+    # -----------------------------------------------------
+    # Median patch
+    # -----------------------------------------------------
 
     save_visualization(
-        worst_patch["corrupted"],
-        worst_patch["target"],
-        worst_patch["reconstruction"],
-        worst_patch["uncertainty_map"],
-        os.path.join(
-            RECONSTRUCTION_REPORT_DIR,
-            "worst_patch.png"
-        ),
+
+        median_patch["Corrupted"],
+
+        median_patch["Target"],
+
+        median_patch["Reconstruction"],
+
+        median_patch["Aleatoric_STD"],
+
         (
-            f"Worst Patch | "
-            f"MAE = {worst_patch['mae']:.6f}"
-        )
+            RECONSTRUCTION_REPORT_DIR
+            / "median_patch.png"
+        ),
+
+        (
+            "Median Reconstruction Patch | "
+            f"MAE = {median_patch['MAE']:.6f}"
+        ),
+
     )
 
+    # -----------------------------------------------------
+    # Worst patch
+    # -----------------------------------------------------
+
     save_visualization(
-        uncertainty_patch["corrupted"],
-        uncertainty_patch["target"],
-        uncertainty_patch["reconstruction"],
-        uncertainty_patch["uncertainty_map"],
-        os.path.join(
-            RECONSTRUCTION_REPORT_DIR,
-            "highest_uncertainty_patch.png"
-        ),
+
+        worst_patch["Corrupted"],
+
+        worst_patch["Target"],
+
+        worst_patch["Reconstruction"],
+
+        worst_patch["Aleatoric_STD"],
+
         (
-            f"Highest Predictive Uncertainty | "
+            RECONSTRUCTION_REPORT_DIR
+            / "worst_patch.png"
+        ),
+
+        (
+            "Worst Reconstruction Patch | "
+            f"MAE = {worst_patch['MAE']:.6f}"
+        ),
+
+    )
+
+    # -----------------------------------------------------
+    # Highest uncertainty patch
+    # -----------------------------------------------------
+
+    save_visualization(
+
+        highest_uncertainty_patch["Corrupted"],
+
+        highest_uncertainty_patch["Target"],
+
+        highest_uncertainty_patch["Reconstruction"],
+
+        highest_uncertainty_patch["Aleatoric_STD"],
+
+        (
+            RECONSTRUCTION_REPORT_DIR
+            / "highest_aleatoric_uncertainty_patch.png"
+        ),
+
+        (
+            "Highest Aleatoric Uncertainty | "
             f"Mean Std = "
-            f"{uncertainty_patch['uncertainty']:.6f}"
-        )
+            f"{highest_uncertainty_patch['Mean_Aleatoric_STD']:.6f}"
+        ),
+
     )
 
-    # -----------------------------------------------------
-    # Save patch summary
-    # -----------------------------------------------------
+    # =====================================================
+    # SAVE PATCH SUMMARY
+    # =====================================================
+
+    print()
+    print("-" * 70)
+    print("STEP 6: SAVE PATCH SUMMARY")
+    print("-" * 70)
 
     summary_rows = []
 
@@ -922,6 +1308,7 @@ def main():
 
         summary_rows.append(
             {
+
                 "Experiment":
                     EXPERIMENT_NAME,
 
@@ -929,22 +1316,16 @@ def main():
                     DATASET_MODE,
 
                 "Patch_Index":
-                    result["index"],
+                    result["Patch_Index"],
 
                 "MAE":
-                    result["mae"],
+                    result["MAE"],
 
-                "Predictive_Uncertainty_Mean":
-                    result["uncertainty"],
+                "Mean_Aleatoric_STD":
+                    result[
+                        "Mean_Aleatoric_STD"
+                    ],
 
-                "Aleatoric_STD_Mean":
-                    result["aleatoric_std"].mean().item(),
-
-                "Epistemic_STD_Mean":
-                    result["epistemic_std"].mean().item(),
-
-                "Predictive_STD_Mean":
-                    result["uncertainty"],
             }
         )
 
@@ -952,9 +1333,9 @@ def main():
         summary_rows
     )
 
-    summary_file = os.path.join(
-        RECONSTRUCTION_REPORT_DIR,
-        "reconstruction_patch_summary.csv"
+    summary_file = (
+        RECONSTRUCTION_REPORT_DIR
+        / "reconstruction_patch_summary.csv"
     )
 
     summary_df.to_csv(
@@ -962,89 +1343,104 @@ def main():
         index=False
     )
 
-    # -----------------------------------------------------
-    # Final report message
-    # -----------------------------------------------------
+    # =====================================================
+    # FINAL SUMMARY
+    # =====================================================
 
     print()
-    print("=" * 60)
+    print("=" * 70)
     print("RECONSTRUCTION REPORT COMPLETED")
-    print("=" * 60)
+    print("=" * 70)
 
+    print()
     print(
-        f"Experiment : {EXPERIMENT_NAME}"
+        f"Experiment          : "
+        f"{EXPERIMENT_NAME}"
     )
 
     print(
-        f"Dataset    : {DATASET_MODE}"
+        f"Dataset Mode        : "
+        f"{DATASET_MODE}"
     )
 
     print(
-        f"Patches    : {len(patch_results)}"
+        f"Device              : "
+        f"{DEVICE}"
+    )
+
+    print(
+        f"Patches Evaluated   : "
+        f"{len(patch_results)}"
     )
 
     print()
 
     print(
-        "Best Patch:"
+        "Best Reconstruction:"
     )
 
     print(
-        f"    Index : {best_patch['index']}"
+        f"    Patch Index : "
+        f"{best_patch['Patch_Index']}"
     )
 
     print(
-        f"    MAE   : {best_patch['mae']:.6f}"
-    )
-
-    print()
-
-    print(
-        "Median Patch:"
-    )
-
-    print(
-        f"    Index : {median_patch['index']}"
-    )
-
-    print(
-        f"    MAE   : {median_patch['mae']:.6f}"
+        f"    MAE         : "
+        f"{best_patch['MAE']:.6f}"
     )
 
     print()
 
     print(
-        "Worst Patch:"
+        "Median Reconstruction:"
     )
 
     print(
-        f"    Index : {worst_patch['index']}"
+        f"    Patch Index : "
+        f"{median_patch['Patch_Index']}"
     )
 
     print(
-        f"    MAE   : {worst_patch['mae']:.6f}"
-    )
-
-    print()
-
-    print(
-        "Highest Predictive Uncertainty:"
-    )
-
-    print(
-        f"    Index : "
-        f"{uncertainty_patch['index']}"
-    )
-
-    print(
-        f"    Mean Std : "
-        f"{uncertainty_patch['uncertainty']:.6f}"
+        f"    MAE         : "
+        f"{median_patch['MAE']:.6f}"
     )
 
     print()
 
     print(
-        "Report directory:"
+        "Worst Reconstruction:"
+    )
+
+    print(
+        f"    Patch Index : "
+        f"{worst_patch['Patch_Index']}"
+    )
+
+    print(
+        f"    MAE         : "
+        f"{worst_patch['MAE']:.6f}"
+    )
+
+    print()
+
+    print(
+        "Highest Aleatoric Uncertainty:"
+    )
+
+    print(
+        f"    Patch Index : "
+        f"{highest_uncertainty_patch['Patch_Index']}"
+    )
+
+    print(
+        f"    Mean Std    : "
+        f"{highest_uncertainty_patch['Mean_Aleatoric_STD']:.6f}"
+    )
+
+    print()
+
+    print(
+        "Figures saved to:"
     )
 
     print(
@@ -1054,18 +1450,19 @@ def main():
     print()
 
     print(
-        "Summary file:"
+        "Patch summary:"
     )
 
     print(
         summary_file
     )
 
-    print("=" * 60)
+    print()
+    print("=" * 70)
 
 
 # =========================================================
-# Script Entry Point
+# SCRIPT ENTRY POINT
 # =========================================================
 
 if __name__ == "__main__":

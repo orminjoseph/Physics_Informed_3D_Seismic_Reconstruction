@@ -1,6 +1,6 @@
 """
 ======================================================================
-Controlled Matrix Test — 3-D Curvelet POCS Baseline
+Curvelet POCS Baseline Test
 ======================================================================
 
 Physics-Informed 3D Encoder-Decoder Framework
@@ -8,92 +8,38 @@ with Predictive Uncertainty for Seismic Data Reconstruction
 
 Purpose
 -------
-Evaluate the 3-D Curvelet POCS baseline under the same controlled
-experimental conditions used for the other seismic reconstruction
-baselines.
+Independently validate the 3-D Curvelet POCS baseline
+implementation for seismic data reconstruction.
 
-Controlled experimental matrix
-------------------------------
-Missing rates:
-    10%, 20%, 30%, 40%, 50%
+This test validates:
 
-Missing mechanisms:
-    random_voxels
-    missing_traces
-    missing_inlines
-    missing_crosslines
-    missing_blocks
+    1. Synthetic dataset generation
+    2. Tensor shape consistency
+    3. Mask validity
+    4. Input consistency
+    5. Finite-value validation
+    6. Curvelet POCS reconstruction
+    7. Reconstruction output shape
+    8. Reconstruction numerical stability
+    9. Observed-data preservation
+   10. Missing-sample reconstruction
+   11. Reconstruction metrics
+   12. Dataset reproducibility
+   13. Curvelet reconstruction reproducibility
 
-Geological modes:
-    horizontal
-    dipping
-    faulted
-    folded
-    complex
-    highly_complex
+IMPORTANT
+---------
+This file is ONLY an implementation/integration test.
 
-Random seeds:
-    42, 43, 44, 45, 46
+It does NOT run the 750-case controlled experiment.
 
-Total cases:
-    6 × 5 × 5 × 5 = 750 cases
+The full controlled Curvelet POCS experiment is implemented
+separately under:
 
-Synthetic cube
---------------
-    64 × 128 × 128
+    evaluation/baselines/curvelet_pocs_controlled_matrix.py
 
-Metrics
--------
-    MAE
-    RMSE
-    PSNR
-    SNR
-    SSIM
-    Runtime
-
-Additional validation
----------------------
-    Shape consistency
-    Mask validity
-    Input consistency
-    Observed-data preservation
-    Missing-sample reconstruction
-    Finite-value validation
-    Failure tracking
-    Reproducibility
-
-Curvelet configuration
-----------------------
-    Transform:
-        3-D UDCT
-
-    Number of scales:
-        3
-
-    Wedges per direction:
-        3
-
-    POCS iterations:
-        12
-
-    Initial threshold:
-        0.05
-
-    Threshold decay:
-        0.90
-
-    Tolerance:
-        1.0e-5
-
-Outputs
--------
-Raw results:
-    outputs/synthetic_training/reports/
-        curvelet_pocs_controlled_matrix.csv
-
-Summary results:
-    outputs/synthetic_training/reports/
-        curvelet_pocs_controlled_matrix_summary.csv
+The present test executes ONE Curvelet POCS reconstruction
+on ONE deterministic synthetic seismic sample.
 
 Author:
     Ormin Joseph
@@ -107,20 +53,43 @@ Author:
 
 from __future__ import annotations
 
-import csv
-import time
-from pathlib import Path
-
 import numpy as np
 import torch
+
+
+# ======================================================================
+# SYNTHETIC DATASET
+# ======================================================================
 
 from dataset.synthetic_dataset import (
     SyntheticSeismicDataset
 )
 
-from evaluation.baselines.curvelet_pocs import (
+
+# ======================================================================
+# ACTUAL CURVELET POCS IMPLEMENTATION
+# ======================================================================
+#
+# IMPORTANT:
+#
+# This import must point to the file containing the actual
+# Curvelet POCS reconstruction function.
+#
+# It must NOT import:
+#
+#     curvelet_pocs_controlled_matrix
+#
+# because that file belongs to the 750-case experiment.
+#
+
+from evaluation.baselines.curvelet_pocs_controlled_matrix import (
     curvelet_pocs_reconstruction
 )
+
+
+# ======================================================================
+# RECONSTRUCTION METRICS
+# ======================================================================
 
 from metrics.reconstruction_metrics import (
     mae,
@@ -132,70 +101,49 @@ from metrics.reconstruction_metrics import (
 
 
 # ======================================================================
-# PROJECT ROOT
+# CENTRALIZED PROJECT CONFIGURATION
 # ======================================================================
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-
-# ======================================================================
-# CONTROLLED EXPERIMENTAL MATRIX
-# ======================================================================
-
-GEOLOGICAL_MODES = [
-    "horizontal",
-    "dipping",
-]
-
-
-MASK_MODES = [
-    "random_voxels",
-    "missing_traces",
-]
-
-
-MISSING_RATES = [
-    0.30,
-]
-
-
-SEEDS = [
-    42,
-    43,
-]
-
-
-# ======================================================================
-# SYNTHETIC EXPERIMENT CONFIGURATION
-# ======================================================================
-
-# IMPORTANT:
-#
-# This is the final controlled benchmark cube size.
-#
-# The previous 32 × 32 × 32 test was only a computational/API
-# validation test.
-#
-# The actual baseline benchmark uses:
-#
-#     depth   = 64
-#     height  = 128
-#     width   = 128
-#
-CUBE_SIZE = (
-    64,
-    128,
-    128,
+from utils.config import (
+    SYNTHETIC_PATCH_SIZE,
+    SYNTHETIC_MISSING_PROBABILITY,
+    SEED,
+    OBSERVED_PRESERVATION_TOLERANCE
 )
 
 
-# One deterministic synthetic sample per controlled condition.
-NUM_SAMPLES = 1
+# ======================================================================
+# TEST CONFIGURATION
+# ======================================================================
+
+# Use the centralized synthetic cube size.
+CUBE_SIZE = SYNTHETIC_PATCH_SIZE
+
+
+# Use the centralized missing-data probability.
+MISSING_PROBABILITY = (
+    SYNTHETIC_MISSING_PROBABILITY
+)
+
+
+# Use the centralized project seed.
+TEST_SEED = SEED
+
+
+# Use the centralized observed-data preservation tolerance.
+OBSERVED_TOLERANCE = (
+    OBSERVED_PRESERVATION_TOLERANCE
+)
 
 
 # ======================================================================
-# CURVELET / UDCT CONFIGURATION
+# CURVELET POCS TEST CONFIGURATION
 # ======================================================================
+#
+# These parameters define ONE Curvelet POCS test.
+#
+# They are not a controlled experimental matrix.
+#
 
 CURVELET_NUM_SCALES = 3
 
@@ -211,75 +159,51 @@ CURVELET_TOLERANCE = 1.0e-5
 
 
 # ======================================================================
-# NUMERICAL VALIDATION SETTINGS
+# RECONSTRUCTION-CHANGE TOLERANCE
 # ======================================================================
+#
+# This is used only to detect whether Curvelet POCS actually
+# changed the missing region.
+#
 
-OBSERVED_TOLERANCE = 1.0e-6
-
-RECONSTRUCTION_TOLERANCE = 1.0e-8
-
-
-# ======================================================================
-# OUTPUT DIRECTORY
-# ======================================================================
-
-OUTPUT_DIR = (
-    PROJECT_ROOT
-    / "outputs"
-    / "synthetic_training"
-    / "reports"
-)
-
-
-OUTPUT_DIR.mkdir(
-    parents=True,
-    exist_ok=True
-)
+RECONSTRUCTION_CHANGE_TOLERANCE = 1.0e-8
 
 
 # ======================================================================
-# OUTPUT FILES
+# HELPER: MAXIMUM ABSOLUTE DIFFERENCE
 # ======================================================================
 
-RESULTS_FILE = (
-    OUTPUT_DIR
-    / "curvelet_pocs_controlled_matrix.csv"
-)
-
-
-SUMMARY_FILE = (
-    OUTPUT_DIR
-    / "curvelet_pocs_controlled_matrix_summary.csv"
-)
-
-
-# ======================================================================
-# EXPECTED NUMBER OF CASES
-# ======================================================================
-
-EXPECTED_CASES = (
-    len(GEOLOGICAL_MODES)
-    * len(MASK_MODES)
-    * len(MISSING_RATES)
-    * len(SEEDS)
-)
-
-
-# ======================================================================
-# HELPER: FINITE TENSOR VALIDATION
-# ======================================================================
-
-def tensor_is_finite(
-    tensor
+def maximum_difference(
+        tensor_a,
+        tensor_b
 ):
     """
-    Return True when every tensor element is finite.
+    Calculate the maximum absolute difference between
+    two tensors.
+
+    Parameters
+    ----------
+    tensor_a : torch.Tensor
+        First tensor.
+
+    tensor_b : torch.Tensor
+        Second tensor.
+
+    Returns
+    -------
+    float
+        Maximum absolute difference.
     """
 
-    return bool(
-        torch.isfinite(
-            tensor
-        ).all().item()
+    difference = torch.abs(
+        tensor_a - tensor_b
+    )
+
+    if difference.numel() == 0:
+        return 0.0
+
+    return float(
+        difference.max().item()
     )
 
 
@@ -288,15 +212,15 @@ def tensor_is_finite(
 # ======================================================================
 
 def metric_to_float(
-    value
+        value
 ):
     """
-    Convert a metric output to a Python float.
+    Convert a metric result to a Python float.
 
     Supports:
         torch.Tensor
         NumPy scalar
-        Python numeric
+        Python numeric values.
     """
 
     if isinstance(
@@ -325,14 +249,15 @@ def metric_to_float(
 # ======================================================================
 
 def compute_metrics(
-    reconstruction,
-    target
+        reconstruction,
+        target
 ):
     """
-    Compute the common reconstruction metrics.
+    Calculate the standard seismic reconstruction metrics.
     """
 
     return {
+
         "mae": metric_to_float(
             mae(
                 reconstruction,
@@ -371,149 +296,178 @@ def compute_metrics(
 
 
 # ======================================================================
-# HELPER: WRITE CSV HEADER
+# MAIN TEST
 # ======================================================================
 
-CSV_FIELDS = [
-    "case_id",
-    "geological_mode",
-    "mask_mode",
-    "missing_rate",
-    "seed",
+def main():
 
-    "cube_depth",
-    "cube_height",
-    "cube_width",
-
-    "num_scales",
-    "wedges_per_direction",
-    "iterations",
-    "threshold",
-    "threshold_decay",
-    "tolerance",
-
-    "observed_samples",
-    "missing_samples",
-
-    "input_consistency_error",
-    "maximum_observed_difference",
-    "missing_reconstruction_change",
-
-    "mae",
-    "rmse",
-    "psnr",
-    "snr",
-    "ssim",
-
-    "runtime_seconds",
-
-    "status",
-    "error",
-]
-
-
-def initialize_results_file():
-    """
-    Create the raw-results CSV and write its header.
-    """
-
-    with open(
-        RESULTS_FILE,
-        "w",
-        newline="",
-        encoding="utf-8"
-    ) as file:
-
-        writer = csv.DictWriter(
-            file,
-            fieldnames=CSV_FIELDS
-        )
-
-        writer.writeheader()
-
-
-# ======================================================================
-# HELPER: APPEND ONE RESULT
-# ======================================================================
-
-def append_result(
-    result
-):
-    """
-    Append one experiment result to the raw CSV file.
-    """
-
-    with open(
-        RESULTS_FILE,
-        "a",
-        newline="",
-        encoding="utf-8"
-    ) as file:
-
-        writer = csv.DictWriter(
-            file,
-            fieldnames=CSV_FIELDS
-        )
-
-        writer.writerow(
-            result
-        )
-
-
-# ======================================================================
-# RUN ONE CONTROLLED EXPERIMENT
-# ======================================================================
-
-def run_single_experiment(
-    case_id,
-    geological_mode,
-    mask_mode,
-    missing_rate,
-    seed
-):
-    """
-    Run one deterministic Curvelet POCS experiment.
-
-    Returns
-    -------
-    dict
-        Complete result record.
-    """
-
-    start_time = time.perf_counter()
+    print()
+    print("=" * 70)
+    print("CURVELET POCS BASELINE TEST")
+    print("=" * 70)
 
 
     # ==================================================================
-    # BUILD DATASET
+    # TEST CONFIGURATION
     # ==================================================================
 
-    dataset = SyntheticSeismicDataset(
-        num_samples=NUM_SAMPLES,
-        cube_size=CUBE_SIZE,
-        missing_probability=missing_rate,
-        geological_mode=geological_mode,
-        mask_mode=mask_mode,
-        seed=seed,
+    print()
+    print("-" * 70)
+    print("TEST CONFIGURATION")
+    print("-" * 70)
+
+    print(
+        "Cube size           :",
+        CUBE_SIZE
+    )
+
+    print(
+        "Missing probability :",
+        MISSING_PROBABILITY
+    )
+
+    print(
+        "Test seed           :",
+        TEST_SEED
+    )
+
+    print(
+        "Observed tolerance  :",
+        OBSERVED_TOLERANCE
+    )
+
+    print(
+        "Curvelet scales     :",
+        CURVELET_NUM_SCALES
+    )
+
+    print(
+        "Wedges/direction    :",
+        CURVELET_WEDGES_PER_DIRECTION
+    )
+
+    print(
+        "POCS iterations     :",
+        CURVELET_ITERATIONS
+    )
+
+    print(
+        "Initial threshold   :",
+        CURVELET_THRESHOLD
+    )
+
+    print(
+        "Threshold decay     :",
+        CURVELET_THRESHOLD_DECAY
+    )
+
+    print(
+        "POCS tolerance      :",
+        CURVELET_TOLERANCE
     )
 
 
     # ==================================================================
-    # RETRIEVE SINGLE SAMPLE
+    # 1. BUILD SYNTHETIC DATASET
     # ==================================================================
+
+    print()
+    print("-" * 70)
+    print("1. BUILDING SYNTHETIC TEST DATASET")
+    print("-" * 70)
+
+
+    dataset = SyntheticSeismicDataset(
+        num_samples=1,
+        cube_size=CUBE_SIZE,
+        missing_probability=MISSING_PROBABILITY,
+        seed=TEST_SEED
+    )
+
+
+    assert len(dataset) == 1, (
+        "Curvelet POCS test dataset must contain "
+        "exactly one sample."
+    )
+
+
+    print(
+        "Dataset size :",
+        len(dataset)
+    )
+
+
+    # ==================================================================
+    # 2. LOAD TEST SAMPLE
+    # ==================================================================
+
+    print()
+    print("-" * 70)
+    print("2. LOADING SYNTHETIC TEST SAMPLE")
+    print("-" * 70)
+
 
     (
         corrupted,
         target,
         mask,
-        velocity,
-        returned_mask_mode,
-        returned_geological_mode,
+        velocity_model,
+        mask_type,
+        geological_mode
     ) = dataset[0]
 
 
+    print(
+        "Corrupted shape   :",
+        tuple(corrupted.shape)
+    )
+
+    print(
+        "Target shape      :",
+        tuple(target.shape)
+    )
+
+    print(
+        "Mask shape        :",
+        tuple(mask.shape)
+    )
+
+    print(
+        "Velocity shape    :",
+        tuple(velocity_model.shape)
+    )
+
+    print(
+        "Mask type         :",
+        mask_type
+    )
+
+    print(
+        "Geological mode   :",
+        geological_mode
+    )
+
+
     # ==================================================================
-    # EXPECTED SHAPE
+    # 3. SHAPE VALIDATION
     # ==================================================================
+
+    print()
+    print("-" * 70)
+    print("3. VALIDATING TENSOR SHAPES")
+    print("-" * 70)
+
+
+    # Expected convention:
+    #
+    # [C, D, H, W]
+    #
+
+    assert corrupted.ndim == 4, (
+        "Corrupted seismic data must have "
+        "shape [C,D,H,W]."
+    )
+
 
     expected_shape = (
         1,
@@ -521,187 +475,267 @@ def run_single_experiment(
     )
 
 
-    # ==================================================================
-    # SHAPE VALIDATION
-    # ==================================================================
-
-    if tuple(
+    assert tuple(
         corrupted.shape
-    ) != expected_shape:
-
-        raise RuntimeError(
-            "Unexpected corrupted-cube shape: "
-            f"{tuple(corrupted.shape)}. "
-            f"Expected: {expected_shape}"
-        )
+    ) == expected_shape, (
+        f"Unexpected corrupted shape: "
+        f"{tuple(corrupted.shape)}. "
+        f"Expected: {expected_shape}."
+    )
 
 
-    if tuple(
+    assert tuple(
         target.shape
-    ) != expected_shape:
-
-        raise RuntimeError(
-            "Unexpected target shape: "
-            f"{tuple(target.shape)}. "
-            f"Expected: {expected_shape}"
-        )
+    ) == expected_shape, (
+        f"Unexpected target shape: "
+        f"{tuple(target.shape)}. "
+        f"Expected: {expected_shape}."
+    )
 
 
-    if tuple(
+    assert tuple(
         mask.shape
-    ) != expected_shape:
-
-        raise RuntimeError(
-            "Unexpected mask shape: "
-            f"{tuple(mask.shape)}. "
-            f"Expected: {expected_shape}"
-        )
+    ) == expected_shape, (
+        f"Unexpected mask shape: "
+        f"{tuple(mask.shape)}. "
+        f"Expected: {expected_shape}."
+    )
 
 
-    if tuple(
-        velocity.shape
-    ) != expected_shape:
-
-        raise RuntimeError(
-            "Unexpected velocity shape: "
-            f"{tuple(velocity.shape)}. "
-            f"Expected: {expected_shape}"
-        )
+    assert tuple(
+        velocity_model.shape
+    ) == expected_shape, (
+        f"Unexpected velocity-model shape: "
+        f"{tuple(velocity_model.shape)}. "
+        f"Expected: {expected_shape}."
+    )
 
 
-    # ==================================================================
-    # METADATA VALIDATION
-    # ==================================================================
-
-    if returned_mask_mode != mask_mode:
-
-        raise RuntimeError(
-            "Dataset returned an unexpected mask mode. "
-            f"Expected: {mask_mode}; "
-            f"Received: {returned_mask_mode}"
-        )
-
-
-    if returned_geological_mode != geological_mode:
-
-        raise RuntimeError(
-            "Dataset returned an unexpected geological mode. "
-            f"Expected: {geological_mode}; "
-            f"Received: {returned_geological_mode}"
-        )
+    print(
+        "Tensor shape validation : PASSED"
+    )
 
 
     # ==================================================================
-    # FINITE-VALUE VALIDATION
+    # 4. FINITE-VALUE VALIDATION
     # ==================================================================
+
+    print()
+    print("-" * 70)
+    print("4. VALIDATING INPUT NUMERICAL VALUES")
+    print("-" * 70)
+
 
     for name, tensor in [
         ("corrupted", corrupted),
         ("target", target),
         ("mask", mask),
-        ("velocity", velocity),
+        ("velocity_model", velocity_model),
     ]:
 
-        if not tensor_is_finite(
+        assert torch.isfinite(
             tensor
-        ):
-
-            raise RuntimeError(
-                f"Non-finite values detected "
-                f"in {name}."
-            )
-
-
-    # ==================================================================
-    # MASK VALIDATION
-    # ==================================================================
-
-    unique_mask_values = torch.unique(
-        mask
-    ).cpu().tolist()
-
-
-    if not all(
-        value in (0.0, 1.0)
-        for value in unique_mask_values
-    ):
-
-        raise RuntimeError(
-            "Mask contains values other than "
-            "0.0 and 1.0: "
-            f"{unique_mask_values}"
+        ).all(), (
+            f"{name} contains NaN or Inf."
         )
 
 
-    # ==================================================================
-    # INPUT CONSISTENCY
-    # ==================================================================
-
-    expected_corrupted = (
-        target
-        * mask
+    print(
+        "Input finite-value validation : PASSED"
     )
 
 
-    input_consistency_error = float(
-        (
-            corrupted
-            - expected_corrupted
-        )
-        .abs()
-        .max()
-        .item()
+    # ==================================================================
+    # 5. MASK VALIDATION
+    # ==================================================================
+
+    print()
+    print("-" * 70)
+    print("5. VALIDATING OBSERVATION MASK")
+    print("-" * 70)
+
+
+    unique_mask_values = (
+        torch.unique(mask)
+        .detach()
+        .cpu()
+        .tolist()
     )
 
 
-    if (
-        input_consistency_error
-        > OBSERVED_TOLERANCE
-    ):
+    print(
+        "Mask values :",
+        unique_mask_values
+    )
 
-        raise RuntimeError(
-            "Corrupted input is inconsistent "
-            "with target × mask. "
-            f"Maximum error: "
-            f"{input_consistency_error:.6e}"
-        )
+
+    # Project convention:
+    #
+    #     1 = observed
+    #     0 = missing
+    #
+
+    assert torch.all(
+        (mask == 0) | (mask == 1)
+    ), (
+        "Mask contains values other than 0 and 1."
+    )
+
+
+    print(
+        "Mask validation : PASSED"
+    )
 
 
     # ==================================================================
-    # SAMPLE COUNTS
+    # 6. CHECK OBSERVED AND MISSING SAMPLES
     # ==================================================================
+
+    print()
+    print("-" * 70)
+    print("6. CHECKING OBSERVED AND MISSING SAMPLES")
+    print("-" * 70)
+
+
+    observed_locations = (
+        mask == 1
+    )
+
+
+    missing_locations = (
+        mask == 0
+    )
+
 
     observed_samples = int(
-        mask.sum().item()
+        observed_locations.sum().item()
     )
 
 
-    total_samples = int(
-        mask.numel()
+    missing_samples = int(
+        missing_locations.sum().item()
     )
 
 
-    missing_samples = (
-        total_samples
-        - observed_samples
+    print(
+        "Observed samples :",
+        observed_samples
+    )
+
+    print(
+        "Missing samples  :",
+        missing_samples
     )
 
 
-    if missing_samples <= 0:
+    assert observed_samples > 0, (
+        "No observed samples are available."
+    )
 
-        raise RuntimeError(
-            "No missing samples detected."
+
+    assert missing_samples > 0, (
+        "No missing samples are available."
+    )
+
+
+    print(
+        "Observed/missing sample validation : PASSED"
+    )
+
+
+    # ==================================================================
+    # 7. INPUT CONSISTENCY
+    # ==================================================================
+
+    print()
+    print("-" * 70)
+    print("7. VALIDATING INPUT CONSISTENCY")
+    print("-" * 70)
+
+
+    # At observed locations, the corrupted seismic
+    # input must equal the target seismic data.
+
+    observed_input_difference = torch.abs(
+        corrupted[observed_locations]
+        -
+        target[observed_locations]
+    )
+
+
+    if observed_input_difference.numel() > 0:
+
+        maximum_input_difference = float(
+            observed_input_difference.max().item()
         )
 
+    else:
+
+        maximum_input_difference = 0.0
+
+
+    print(
+        "Maximum observed-input difference :",
+        f"{maximum_input_difference:.6e}"
+    )
+
+
+    assert (
+        maximum_input_difference
+        <= OBSERVED_TOLERANCE
+    ), (
+        "Observed samples in corrupted input "
+        "do not match target samples."
+    )
+
+
+    print(
+        "Input consistency : PASSED"
+    )
+
 
     # ==================================================================
-    # CURVELET POCS RECONSTRUCTION
+    # 8. RUN CURVELET POCS
     # ==================================================================
+
+    print()
+    print("-" * 70)
+    print("8. RUNNING CURVELET POCS RECONSTRUCTION")
+    print("-" * 70)
+
+
+    # Clone the inputs before reconstruction.
+    #
+    # This protects the original test tensors from
+    # accidental in-place modification.
+
+    corrupted_for_curvelet = (
+        corrupted.clone()
+    )
+
+
+    mask_for_curvelet = (
+        mask.clone()
+    )
+
+
+    # --------------------------------------------------------------
+    # Execute the actual Curvelet POCS implementation.
+    #
+    # Only ONE reconstruction is performed.
+    #
+    # There is NO 750-case loop here.
+    # --------------------------------------------------------------
 
     reconstruction = (
         curvelet_pocs_reconstruction(
-            corrupted_cube=corrupted,
-            mask=mask,
+            corrupted_cube=(
+                corrupted_for_curvelet
+            ),
+
+            mask=(
+                mask_for_curvelet
+            ),
 
             num_scales=(
                 CURVELET_NUM_SCALES
@@ -730,745 +764,535 @@ def run_single_experiment(
     )
 
 
+    print(
+        "Curvelet POCS reconstruction completed."
+    )
+
+
     # ==================================================================
-    # OUTPUT SHAPE VALIDATION
+    # 9. OUTPUT SHAPE VALIDATION
     # ==================================================================
 
-    if tuple(
+    print()
+    print("-" * 70)
+    print("9. VALIDATING RECONSTRUCTION OUTPUT SHAPE")
+    print("-" * 70)
+
+
+    assert tuple(
         reconstruction.shape
-    ) != expected_shape:
+    ) == expected_shape, (
+        f"Unexpected reconstruction shape: "
+        f"{tuple(reconstruction.shape)}. "
+        f"Expected: {expected_shape}."
+    )
 
-        raise RuntimeError(
-            "Unexpected reconstruction shape: "
-            f"{tuple(reconstruction.shape)}. "
-            f"Expected: {expected_shape}"
-        )
+
+    print(
+        "Reconstruction shape validation : PASSED"
+    )
 
 
     # ==================================================================
-    # OUTPUT FINITENESS
+    # 10. OUTPUT FINITE-VALUE VALIDATION
     # ==================================================================
 
-    if not tensor_is_finite(
+    print()
+    print("-" * 70)
+    print("10. VALIDATING RECONSTRUCTION VALUES")
+    print("-" * 70)
+
+
+    assert torch.isfinite(
         reconstruction
-    ):
-
-        raise RuntimeError(
-            "Curvelet POCS produced "
-            "non-finite values."
-        )
-
-
-    # ==================================================================
-    # OBSERVED-DATA PRESERVATION
-    # ==================================================================
-
-    observed_difference = (
-        (
-            reconstruction
-            - corrupted
-        )
-        * mask
-    ).abs()
-
-
-    maximum_observed_difference = float(
-        observed_difference.max().item()
+    ).all(), (
+        "Curvelet POCS reconstruction contains "
+        "NaN or Inf."
     )
 
 
-    if (
+    print(
+        "Reconstruction finite-value validation : PASSED"
+    )
+
+
+    # ==================================================================
+    # 11. OBSERVED-DATA PRESERVATION
+    # ==================================================================
+
+    print()
+    print("-" * 70)
+    print("11. VALIDATING OBSERVED-DATA PRESERVATION")
+    print("-" * 70)
+
+
+    observed_difference = torch.abs(
+        reconstruction[observed_locations]
+        -
+        corrupted[observed_locations]
+    )
+
+
+    if observed_difference.numel() > 0:
+
+        maximum_observed_difference = float(
+            observed_difference.max().item()
+        )
+
+    else:
+
+        maximum_observed_difference = 0.0
+
+
+    print(
+        "Maximum observed-data difference :",
+        f"{maximum_observed_difference:.6e}"
+    )
+
+
+    assert (
         maximum_observed_difference
-        > OBSERVED_TOLERANCE
-    ):
-
-        raise RuntimeError(
-            "Observed seismic samples were "
-            "changed by Curvelet POCS. "
-            f"Maximum difference: "
-            f"{maximum_observed_difference:.6e}"
-        )
-
-
-    # ==================================================================
-    # MISSING-SAMPLE RECONSTRUCTION CHECK
-    # ==================================================================
-
-    missing_difference = (
-        (
-            reconstruction
-            - corrupted
-        )
-        * (1.0 - mask)
-    ).abs()
-
-
-    missing_reconstruction_change = float(
-        missing_difference.sum().item()
+        <= OBSERVED_TOLERANCE
+    ), (
+        "Curvelet POCS modified observed "
+        "seismic samples."
     )
 
 
-    if (
-        missing_reconstruction_change
-        <= RECONSTRUCTION_TOLERANCE
-    ):
+    print(
+        "Observed-data preservation : PASSED"
+    )
 
-        raise RuntimeError(
-            "Curvelet POCS did not modify "
-            "the missing samples."
+
+    # ==================================================================
+    # 12. MISSING-REGION RECONSTRUCTION
+    # ==================================================================
+
+    print()
+    print("-" * 70)
+    print("12. VALIDATING MISSING-REGION RECONSTRUCTION")
+    print("-" * 70)
+
+
+    # Calculate how much the reconstruction differs from
+    # the original corrupted input inside the missing region.
+
+    missing_difference = torch.abs(
+        reconstruction[missing_locations]
+        -
+        corrupted[missing_locations]
+    )
+
+
+    if missing_difference.numel() > 0:
+
+        missing_reconstruction_change = float(
+            missing_difference.sum().item()
         )
 
+    else:
+
+        missing_reconstruction_change = 0.0
+
+
+    print(
+        "Total missing-region reconstruction change :",
+        f"{missing_reconstruction_change:.6e}"
+    )
+
+
+    # A reconstruction method should produce values in
+    # the missing region rather than leaving the region
+    # completely unchanged from the corrupted input.
+
+    assert (
+        missing_reconstruction_change
+        > RECONSTRUCTION_CHANGE_TOLERANCE
+    ), (
+        "Curvelet POCS did not modify the missing region."
+    )
+
+
+    print(
+        "Missing-region reconstruction : PASSED"
+    )
+
 
     # ==================================================================
-    # RECONSTRUCTION METRICS
+    # 13. ZERO-FILLED INPUT MAE
     # ==================================================================
 
-    metric_values = compute_metrics(
+    print()
+    print("-" * 70)
+    print("13. CALCULATING ZERO-FILLED INPUT ERROR")
+    print("-" * 70)
+
+
+    zero_filled_mae = metric_to_float(
+        mae(
+            corrupted,
+            target
+        )
+    )
+
+
+    print(
+        "Zero-filled input MAE :",
+        f"{zero_filled_mae:.6f}"
+    )
+
+
+    # ==================================================================
+    # 14. MISSING-REGION MAE
+    # ==================================================================
+
+    curvelet_missing_mae = metric_to_float(
+        mae(
+            reconstruction[missing_locations],
+            target[missing_locations]
+        )
+    )
+
+
+    print(
+        "Curvelet missing-region MAE :",
+        f"{curvelet_missing_mae:.6f}"
+    )
+
+
+    # ==================================================================
+    # 15. FULL RECONSTRUCTION METRICS
+    # ==================================================================
+
+    print()
+    print("-" * 70)
+    print("14. CURVELET POCS RECONSTRUCTION METRICS")
+    print("-" * 70)
+
+
+    metrics = compute_metrics(
         reconstruction,
         target
     )
 
 
-    # ==================================================================
-    # RUNTIME
-    # ==================================================================
+    print(
+        "MAE  :",
+        f"{metrics['mae']:.6f}"
+    )
 
-    runtime_seconds = (
-        time.perf_counter()
-        - start_time
+
+    print(
+        "RMSE :",
+        f"{metrics['rmse']:.6f}"
+    )
+
+
+    print(
+        "PSNR :",
+        f"{metrics['psnr']:.6f} dB"
+    )
+
+
+    print(
+        "SNR  :",
+        f"{metrics['snr']:.6f} dB"
+    )
+
+
+    print(
+        "SSIM :",
+        f"{metrics['ssim']:.6f}"
     )
 
 
     # ==================================================================
-    # RESULT RECORD
+    # 16. DATASET REPRODUCIBILITY
     # ==================================================================
 
-    result = {
-
-        "case_id":
-            case_id,
-
-        "geological_mode":
-            geological_mode,
-
-        "mask_mode":
-            mask_mode,
-
-        "missing_rate":
-            missing_rate,
-
-        "seed":
-            seed,
-
-        "cube_depth":
-            CUBE_SIZE[0],
-
-        "cube_height":
-            CUBE_SIZE[1],
-
-        "cube_width":
-            CUBE_SIZE[2],
-
-        "num_scales":
-            CURVELET_NUM_SCALES,
-
-        "wedges_per_direction":
-            CURVELET_WEDGES_PER_DIRECTION,
-
-        "iterations":
-            CURVELET_ITERATIONS,
-
-        "threshold":
-            CURVELET_THRESHOLD,
-
-        "threshold_decay":
-            CURVELET_THRESHOLD_DECAY,
-
-        "tolerance":
-            CURVELET_TOLERANCE,
-
-        "observed_samples":
-            observed_samples,
-
-        "missing_samples":
-            missing_samples,
-
-        "input_consistency_error":
-            input_consistency_error,
-
-        "maximum_observed_difference":
-            maximum_observed_difference,
-
-        "missing_reconstruction_change":
-            missing_reconstruction_change,
-
-        "mae":
-            metric_values["mae"],
-
-        "rmse":
-            metric_values["rmse"],
-
-        "psnr":
-            metric_values["psnr"],
-
-        "snr":
-            metric_values["snr"],
-
-        "ssim":
-            metric_values["ssim"],
-
-        "runtime_seconds":
-            runtime_seconds,
-
-        "status":
-            "SUCCESS",
-
-        "error":
-            "",
-    }
+    print()
+    print("-" * 70)
+    print("15. DATASET REPRODUCIBILITY TEST")
+    print("-" * 70)
 
 
-    return result
+    # Generate the same synthetic sample again using
+    # exactly the same configuration and seed.
 
-
-# ======================================================================
-# SUMMARY GENERATION
-# ======================================================================
-
-def generate_summary():
-    """
-    Generate a grouped summary from the raw 750-case results.
-    """
-
-    import pandas as pd
-
-
-    dataframe = pd.read_csv(
-        RESULTS_FILE
-    )
-
-
-    successful = dataframe[
-        dataframe["status"]
-        == "SUCCESS"
-    ].copy()
-
-
-    if successful.empty:
-
-        raise RuntimeError(
-            "No successful experiments are "
-            "available for summary generation."
-        )
-
-
-    # ==================================================================
-    # GROUP BY GEOLOGY, MASK, AND MISSING RATE
-    # ==================================================================
-
-    grouped = (
-        successful
-        .groupby(
-            [
-                "geological_mode",
-                "mask_mode",
-                "missing_rate",
-            ],
-            as_index=False
-        )
-        .agg(
-            cases=(
-                "case_id",
-                "count"
-            ),
-
-            mae_mean=(
-                "mae",
-                "mean"
-            ),
-
-            mae_std=(
-                "mae",
-                "std"
-            ),
-
-            rmse_mean=(
-                "rmse",
-                "mean"
-            ),
-
-            rmse_std=(
-                "rmse",
-                "std"
-            ),
-
-            psnr_mean=(
-                "psnr",
-                "mean"
-            ),
-
-            psnr_std=(
-                "psnr",
-                "std"
-            ),
-
-            snr_mean=(
-                "snr",
-                "mean"
-            ),
-
-            snr_std=(
-                "snr",
-                "std"
-            ),
-
-            ssim_mean=(
-                "ssim",
-                "mean"
-            ),
-
-            ssim_std=(
-                "ssim",
-                "std"
-            ),
-
-            runtime_mean=(
-                "runtime_seconds",
-                "mean"
-            ),
-
-            runtime_std=(
-                "runtime_seconds",
-                "std"
-            ),
+    dataset_repeat = (
+        SyntheticSeismicDataset(
+            num_samples=1,
+            cube_size=CUBE_SIZE,
+            missing_probability=MISSING_PROBABILITY,
+            seed=TEST_SEED
         )
     )
 
 
-    grouped.to_csv(
-        SUMMARY_FILE,
-        index=False
-    )
-
-
-    return grouped
-
-
-# ======================================================================
-# MAIN CONTROLLED EXPERIMENT
-# ======================================================================
-
-def main():
-
-    print()
-    print("=" * 78)
-    print(
-        "3-D CURVELET POCS CONTROLLED EXPERIMENTAL MATRIX"
-    )
-    print("=" * 78)
-
-    print()
-    print(
-        f"Cube size            : {CUBE_SIZE}"
-    )
-
-    print(
-        f"Missing rates        : {MISSING_RATES}"
-    )
-
-    print(
-        f"Missing mechanisms   : {len(MASK_MODES)}"
-    )
-
-    print(
-        f"Geological modes     : {len(GEOLOGICAL_MODES)}"
-    )
-
-    print(
-        f"Random seeds         : {SEEDS}"
-    )
-
-    print(
-        f"Expected cases       : {EXPECTED_CASES}"
-    )
-
-    print()
-    print(
-        "Curvelet configuration"
-    )
-    print(
-        "----------------------"
-    )
-
-    print(
-        f"UDCT scales          : "
-        f"{CURVELET_NUM_SCALES}"
-    )
-
-    print(
-        f"Wedges/direction     : "
-        f"{CURVELET_WEDGES_PER_DIRECTION}"
-    )
-
-    print(
-        f"POCS iterations      : "
-        f"{CURVELET_ITERATIONS}"
-    )
-
-    print(
-        f"Initial threshold    : "
-        f"{CURVELET_THRESHOLD}"
-    )
-
-    print(
-        f"Threshold decay      : "
-        f"{CURVELET_THRESHOLD_DECAY}"
-    )
-
-    print(
-        f"Tolerance             : "
-        f"{CURVELET_TOLERANCE}"
-    )
-
-    print()
-    print(
-        f"Raw results          : "
-        f"{RESULTS_FILE}"
-    )
-
-    print(
-        f"Summary results      : "
-        f"{SUMMARY_FILE}"
-    )
-
-    print()
-    print("=" * 78)
-
-
-    # ==================================================================
-    # INITIALIZE CSV
-    # ==================================================================
-
-    initialize_results_file()
-
-
-    successful_cases = 0
-
-    failed_cases = 0
-
-
-    case_id = 0
-
-
-    # ==================================================================
-    # CONTROLLED MATRIX
-    # ==================================================================
-
-    for geological_mode in GEOLOGICAL_MODES:
-
-        for mask_mode in MASK_MODES:
-
-            for missing_rate in MISSING_RATES:
-
-                for seed in SEEDS:
-
-                    case_id += 1
-
-
-                    print()
-                    print(
-                        "=" * 78
-                    )
-
-                    print(
-                        f"Case {case_id}/"
-                        f"{EXPECTED_CASES}"
-                    )
-
-                    print(
-                        f"Geology       : "
-                        f"{geological_mode}"
-                    )
-
-                    print(
-                        f"Mask          : "
-                        f"{mask_mode}"
-                    )
-
-                    print(
-                        f"Missing rate  : "
-                        f"{missing_rate:.0%}"
-                    )
-
-                    print(
-                        f"Seed          : "
-                        f"{seed}"
-                    )
-
-                    print(
-                        "=" * 78
-                    )
-
-
-                    try:
-
-                        result = (
-                            run_single_experiment(
-                                case_id=case_id,
-                                geological_mode=(
-                                    geological_mode
-                                ),
-                                mask_mode=(
-                                    mask_mode
-                                ),
-                                missing_rate=(
-                                    missing_rate
-                                ),
-                                seed=seed,
-                            )
-                        )
-
-
-                        append_result(
-                            result
-                        )
-
-
-                        successful_cases += 1
-
-
-                        print(
-                            "Status        : "
-                            "SUCCESS"
-                        )
-
-                        print(
-                            f"MAE           : "
-                            f"{result['mae']:.6f}"
-                        )
-
-                        print(
-                            f"RMSE          : "
-                            f"{result['rmse']:.6f}"
-                        )
-
-                        print(
-                            f"PSNR          : "
-                            f"{result['psnr']:.6f} dB"
-                        )
-
-                        print(
-                            f"SNR           : "
-                            f"{result['snr']:.6f} dB"
-                        )
-
-                        print(
-                            f"SSIM          : "
-                            f"{result['ssim']:.6f}"
-                        )
-
-                        print(
-                            f"Runtime       : "
-                            f"{result['runtime_seconds']:.4f} s"
-                        )
-
-
-                    except Exception as error:
-
-                        failed_cases += 1
-
-
-                        failure_result = {
-
-                            "case_id":
-                                case_id,
-
-                            "geological_mode":
-                                geological_mode,
-
-                            "mask_mode":
-                                mask_mode,
-
-                            "missing_rate":
-                                missing_rate,
-
-                            "seed":
-                                seed,
-
-                            "cube_depth":
-                                CUBE_SIZE[0],
-
-                            "cube_height":
-                                CUBE_SIZE[1],
-
-                            "cube_width":
-                                CUBE_SIZE[2],
-
-                            "num_scales":
-                                CURVELET_NUM_SCALES,
-
-                            "wedges_per_direction":
-                                CURVELET_WEDGES_PER_DIRECTION,
-
-                            "iterations":
-                                CURVELET_ITERATIONS,
-
-                            "threshold":
-                                CURVELET_THRESHOLD,
-
-                            "threshold_decay":
-                                CURVELET_THRESHOLD_DECAY,
-
-                            "tolerance":
-                                CURVELET_TOLERANCE,
-
-                            "observed_samples":
-                                "",
-
-                            "missing_samples":
-                                "",
-
-                            "input_consistency_error":
-                                "",
-
-                            "maximum_observed_difference":
-                                "",
-
-                            "missing_reconstruction_change":
-                                "",
-
-                            "mae":
-                                "",
-
-                            "rmse":
-                                "",
-
-                            "psnr":
-                                "",
-
-                            "snr":
-                                "",
-
-                            "ssim":
-                                "",
-
-                            "runtime_seconds":
-                                "",
-
-                            "status":
-                                "FAILED",
-
-                            "error":
-                                str(error),
-                        }
-
-
-                        append_result(
-                            failure_result
-                        )
-
-
-                        print(
-                            "Status        : FAILED"
-                        )
-
-                        print(
-                            f"Error         : "
-                            f"{error}"
-                        )
-
-
-    # ==================================================================
-    # FINAL SUMMARY
-    # ==================================================================
-
-    print()
-    print("=" * 78)
-    print(
-        "CURVELET POCS CONTROLLED MATRIX COMPLETE"
-    )
-    print("=" * 78)
-
-    print(
-        f"Expected cases : "
-        f"{EXPECTED_CASES}"
-    )
-
-    print(
-        f"Completed cases: "
-        f"{successful_cases + failed_cases}"
-    )
-
-    print(
-        f"Successful     : "
-        f"{successful_cases}"
-    )
-
-    print(
-        f"Failed         : "
-        f"{failed_cases}"
-    )
-
-
-    # ==================================================================
-    # GENERATE SUMMARY
-    # ==================================================================
-
-    if successful_cases > 0:
-
-        generate_summary()
-
-
-    print()
-    print(
-        "Raw results:"
-    )
-
-    print(
-        f"  {RESULTS_FILE}"
-    )
-
-    print()
-    print(
-        "Summary results:"
-    )
-
-    print(
-        f"  {SUMMARY_FILE}"
-    )
-
-
-    # ==================================================================
-    # FINAL STATUS
-    # ==================================================================
-
-    if (
-        successful_cases
-        == EXPECTED_CASES
-        and failed_cases == 0
-    ):
-
-        print()
-        print(
-            "OVERALL STATUS: PASS"
+    (
+        corrupted_repeat,
+        target_repeat,
+        mask_repeat,
+        velocity_repeat,
+        mask_type_repeat,
+        geological_mode_repeat
+    ) = dataset_repeat[0]
+
+
+    # --------------------------------------------------------------
+    # Compare input
+    # --------------------------------------------------------------
+
+    input_reproducibility_difference = (
+        maximum_difference(
+            corrupted,
+            corrupted_repeat
         )
+    )
 
-        print(
-            "All controlled Curvelet POCS "
-            "experiments completed successfully."
+
+    # --------------------------------------------------------------
+    # Compare target
+    # --------------------------------------------------------------
+
+    target_reproducibility_difference = (
+        maximum_difference(
+            target,
+            target_repeat
         )
+    )
 
-    else:
 
-        print()
-        print(
-            "OVERALL STATUS: FAIL"
+    # --------------------------------------------------------------
+    # Compare mask
+    # --------------------------------------------------------------
+
+    mask_reproducibility_difference = (
+        maximum_difference(
+            mask,
+            mask_repeat
         )
+    )
 
-        print(
-            "One or more controlled Curvelet "
-            "POCS experiments failed."
+
+    # --------------------------------------------------------------
+    # Compare velocity model
+    # --------------------------------------------------------------
+
+    velocity_reproducibility_difference = (
+        maximum_difference(
+            velocity_model,
+            velocity_repeat
         )
+    )
+
+
+    print(
+        "Input difference :",
+        f"{input_reproducibility_difference:.6e}"
+    )
+
+    print(
+        "Target difference :",
+        f"{target_reproducibility_difference:.6e}"
+    )
+
+    print(
+        "Mask difference :",
+        f"{mask_reproducibility_difference:.6e}"
+    )
+
+    print(
+        "Velocity difference :",
+        f"{velocity_reproducibility_difference:.6e}"
+    )
+
+
+    # --------------------------------------------------------------
+    # Reproducibility assertions
+    # --------------------------------------------------------------
+
+    assert (
+        input_reproducibility_difference
+        <= OBSERVED_TOLERANCE
+    ), (
+        "Synthetic input is not reproducible."
+    )
+
+
+    assert (
+        target_reproducibility_difference
+        <= OBSERVED_TOLERANCE
+    ), (
+        "Synthetic target is not reproducible."
+    )
+
+
+    assert (
+        mask_reproducibility_difference
+        <= OBSERVED_TOLERANCE
+    ), (
+        "Synthetic mask is not reproducible."
+    )
+
+
+    assert (
+        velocity_reproducibility_difference
+        <= OBSERVED_TOLERANCE
+    ), (
+        "Synthetic velocity model is not reproducible."
+    )
+
+
+    assert (
+        mask_type
+        ==
+        mask_type_repeat
+    ), (
+        "Mask type is not reproducible."
+    )
+
+
+    assert (
+        geological_mode
+        ==
+        geological_mode_repeat
+    ), (
+        "Geological mode is not reproducible."
+    )
+
+
+    print(
+        "Dataset reproducibility : PASSED"
+    )
+
+
+    # ==================================================================
+    # 17. CURVELET RECONSTRUCTION REPRODUCIBILITY
+    # ==================================================================
+
+    print()
+    print("-" * 70)
+    print("16. CURVELET POCS REPRODUCIBILITY TEST")
+    print("-" * 70)
+
+
+    # Run the exact same Curvelet POCS configuration again.
+
+    reconstruction_repeat = (
+        curvelet_pocs_reconstruction(
+            corrupted_cube=(
+                corrupted_repeat.clone()
+            ),
+
+            mask=(
+                mask_repeat.clone()
+            ),
+
+            num_scales=(
+                CURVELET_NUM_SCALES
+            ),
+
+            wedges_per_direction=(
+                CURVELET_WEDGES_PER_DIRECTION
+            ),
+
+            iterations=(
+                CURVELET_ITERATIONS
+            ),
+
+            threshold=(
+                CURVELET_THRESHOLD
+            ),
+
+            threshold_decay=(
+                CURVELET_THRESHOLD_DECAY
+            ),
+
+            tolerance=(
+                CURVELET_TOLERANCE
+            ),
+        )
+    )
+
+
+    # Compare the two reconstructions.
+
+    reconstruction_reproducibility_difference = (
+        maximum_difference(
+            reconstruction,
+            reconstruction_repeat
+        )
+    )
+
+
+    print(
+        "Reconstruction difference :",
+        f"{reconstruction_reproducibility_difference:.6e}"
+    )
+
+
+    assert (
+        reconstruction_reproducibility_difference
+        <= OBSERVED_TOLERANCE
+    ), (
+        "Curvelet POCS reconstruction is not "
+        "reproducible."
+    )
+
+
+    print(
+        "Curvelet POCS reproducibility : PASSED"
+    )
+
+
+    # ==================================================================
+    # 18. FINAL VALIDATION
+    # ==================================================================
+
+    print()
+    print("=" * 70)
+    print("FINAL CURVELET POCS BASELINE VALIDATION")
+    print("=" * 70)
+
+
+    # Final shape validation.
+    assert reconstruction.shape == target.shape
+
+
+    # Final finite-value validation.
+    assert torch.isfinite(
+        reconstruction
+    ).all()
+
+
+    # Final observed-data preservation.
+    assert (
+        maximum_observed_difference
+        <= OBSERVED_TOLERANCE
+    )
+
+
+    # Final reproducibility.
+    assert (
+        reconstruction_reproducibility_difference
+        <= OBSERVED_TOLERANCE
+    )
+
+
+    print()
+    print(
+        "Curvelet POCS implementation validation : PASSED"
+    )
+
+
+    print()
+    print(
+        "ALL CURVELET POCS BASELINE TESTS PASSED"
+    )
+
+
+    print()
 
 
 # ======================================================================

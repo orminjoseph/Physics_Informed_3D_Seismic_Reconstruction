@@ -1,383 +1,231 @@
 """
-=========================================================
+====================================================================
 Geological Complexity Robustness Evaluation
-=========================================================
+====================================================================
 
-Physics-Informed 3D Encoder-Decoder Framework
-with Predictive Uncertainty for Seismic Data Reconstruction
+Physics-Informed 3D Encoder-Decoder Framework with Predictive
+Uncertainty for Seismic Data Reconstruction
 
 Purpose
 -------
-Evaluate reconstruction robustness under different
-geological complexity levels.
+Evaluate the robustness of the trained reconstruction model under
+different levels of geological complexity.
 
-The script is DATA-MODE AWARE.
+Geological complexity levels
+----------------------------
+1. horizontal
+2. dipping
+3. faulted
+4. folded
+5. complex
+6. highly_complex
 
-For DATASET_MODE = "synthetic":
-    The GeologicalGenerator is used to generate controlled
-    geological structures of increasing complexity.
+Important methodological principles
+------------------------------------
+1. The trained model is evaluated without retraining.
+2. The same reconstruction model is used across all geological
+   complexity levels.
+3. Observed seismic samples are restored exactly after inference.
+4. Reconstruction metrics are obtained from the canonical
+   metrics/reconstruction_metrics.py module.
+5. Aleatoric uncertainty is obtained from the model's predicted
+   log-variance.
+6. Epistemic and predictive uncertainty are NOT fabricated during
+   deterministic inference. They require MC-Dropout evaluation.
+7. All configurable parameters are obtained from utils/config.py.
+8. Results are saved under the configured REPORT_DIR.
 
-For other dataset modes:
-    The configured dataset is obtained through build_dataset()
-    and actual dataset patches are evaluated.
-
-This prevents the evaluation script from being tied to
-the F3 dataset or to the synthetic dataset.
-
-Current Predictor API
----------------------
-Predictor.predict() returns:
-
-    reconstruction
-    travel_time
-    aleatoric_std
-    epistemic_std
-
-Predictive standard deviation is calculated as:
-
-    predictive_variance =
-        aleatoric_variance +
-        epistemic_variance
-
-    predictive_std =
-        sqrt(predictive_variance)
-
-Outputs
--------
-REPORT_DIR/
-    geological_complexity/
-        geological_complexity_robustness.csv
-
-Author: Ormin Joseph
-=========================================================
+====================================================================
 """
 
-import os
+# ====================================================================
+# 1. STANDARD LIBRARY IMPORTS
+# ====================================================================
 
-import pandas as pd
+import json
+import math
+import random
+from pathlib import Path
+
+# ====================================================================
+# 2. THIRD-PARTY IMPORTS
+# ====================================================================
+
+import numpy as np
 import torch
+from tqdm import tqdm
 
-from dataset.build_dataset import build_dataset
-from dataset.geological_generator import GeologicalGenerator
-
-from inference.predictor import Predictor
-from models.network import Network3D
+# ====================================================================
+# 3. PROJECT IMPORTS
+# ====================================================================
 
 from utils.config import (
     DATASET_MODE,
-    EXPERIMENT_NAME,
+    DEVICE,
     CHECKPOINT_DIR,
     REPORT_DIR,
     USE_ATTENTION,
     USE_RESIDUAL,
     USE_UNCERTAINTY,
+    LOG_VARIANCE_MIN,
+    LOG_VARIANCE_MAX,
+)
+
+from models.network import Network3D
+
+from dataset.build_dataset import build_dataset
+
+from metrics.reconstruction_metrics import (
+    calculate_reconstruction_metrics,
+    missing_mae,
+    missing_rmse,
+    observed_mae,
+    observed_rmse,
 )
 
 
-# =========================================================
-# Configuration
-# =========================================================
+# ====================================================================
+# 4. REPRODUCIBILITY
+# ====================================================================
 
-DEVICE = "cpu"
-
-CHECKPOINT_PATH = os.path.join(
-    CHECKPOINT_DIR,
-    "best_model.pth"
-)
-
-OUTPUT_DIRECTORY = os.path.join(
-    REPORT_DIR,
-    "geological_complexity"
-)
-
-OUTPUT_FILE = os.path.join(
-    OUTPUT_DIRECTORY,
-    "geological_complexity_robustness.csv"
-)
-
-# Missing-data probability used when generating synthetic
-# geological-complexity test cases.
-MISSING_PROBABILITY = 0.30
-
-# Number of real dataset patches to evaluate when the
-# configured mode is not synthetic.
-NUM_DATASET_SAMPLES = 20
+SEED = 42
 
 
-# =========================================================
-# Tensor Utilities
-# =========================================================
-
-def ensure_batched_tensor(tensor):
+def set_seed(seed: int = SEED):
     """
-    Convert a seismic tensor into:
+    Set random seeds for reproducibility.
 
-        [B, C, D, H, W]
-
-    Accepted input forms:
-
-        [D, H, W]
-        [C, D, H, W]
-        [B, C, D, H, W]
+    Parameters
+    ----------
+    seed : int
+        Random seed.
     """
 
-    if not isinstance(tensor, torch.Tensor):
+    random.seed(seed)
 
-        raise TypeError(
-            "Expected torch.Tensor, received "
-            f"{type(tensor)}"
-        )
+    np.random.seed(seed)
 
-    if tensor.ndim == 3:
+    torch.manual_seed(seed)
 
-        # [D, H, W]
-        return tensor.unsqueeze(0).unsqueeze(0)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
-    if tensor.ndim == 4:
 
-        # [C, D, H, W]
-        return tensor.unsqueeze(0)
+# ====================================================================
+# 5. DEVICE RESOLUTION
+# ====================================================================
 
-    if tensor.ndim == 5:
+def resolve_device(device_setting):
+    """
+    Convert the configuration device setting into a valid
+    torch.device.
 
-        return tensor
+    Supported settings
+    ------------------
+    cpu
+    cuda
+    auto
+
+    Returns
+    -------
+    torch.device
+    """
+
+    if isinstance(device_setting, torch.device):
+        return device_setting
+
+    device_setting = str(device_setting).lower()
+
+    if device_setting == "cpu":
+        return torch.device("cpu")
+
+    if device_setting == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "DEVICE='cuda' was requested, but CUDA is not available."
+            )
+
+        return torch.device("cuda")
+
+    if device_setting == "auto":
+
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+
+        return torch.device("cpu")
 
     raise ValueError(
-        "Expected tensor with 3, 4, or 5 dimensions. "
-        f"Received shape {tuple(tensor.shape)}"
+        f"Unsupported DEVICE setting: {device_setting}"
     )
 
 
-def prepare_mask(mask, reference):
+# ====================================================================
+# 6. GEOLOGICAL COMPLEXITY LEVELS
+# ====================================================================
+
+GEOLOGICAL_COMPLEXITY_LEVELS = [
+    "horizontal",
+    "dipping",
+    "faulted",
+    "folded",
+    "complex",
+    "highly_complex",
+]
+
+
+# ====================================================================
+# 7. CHECKPOINT
+# ====================================================================
+
+CHECKPOINT_PATH = (
+    Path(CHECKPOINT_DIR)
+    / "best_model.pth"
+)
+
+
+# ====================================================================
+# 8. OUTPUT DIRECTORY
+# ====================================================================
+
+OUTPUT_DIR = (
+    Path(REPORT_DIR)
+    / "geological_complexity"
+)
+
+OUTPUT_DIR.mkdir(
+    parents=True,
+    exist_ok=True
+)
+
+
+# ====================================================================
+# 9. LOAD MODEL
+# ====================================================================
+
+def load_model(device):
     """
-    Convert a mask into the same shape as the model output.
+    Load the trained Physics-Informed 3D Encoder-Decoder model.
 
-    Expected final shape:
+    Parameters
+    ----------
+    device : torch.device
+        Device on which the model will operate.
 
-        [B, C, D, H, W]
-    """
-
-    mask = ensure_batched_tensor(mask)
-
-    reference = ensure_batched_tensor(reference)
-
-    # If mask has one channel and reference has multiple
-    # channels, expand the mask across channels.
-    if (
-        mask.shape[1] == 1
-        and reference.shape[1] > 1
-    ):
-
-        mask = mask.expand(
-            -1,
-            reference.shape[1],
-            -1,
-            -1,
-            -1
-        )
-
-    if mask.shape != reference.shape:
-
-        raise ValueError(
-            "Mask and reference tensor shapes do not match: "
-            f"{tuple(mask.shape)} vs "
-            f"{tuple(reference.shape)}"
-        )
-
-    return mask
-
-
-def validate_finite(name, tensor):
-    """
-    Verify that a tensor contains only finite values.
-    """
-
-    if not torch.isfinite(tensor).all():
-
-        raise ValueError(
-            f"{name} contains NaN or infinite values."
-        )
-
-
-# =========================================================
-# Metric Calculation
-# =========================================================
-
-def evaluate_metrics(
-    prediction,
-    target,
-    mask
-):
-    """
-    Calculate reconstruction error in the missing region.
-
-    Mask convention:
-
-        1 = observed
-        0 = missing
-
-    Therefore only voxels where mask == 0 are evaluated.
+    Returns
+    -------
+    torch.nn.Module
+        Loaded model in evaluation mode.
     """
 
-    prediction = ensure_batched_tensor(
-        prediction
-    )
-
-    target = ensure_batched_tensor(
-        target
-    )
-
-    mask = prepare_mask(
-        mask,
-        prediction
-    )
-
-    # Validate dimensions.
-    if prediction.shape != target.shape:
-
-        raise ValueError(
-            "Prediction and target shapes do not match: "
-            f"{tuple(prediction.shape)} vs "
-            f"{tuple(target.shape)}"
-        )
-
-    # Validate numerical values.
-    validate_finite(
-        "Prediction",
-        prediction
-    )
-
-    validate_finite(
-        "Target",
-        target
-    )
-
-    # Missing region.
-    missing_region = (
-        mask <= 0
-    )
-
-    number_missing = (
-        missing_region.sum().item()
-    )
-
-    if number_missing == 0:
-
-        raise ValueError(
-            "The evaluation mask contains no missing voxels."
-        )
-
-    # Extract missing-region values.
-    prediction_missing = prediction[
-        missing_region
-    ]
-
-    target_missing = target[
-        missing_region
-    ]
-
-    # Mean absolute error.
-    mae_value = torch.mean(
-        torch.abs(
-            prediction_missing -
-            target_missing
-        )
-    ).item()
-
-    return {
-        "MAE": mae_value,
-        "Missing_Voxels": int(
-            number_missing
-        )
-    }
-
-
-# =========================================================
-# Predictive Uncertainty
-# =========================================================
-
-def compute_predictive_std(
-    aleatoric_std,
-    epistemic_std
-):
-    """
-    Combine aleatoric and epistemic standard deviations.
-
-    Predictive variance is:
-
-        Var_predictive =
-            Var_aleatoric +
-            Var_epistemic
-
-    Since the Predictor returns standard deviations:
-
-        Var_aleatoric = aleatoric_std^2
-        Var_epistemic = epistemic_std^2
-
-    Therefore:
-
-        predictive_std =
-            sqrt(
-                aleatoric_std^2 +
-                epistemic_std^2
-            )
-    """
-
-    aleatoric_std = ensure_batched_tensor(
-        aleatoric_std
-    )
-
-    epistemic_std = ensure_batched_tensor(
-        epistemic_std
-    )
-
-    if aleatoric_std.shape != epistemic_std.shape:
-
-        raise ValueError(
-            "Aleatoric and epistemic uncertainty shapes "
-            "do not match: "
-            f"{tuple(aleatoric_std.shape)} vs "
-            f"{tuple(epistemic_std.shape)}"
-        )
-
-    predictive_variance = (
-        aleatoric_std ** 2
-        +
-        epistemic_std ** 2
-    )
-
-    predictive_std = torch.sqrt(
-        torch.clamp(
-            predictive_variance,
-            min=0.0
-        )
-    )
-
-    validate_finite(
-        "Predictive uncertainty",
-        predictive_std
-    )
-
-    return predictive_std
-
-
-# =========================================================
-# Model Construction
-# =========================================================
-
-def create_predictor():
-    """
-    Construct the configured Network3D model and Predictor.
-    """
-
-    if not os.path.isfile(
-        CHECKPOINT_PATH
-    ):
+    if not CHECKPOINT_PATH.exists():
 
         raise FileNotFoundError(
-            "Best-model checkpoint was not found:\n"
-            f"{CHECKPOINT_PATH}"
+            f"Checkpoint not found:\n{CHECKPOINT_PATH}"
         )
+
+    # ---------------------------------------------------------------
+    # Construct model using centralized configuration.
+    # ---------------------------------------------------------------
 
     model = Network3D(
         use_attention=USE_ATTENTION,
@@ -385,475 +233,1262 @@ def create_predictor():
         use_uncertainty=USE_UNCERTAINTY,
     )
 
-    predictor = Predictor(
-        model=model,
-        checkpoint=CHECKPOINT_PATH,
-        device=DEVICE
+    # ---------------------------------------------------------------
+    # Load checkpoint.
+    # ---------------------------------------------------------------
+
+    checkpoint = torch.load(
+        CHECKPOINT_PATH,
+        map_location=device
     )
 
-    return predictor
+    # ---------------------------------------------------------------
+    # Support the standard project checkpoint format.
+    # ---------------------------------------------------------------
 
+    if isinstance(checkpoint, dict):
 
-# =========================================================
-# Synthetic Geological Complexity
-# =========================================================
+        if "model_state_dict" in checkpoint:
 
-def get_geological_structures():
-    """
-    Return the controlled geological structures used for
-    synthetic robustness testing.
+            state_dict = checkpoint["model_state_dict"]
 
-    These structures are only appropriate when evaluating
-    synthetic geological complexity.
-    """
+        elif "state_dict" in checkpoint:
 
-    generator = GeologicalGenerator()
-
-    structures = [
-        (
-            "horizontal",
-            generator.generate_horizontal_layers
-        ),
-        (
-            "dipping",
-            generator.generate_dipping_layers
-        ),
-        (
-            "faulted",
-            generator.generate_faulted_layers
-        ),
-        (
-            "folded",
-            generator.generate_folded_layers
-        ),
-        (
-            "complex",
-            generator.generate_complex_structure
-        ),
-        (
-            "highly_complex",
-            generator.generate_highly_complex_structure
-        ),
-    ]
-
-    return structures
-
-
-def evaluate_synthetic_complexity(
-    predictor
-):
-    """
-    Evaluate the model on controlled synthetic geological
-    complexity levels.
-    """
-
-    structures = (
-        get_geological_structures()
-    )
-
-    results = []
-
-    for complexity, generator_function in structures:
-
-        print()
-        print(
-            f"Testing synthetic structure: "
-            f"{complexity}"
-        )
-
-        # Generate target geological model.
-        target = generator_function()
-
-        target = ensure_batched_tensor(
-            target
-        )
-
-        # Generate missing-data mask.
-        mask = (
-            torch.rand_like(target)
-            > MISSING_PROBABILITY
-        ).float()
-
-        # Generate corrupted seismic input.
-        corrupted = (
-            target * mask
-        )
-
-        # ---------------------------------------------
-        # Model prediction
-        # ---------------------------------------------
-
-        (
-            reconstruction,
-            travel_time,
-            aleatoric_std,
-            epistemic_std,
-        ) = predictor.predict(
-            corrupted
-        )
-
-        # ---------------------------------------------
-        # Calculate predictive uncertainty
-        # ---------------------------------------------
-
-        predictive_std = (
-            compute_predictive_std(
-                aleatoric_std,
-                epistemic_std
-            )
-        )
-
-        # ---------------------------------------------
-        # Calculate reconstruction metrics
-        # ---------------------------------------------
-
-        metrics = evaluate_metrics(
-            reconstruction,
-            target,
-            mask
-        )
-
-        mean_uncertainty = (
-            predictive_std.mean().item()
-        )
-
-        mean_aleatoric = (
-            ensure_batched_tensor(
-                aleatoric_std
-            )
-            .mean()
-            .item()
-        )
-
-        mean_epistemic = (
-            ensure_batched_tensor(
-                epistemic_std
-            )
-            .mean()
-            .item()
-        )
-
-        # ---------------------------------------------
-        # Store result
-        # ---------------------------------------------
-
-        results.append(
-            {
-                "Experiment":
-                    EXPERIMENT_NAME,
-
-                "Dataset_Mode":
-                    DATASET_MODE,
-
-                "Evaluation_Type":
-                    "Synthetic_Geological_Complexity",
-
-                "Complexity":
-                    complexity,
-
-                "Sample_Index":
-                    -1,
-
-                "MAE":
-                    metrics["MAE"],
-
-                "Missing_Voxels":
-                    metrics["Missing_Voxels"],
-
-                "Aleatoric_STD_Mean":
-                    mean_aleatoric,
-
-                "Epistemic_STD_Mean":
-                    mean_epistemic,
-
-                "Predictive_STD_Mean":
-                    mean_uncertainty,
-            }
-        )
-
-        print(
-            f"MAE={metrics['MAE']:.6f}, "
-            f"Aleatoric={mean_aleatoric:.6f}, "
-            f"Epistemic={mean_epistemic:.6f}, "
-            f"Predictive={mean_uncertainty:.6f}"
-        )
-
-    return results
-
-
-# =========================================================
-# Non-Synthetic Dataset Evaluation
-# =========================================================
-
-def evaluate_configured_dataset(
-    predictor
-):
-    """
-    Evaluate actual patches from the configured dataset.
-
-    This path is used for non-synthetic DATASET_MODE values.
-
-    Examples:
-
-        F3
-        Marmousi
-        SEG
-        other supported dataset modes
-    """
-
-    dataset = build_dataset()
-
-    if dataset is None:
-
-        raise RuntimeError(
-            "build_dataset() returned None."
-        )
-
-    if len(dataset) == 0:
-
-        raise RuntimeError(
-            "The configured dataset is empty."
-        )
-
-    number_to_evaluate = min(
-        NUM_DATASET_SAMPLES,
-        len(dataset)
-    )
-
-    results = []
-
-    print()
-    print(
-        f"Dataset mode: {DATASET_MODE}"
-    )
-
-    print(
-        f"Dataset length: {len(dataset)}"
-    )
-
-    print(
-        f"Evaluating {number_to_evaluate} samples."
-    )
-
-    for sample_index in range(
-        number_to_evaluate
-    ):
-
-        print()
-        print(
-            f"Evaluating sample "
-            f"{sample_index + 1}/"
-            f"{number_to_evaluate}"
-        )
-
-        sample = dataset[
-            sample_index
-        ]
-
-        if not isinstance(
-            sample,
-            (tuple, list)
-        ):
-
-            raise TypeError(
-                "Dataset samples must be tuples or lists."
-            )
-
-        if len(sample) < 2:
-
-            raise ValueError(
-                "Dataset sample must contain at least "
-                "input and target."
-            )
-
-        # Current project convention:
-        #
-        # sample[0] = corrupted/input
-        # sample[1] = target
-        # sample[2] = mask
-        # sample[3] = velocity
-        corrupted = sample[0]
-        target = sample[1]
-
-        if len(sample) >= 3:
-
-            mask = sample[2]
+            state_dict = checkpoint["state_dict"]
 
         else:
 
-            raise ValueError(
-                "The configured dataset does not provide "
-                "a reconstruction mask."
-            )
+            # Some checkpoints may contain the state dictionary
+            # directly.
+            state_dict = checkpoint
 
-        # Convert to batch format.
-        corrupted = (
-            ensure_batched_tensor(
-                corrupted
-            )
+    else:
+
+        raise RuntimeError(
+            "Unsupported checkpoint format."
         )
 
-        target = (
-            ensure_batched_tensor(
-                target
-            )
+    # ---------------------------------------------------------------
+    # Load learned parameters.
+    # ---------------------------------------------------------------
+
+    model.load_state_dict(
+        state_dict,
+        strict=True
+    )
+
+    # ---------------------------------------------------------------
+    # Move model to selected device.
+    # ---------------------------------------------------------------
+
+    model.to(device)
+
+    # ---------------------------------------------------------------
+    # Deterministic evaluation mode.
+    # ---------------------------------------------------------------
+
+    model.eval()
+
+    return model
+
+
+# ====================================================================
+# 10. MODEL OUTPUT EXTRACTION
+# ====================================================================
+
+def extract_model_outputs(model_output):
+    """
+    Extract reconstruction, travel-time and log-variance outputs
+    from the project Network3D output convention.
+
+    Expected production convention
+    -------------------------------
+    reconstruction
+    travel_time
+    log_variance
+
+    Parameters
+    ----------
+    model_output
+        Output returned by Network3D.
+
+    Returns
+    -------
+    reconstruction
+    travel_time
+    log_variance
+    """
+
+    # ---------------------------------------------------------------
+    # Dictionary output.
+    # ---------------------------------------------------------------
+
+    if isinstance(model_output, dict):
+
+        reconstruction = model_output.get(
+            "reconstruction"
         )
 
-        mask = (
-            prepare_mask(
+        travel_time = model_output.get(
+            "travel_time"
+        )
+
+        log_variance = model_output.get(
+            "log_variance"
+        )
+
+        if reconstruction is None:
+
+            raise RuntimeError(
+                "Model output dictionary does not contain "
+                "'reconstruction'."
+            )
+
+        return (
+            reconstruction,
+            travel_time,
+            log_variance
+        )
+
+    # ---------------------------------------------------------------
+    # Tuple/list output.
+    # ---------------------------------------------------------------
+
+    if isinstance(model_output, (tuple, list)):
+
+        if len(model_output) >= 3:
+
+            reconstruction = model_output[0]
+
+            travel_time = model_output[1]
+
+            log_variance = model_output[2]
+
+            return (
+                reconstruction,
+                travel_time,
+                log_variance
+            )
+
+        if len(model_output) == 2:
+
+            reconstruction = model_output[0]
+
+            log_variance = model_output[1]
+
+            return (
+                reconstruction,
+                None,
+                log_variance
+            )
+
+        if len(model_output) == 1:
+
+            return (
+                model_output[0],
+                None,
+                None
+            )
+
+    # ---------------------------------------------------------------
+    # Tensor-only output.
+    # ---------------------------------------------------------------
+
+    if torch.is_tensor(model_output):
+
+        return (
+            model_output,
+            None,
+            None
+        )
+
+    raise RuntimeError(
+        "Unsupported Network3D output format."
+    )
+
+
+# ====================================================================
+# 11. TENSOR STANDARDIZATION
+# ====================================================================
+
+def ensure_5d(tensor, name):
+    """
+    Convert a seismic tensor to [B,C,D,H,W].
+
+    Accepted input shapes
+    ---------------------
+    [D,H,W]
+    [C,D,H,W]
+    [B,C,D,H,W]
+
+    Parameters
+    ----------
+    tensor : torch.Tensor
+        Input tensor.
+
+    name : str
+        Tensor name used in error messages.
+
+    Returns
+    -------
+    torch.Tensor
+        Tensor in [B,C,D,H,W] format.
+    """
+
+    if tensor is None:
+        return None
+
+    if tensor.ndim == 3:
+
+        return tensor.unsqueeze(0).unsqueeze(0)
+
+    if tensor.ndim == 4:
+
+        return tensor.unsqueeze(0)
+
+    if tensor.ndim == 5:
+
+        return tensor
+
+    raise ValueError(
+        f"{name} must have 3, 4 or 5 dimensions, "
+        f"but received shape {tuple(tensor.shape)}."
+    )
+
+
+# ====================================================================
+# 12. DATA CONSISTENCY PROJECTION
+# ====================================================================
+
+def apply_data_consistency(
+    reconstruction,
+    observed_input,
+    mask
+):
+    """
+    Restore observed seismic samples exactly.
+
+    mask convention
+    ---------------
+    1 = observed
+    0 = missing
+
+    Formula
+    -------
+    reconstructed = reconstruction * (1-mask)
+                    + observed_input * mask
+
+    Parameters
+    ----------
+    reconstruction : torch.Tensor
+        Model reconstruction.
+
+    observed_input : torch.Tensor
+        Corrupted/observed seismic input.
+
+    mask : torch.Tensor
+        Observation mask.
+
+    Returns
+    -------
+    torch.Tensor
+        Data-consistent reconstruction.
+    """
+
+    return (
+        reconstruction * (1.0 - mask)
+        + observed_input * mask
+    )
+
+
+# ====================================================================
+# 13. OBSERVED-DATA PRESERVATION ERROR
+# ====================================================================
+
+def observed_preservation_error(
+    reconstruction,
+    observed_input,
+    mask
+):
+    """
+    Calculate maximum absolute error on observed samples.
+
+    This should ideally be zero after data-consistency projection.
+    """
+
+    observed = mask > 0.5
+
+    if not torch.any(observed):
+
+        return 0.0
+
+    difference = torch.abs(
+        reconstruction[observed]
+        - observed_input[observed]
+    )
+
+    return float(
+        torch.max(difference).detach().cpu()
+    )
+
+
+# ====================================================================
+# 14. ALEATORIC UNCERTAINTY
+# ====================================================================
+
+def calculate_aleatoric_uncertainty(log_variance):
+    """
+    Convert predicted log-variance into aleatoric variance and
+    standard deviation.
+
+    The log-variance is clipped using the centralized configuration
+    values LOG_VARIANCE_MIN and LOG_VARIANCE_MAX.
+
+    Parameters
+    ----------
+    log_variance : torch.Tensor
+        Predicted log variance.
+
+    Returns
+    -------
+    aleatoric_variance : torch.Tensor
+    aleatoric_std : torch.Tensor
+    """
+
+    if log_variance is None:
+
+        return None, None
+
+    # ---------------------------------------------------------------
+    # Protect against numerical instability.
+    # ---------------------------------------------------------------
+
+    log_variance = torch.clamp(
+        log_variance,
+        min=LOG_VARIANCE_MIN,
+        max=LOG_VARIANCE_MAX
+    )
+
+    # ---------------------------------------------------------------
+    # Convert log variance to variance.
+    # ---------------------------------------------------------------
+
+    aleatoric_variance = torch.exp(
+        log_variance
+    )
+
+    # ---------------------------------------------------------------
+    # Convert variance to standard deviation.
+    # ---------------------------------------------------------------
+
+    aleatoric_std = torch.sqrt(
+        aleatoric_variance
+    )
+
+    return (
+        aleatoric_variance,
+        aleatoric_std
+    )
+
+
+# ====================================================================
+# 15. CASE METRICS
+# ====================================================================
+
+def calculate_case_metrics(
+    prediction,
+    target,
+    mask
+):
+    """
+    Calculate all canonical reconstruction metrics.
+
+    The canonical metric implementation is:
+
+        metrics/reconstruction_metrics.py
+
+    Parameters
+    ----------
+    prediction : torch.Tensor
+        Reconstructed seismic volume.
+
+    target : torch.Tensor
+        Ground-truth seismic volume.
+
+    mask : torch.Tensor
+        Observation mask.
+
+    Returns
+    -------
+    dict
+        Reconstruction metrics.
+    """
+
+    # ---------------------------------------------------------------
+    # Standard reconstruction metrics.
+    # ---------------------------------------------------------------
+
+    metrics = calculate_reconstruction_metrics(
+        prediction=prediction,
+        target=target
+    )
+
+    # ---------------------------------------------------------------
+    # Missing-region metrics.
+    # ---------------------------------------------------------------
+
+    metrics["Missing_MAE"] = float(
+        missing_mae(
+            prediction,
+            target,
+            mask
+        )
+    )
+
+    metrics["Missing_RMSE"] = float(
+        missing_rmse(
+            prediction,
+            target,
+            mask
+        )
+    )
+
+    # ---------------------------------------------------------------
+    # Observed-region metrics.
+    # ---------------------------------------------------------------
+
+    metrics["Observed_MAE"] = float(
+        observed_mae(
+            prediction,
+            target,
+            mask
+        )
+    )
+
+    metrics["Observed_RMSE"] = float(
+        observed_rmse(
+            prediction,
+            target,
+            mask
+        )
+    )
+
+    return metrics
+
+
+# ====================================================================
+# 16. EXTRACT SAMPLE FROM DATASET
+# ====================================================================
+
+def extract_sample(dataset, index):
+    """
+    Extract a sample from the project dataset.
+
+    The function supports the expected dictionary-based dataset
+    representation as well as tuple/list samples.
+
+    Parameters
+    ----------
+    dataset
+        Dataset object.
+
+    index : int
+        Sample index.
+
+    Returns
+    -------
+    corrupted
+    target
+    mask
+    velocity
+    """
+
+    sample = dataset[index]
+
+    # ---------------------------------------------------------------
+    # Dictionary representation.
+    # ---------------------------------------------------------------
+
+    if isinstance(sample, dict):
+
+        corrupted = sample.get(
+            "input",
+            sample.get("corrupted")
+        )
+
+        target = sample.get(
+            "target"
+        )
+
+        mask = sample.get(
+            "mask"
+        )
+
+        velocity = sample.get(
+            "velocity"
+        )
+
+        if corrupted is None:
+            raise RuntimeError(
+                "Dataset sample does not contain input/corrupted data."
+            )
+
+        if target is None:
+            raise RuntimeError(
+                "Dataset sample does not contain target data."
+            )
+
+        if mask is None:
+            raise RuntimeError(
+                "Dataset sample does not contain mask data."
+            )
+
+        return (
+            corrupted,
+            target,
+            mask,
+            velocity
+        )
+
+    # ---------------------------------------------------------------
+    # Tuple/list representation.
+    # ---------------------------------------------------------------
+
+    if isinstance(sample, (tuple, list)):
+
+        if len(sample) < 3:
+
+            raise RuntimeError(
+                "Dataset sample must contain at least "
+                "input, target and mask."
+            )
+
+        corrupted = sample[0]
+
+        target = sample[1]
+
+        mask = sample[2]
+
+        velocity = (
+            sample[3]
+            if len(sample) > 3
+            else None
+        )
+
+        return (
+            corrupted,
+            target,
+            mask,
+            velocity
+        )
+
+    raise RuntimeError(
+        "Unsupported dataset sample format."
+    )
+
+
+# ====================================================================
+# 17. EVALUATE ONE GEOLOGICAL COMPLEXITY LEVEL
+# ====================================================================
+
+@torch.no_grad()
+def evaluate_geological_level(
+    model,
+    device,
+    geological_mode
+):
+    """
+    Evaluate the model for one geological complexity level.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Trained reconstruction model.
+
+    device : torch.device
+        Computation device.
+
+    geological_mode : str
+        Geological complexity level.
+
+    Returns
+    -------
+    list[dict]
+        Per-sample evaluation results.
+    """
+
+    set_seed(SEED)
+
+    # ---------------------------------------------------------------
+    # Build dataset.
+    # ---------------------------------------------------------------
+    #
+    # The dataset builder remains the project's central dataset
+    # selection mechanism.
+    #
+    # The geological_mode is passed through where supported.
+    # ---------------------------------------------------------------
+
+    try:
+
+        dataset = build_dataset(
+            geological_mode=geological_mode
+        )
+
+    except TypeError:
+
+        # -----------------------------------------------------------
+        # Some versions of build_dataset may obtain geological
+        # configuration from the configuration module rather than
+        # accepting it as an argument.
+        #
+        # We deliberately fail clearly rather than silently creating
+        # a different dataset.
+        # -----------------------------------------------------------
+
+        raise TypeError(
+            "build_dataset() does not accept geological_mode. "
+            "Update dataset.build_dataset.build_dataset() so that "
+            "geological complexity evaluation can explicitly request "
+            f"'{geological_mode}'."
+        )
+
+    # ---------------------------------------------------------------
+    # Number of samples.
+    # ---------------------------------------------------------------
+
+    num_samples = len(dataset)
+
+    if num_samples == 0:
+
+        raise RuntimeError(
+            f"No samples available for geological mode "
+            f"'{geological_mode}'."
+        )
+
+    results = []
+
+    # ---------------------------------------------------------------
+    # Evaluate each sample.
+    # ---------------------------------------------------------------
+
+    for sample_index in tqdm(
+        range(num_samples),
+        desc=f"Geology: {geological_mode}"
+    ):
+
+        corrupted, target, mask, velocity = extract_sample(
+            dataset,
+            sample_index
+        )
+
+        # -----------------------------------------------------------
+        # Convert to tensors.
+        # -----------------------------------------------------------
+
+        if not torch.is_tensor(corrupted):
+            corrupted = torch.as_tensor(
+                corrupted,
+                dtype=torch.float32
+            )
+
+        if not torch.is_tensor(target):
+            target = torch.as_tensor(
+                target,
+                dtype=torch.float32
+            )
+
+        if not torch.is_tensor(mask):
+            mask = torch.as_tensor(
                 mask,
-                target
+                dtype=torch.float32
+            )
+
+        # -----------------------------------------------------------
+        # Standardize shapes to [B,C,D,H,W].
+        # -----------------------------------------------------------
+
+        corrupted = ensure_5d(
+            corrupted,
+            "corrupted"
+        )
+
+        target = ensure_5d(
+            target,
+            "target"
+        )
+
+        mask = ensure_5d(
+            mask,
+            "mask"
+        )
+
+        # -----------------------------------------------------------
+        # Move tensors to device.
+        # -----------------------------------------------------------
+
+        corrupted = corrupted.to(device)
+
+        target = target.to(device)
+
+        mask = mask.to(device)
+
+        # -----------------------------------------------------------
+        # Basic validation.
+        # -----------------------------------------------------------
+
+        if corrupted.shape != target.shape:
+
+            raise ValueError(
+                "Corrupted input and target shapes differ: "
+                f"{tuple(corrupted.shape)} vs "
+                f"{tuple(target.shape)}"
+            )
+
+        if corrupted.shape != mask.shape:
+
+            raise ValueError(
+                "Corrupted input and mask shapes differ: "
+                f"{tuple(corrupted.shape)} vs "
+                f"{tuple(mask.shape)}"
+            )
+
+        if not torch.isfinite(corrupted).all():
+
+            raise ValueError(
+                "Corrupted input contains NaN or Inf."
+            )
+
+        if not torch.isfinite(target).all():
+
+            raise ValueError(
+                "Target contains NaN or Inf."
+            )
+
+        if not torch.isfinite(mask).all():
+
+            raise ValueError(
+                "Mask contains NaN or Inf."
+            )
+
+        # -----------------------------------------------------------
+        # Validate mask.
+        # -----------------------------------------------------------
+
+        unique_mask_values = torch.unique(mask)
+
+        invalid_mask = ~(
+            torch.isclose(
+                unique_mask_values,
+                torch.tensor(
+                    0.0,
+                    device=device
+                )
+            )
+            |
+            torch.isclose(
+                unique_mask_values,
+                torch.tensor(
+                    1.0,
+                    device=device
+                )
             )
         )
 
-        # ---------------------------------------------
-        # Prediction
-        # ---------------------------------------------
+        if torch.any(invalid_mask):
+
+            raise ValueError(
+                "Mask must contain only 0 and 1 values. "
+                f"Found: {unique_mask_values.detach().cpu().tolist()}"
+            )
+
+        # -----------------------------------------------------------
+        # Model inference.
+        # -----------------------------------------------------------
+
+        model_output = model(
+            corrupted
+        )
 
         (
             reconstruction,
             travel_time,
-            aleatoric_std,
-            epistemic_std,
-        ) = predictor.predict(
-            corrupted
+            log_variance
+        ) = extract_model_outputs(
+            model_output
         )
 
-        # ---------------------------------------------
-        # Predictive uncertainty
-        # ---------------------------------------------
+        # -----------------------------------------------------------
+        # Standardize reconstruction.
+        # -----------------------------------------------------------
 
-        predictive_std = (
-            compute_predictive_std(
-                aleatoric_std,
-                epistemic_std
-            )
-        )
-
-        # ---------------------------------------------
-        # Metrics
-        # ---------------------------------------------
-
-        metrics = evaluate_metrics(
+        reconstruction = ensure_5d(
             reconstruction,
-            target,
+            "reconstruction"
+        )
+
+        if reconstruction.shape != target.shape:
+
+            raise ValueError(
+                "Reconstruction and target shapes differ: "
+                f"{tuple(reconstruction.shape)} vs "
+                f"{tuple(target.shape)}"
+            )
+
+        # -----------------------------------------------------------
+        # Validate reconstruction.
+        # -----------------------------------------------------------
+
+        if not torch.isfinite(reconstruction).all():
+
+            raise ValueError(
+                "Model reconstruction contains NaN or Inf."
+            )
+
+        # -----------------------------------------------------------
+        # Standardize log variance if available.
+        # -----------------------------------------------------------
+
+        if log_variance is not None:
+
+            log_variance = ensure_5d(
+                log_variance,
+                "log_variance"
+            )
+
+            if log_variance.shape != reconstruction.shape:
+
+                raise ValueError(
+                    "log_variance and reconstruction shapes differ."
+                )
+
+            (
+                aleatoric_variance,
+                aleatoric_std
+            ) = calculate_aleatoric_uncertainty(
+                log_variance
+            )
+
+        else:
+
+            aleatoric_variance = None
+
+            aleatoric_std = None
+
+        # -----------------------------------------------------------
+        # Data consistency projection.
+        # -----------------------------------------------------------
+
+        reconstruction = apply_data_consistency(
+            reconstruction=reconstruction,
+            observed_input=corrupted,
+            mask=mask
+        )
+
+        # -----------------------------------------------------------
+        # Verify observed-data preservation.
+        # -----------------------------------------------------------
+
+        preservation_error = observed_preservation_error(
+            reconstruction,
+            corrupted,
             mask
         )
 
-        mean_aleatoric = (
-            ensure_batched_tensor(
+        # -----------------------------------------------------------
+        # Calculate reconstruction metrics.
+        # -----------------------------------------------------------
+
+        metrics = calculate_case_metrics(
+            prediction=reconstruction,
+            target=target,
+            mask=mask
+        )
+
+        # -----------------------------------------------------------
+        # Missing-region uncertainty.
+        # -----------------------------------------------------------
+
+        missing_region_aleatoric_std = float("nan")
+
+        if aleatoric_std is not None:
+
+            missing_pixels = mask < 0.5
+
+            if torch.any(missing_pixels):
+
+                missing_region_aleatoric_std = float(
+                    aleatoric_std[missing_pixels]
+                    .mean()
+                    .detach()
+                    .cpu()
+                )
+
+        # -----------------------------------------------------------
+        # Global aleatoric uncertainty.
+        # -----------------------------------------------------------
+
+        global_aleatoric_std = float("nan")
+
+        if aleatoric_std is not None:
+
+            global_aleatoric_std = float(
                 aleatoric_std
+                .mean()
+                .detach()
+                .cpu()
             )
-            .mean()
-            .item()
-        )
 
-        mean_epistemic = (
-            ensure_batched_tensor(
-                epistemic_std
+        # -----------------------------------------------------------
+        # Epistemic/predictive uncertainty.
+        #
+        # Deterministic inference does not provide epistemic
+        # uncertainty. Therefore these fields are deliberately NaN.
+        # -----------------------------------------------------------
+
+        result = {
+
+            "Sample_ID": sample_index,
+
+            "Geological_Mode": geological_mode,
+
+            "MAE": metrics["MAE"],
+
+            "MSE": metrics["MSE"],
+
+            "RMSE": metrics["RMSE"],
+
+            "Relative_Error": metrics["Relative_Error"],
+
+            "PSNR": metrics["PSNR"],
+
+            "SNR": metrics["SNR"],
+
+            "SSIM": metrics["SSIM"],
+
+            "Missing_MAE": metrics["Missing_MAE"],
+
+            "Missing_RMSE": metrics["Missing_RMSE"],
+
+            "Observed_MAE": metrics["Observed_MAE"],
+
+            "Observed_RMSE": metrics["Observed_RMSE"],
+
+            "Aleatoric_Variance": (
+                float(
+                    aleatoric_variance
+                    .mean()
+                    .detach()
+                    .cpu()
+                )
+                if aleatoric_variance is not None
+                else float("nan")
+            ),
+
+            "Aleatoric_Std": global_aleatoric_std,
+
+            "Missing_Aleatoric_Std": (
+                missing_region_aleatoric_std
+            ),
+
+            "Epistemic_Variance": float("nan"),
+
+            "Epistemic_Std": float("nan"),
+
+            "Predictive_Variance": float("nan"),
+
+            "Predictive_Std": float("nan"),
+
+            "Observed_Preservation_Error": (
+                preservation_error
+            ),
+
+            "Missing_Rate_Actual": float(
+                (mask < 0.5)
+                .float()
+                .mean()
+                .detach()
+                .cpu()
+            ),
+
+            "Epistemic_Evaluation": (
+                "MC_Dropout_required"
+            ),
+        }
+
+        # -----------------------------------------------------------
+        # Optional physics diagnostic.
+        #
+        # We do not use travel time as a reconstruction-quality
+        # metric. It is retained only as a physics-informed diagnostic.
+        # -----------------------------------------------------------
+
+        if travel_time is not None:
+
+            travel_time = ensure_5d(
+                travel_time,
+                "travel_time"
             )
-            .mean()
-            .item()
-        )
 
-        mean_predictive = (
-            predictive_std.mean()
-            .item()
-        )
+            if torch.isfinite(travel_time).all():
 
-        results.append(
-            {
-                "Experiment":
-                    EXPERIMENT_NAME,
+                result["Travel_Time_Mean"] = float(
+                    travel_time
+                    .mean()
+                    .detach()
+                    .cpu()
+                )
 
-                "Dataset_Mode":
-                    DATASET_MODE,
+                result["Travel_Time_Std"] = float(
+                    travel_time
+                    .std()
+                    .detach()
+                    .cpu()
+                )
 
-                "Evaluation_Type":
-                    "Configured_Dataset",
+            else:
 
-                "Complexity":
-                    "Dataset_Sample",
+                result["Travel_Time_Mean"] = float("nan")
 
-                "Sample_Index":
-                    sample_index,
+                result["Travel_Time_Std"] = float("nan")
 
-                "MAE":
-                    metrics["MAE"],
+        else:
 
-                "Missing_Voxels":
-                    metrics["Missing_Voxels"],
+            result["Travel_Time_Mean"] = float("nan")
 
-                "Aleatoric_STD_Mean":
-                    mean_aleatoric,
+            result["Travel_Time_Std"] = float("nan")
 
-                "Epistemic_STD_Mean":
-                    mean_epistemic,
-
-                "Predictive_STD_Mean":
-                    mean_predictive,
-            }
-        )
-
-        print(
-            f"MAE={metrics['MAE']:.6f}, "
-            f"Aleatoric={mean_aleatoric:.6f}, "
-            f"Epistemic={mean_epistemic:.6f}, "
-            f"Predictive={mean_predictive:.6f}"
-        )
+        results.append(result)
 
     return results
 
 
-# =========================================================
-# Save Results
-# =========================================================
+# ====================================================================
+# 18. SUMMARY STATISTICS
+# ====================================================================
 
-def save_results(results):
+def calculate_summary(results):
     """
-    Save robustness results to CSV.
+    Calculate summary statistics for each geological complexity level.
+
+    Parameters
+    ----------
+    results : list[dict]
+        Per-sample results.
+
+    Returns
+    -------
+    list[dict]
+        Summary results.
     """
+
+    summaries = []
+
+    for geological_mode in GEOLOGICAL_COMPLEXITY_LEVELS:
+
+        mode_results = [
+            result
+            for result in results
+            if result["Geological_Mode"]
+            == geological_mode
+        ]
+
+        if not mode_results:
+            continue
+
+        summary = {
+            "Geological_Mode": geological_mode,
+            "Number_of_Samples": len(mode_results),
+        }
+
+        # -----------------------------------------------------------
+        # Metrics summarized by mean and standard deviation.
+        # -----------------------------------------------------------
+
+        metric_names = [
+            "MAE",
+            "MSE",
+            "RMSE",
+            "Relative_Error",
+            "PSNR",
+            "SNR",
+            "SSIM",
+            "Missing_MAE",
+            "Missing_RMSE",
+            "Observed_MAE",
+            "Observed_RMSE",
+            "Aleatoric_Variance",
+            "Aleatoric_Std",
+            "Missing_Aleatoric_Std",
+            "Epistemic_Variance",
+            "Epistemic_Std",
+            "Predictive_Variance",
+            "Predictive_Std",
+            "Observed_Preservation_Error",
+            "Missing_Rate_Actual",
+            "Travel_Time_Mean",
+            "Travel_Time_Std",
+        ]
+
+        for metric_name in metric_names:
+
+            values = np.asarray(
+                [
+                    result[metric_name]
+                    for result in mode_results
+                ],
+                dtype=np.float64
+            )
+
+            finite_values = values[
+                np.isfinite(values)
+            ]
+
+            if finite_values.size == 0:
+
+                summary[
+                    f"Mean_{metric_name}"
+                ] = float("nan")
+
+                summary[
+                    f"Std_{metric_name}"
+                ] = float("nan")
+
+            else:
+
+                summary[
+                    f"Mean_{metric_name}"
+                ] = float(
+                    np.mean(finite_values)
+                )
+
+                summary[
+                    f"Std_{metric_name}"
+                ] = float(
+                    np.std(
+                        finite_values,
+                        ddof=0
+                    )
+                )
+
+        summaries.append(summary)
+
+    return summaries
+
+
+# ====================================================================
+# 19. SAVE CSV
+# ====================================================================
+
+def save_csv(results, path):
+    """
+    Save results as CSV.
+
+    Parameters
+    ----------
+    results : list[dict]
+        Results.
+
+    path : Path
+        Output CSV path.
+    """
+
+    import csv
 
     if not results:
+        return
 
-        raise RuntimeError(
-            "No robustness results were generated."
+    # ---------------------------------------------------------------
+    # Collect all field names.
+    # ---------------------------------------------------------------
+
+    fieldnames = []
+
+    for result in results:
+
+        for key in result.keys():
+
+            if key not in fieldnames:
+
+                fieldnames.append(key)
+
+    # ---------------------------------------------------------------
+    # Write CSV.
+    # ---------------------------------------------------------------
+
+    with open(
+        path,
+        "w",
+        newline="",
+        encoding="utf-8"
+    ) as file:
+
+        writer = csv.DictWriter(
+            file,
+            fieldnames=fieldnames
         )
 
-    os.makedirs(
-        OUTPUT_DIRECTORY,
-        exist_ok=True
-    )
+        writer.writeheader()
 
-    df = pd.DataFrame(
-        results
-    )
-
-    df.to_csv(
-        OUTPUT_FILE,
-        index=False
-    )
-
-    return df
+        writer.writerows(results)
 
 
-# =========================================================
-# Main
-# =========================================================
+# ====================================================================
+# 20. SAVE JSON
+# ====================================================================
+
+def save_json(data, path):
+    """
+    Save JSON metadata.
+    """
+
+    with open(
+        path,
+        "w",
+        encoding="utf-8"
+    ) as file:
+
+        json.dump(
+            data,
+            file,
+            indent=4,
+            allow_nan=True
+        )
+
+
+# ====================================================================
+# 21. MAIN EVALUATION
+# ====================================================================
 
 def main():
 
     print()
-    print("=" * 60)
-    print("GEOLOGICAL COMPLEXITY ROBUSTNESS")
-    print("=" * 60)
-
+    print("=" * 70)
     print(
-        f"Experiment   : {EXPERIMENT_NAME}"
+        "GEOLOGICAL COMPLEXITY ROBUSTNESS EVALUATION"
+    )
+    print("=" * 70)
+
+    # ---------------------------------------------------------------
+    # Set reproducibility.
+    # ---------------------------------------------------------------
+
+    set_seed(SEED)
+
+    # ---------------------------------------------------------------
+    # Resolve device.
+    # ---------------------------------------------------------------
+
+    device = resolve_device(
+        DEVICE
     )
 
     print(
-        f"Dataset Mode : {DATASET_MODE}"
+        f"Dataset mode : {DATASET_MODE}"
+    )
+
+    print(
+        f"Device       : {device}"
     )
 
     print(
@@ -861,107 +1496,288 @@ def main():
     )
 
     print(
-        f"Device       : {DEVICE}"
+        f"Output       : {OUTPUT_DIR}"
     )
 
-    print("=" * 60)
+    print(
+        f"Log variance : "
+        f"[{LOG_VARIANCE_MIN}, {LOG_VARIANCE_MAX}]"
+    )
 
-    # -----------------------------------------------------
-    # Create predictor
-    # -----------------------------------------------------
+    print()
 
-    predictor = create_predictor()
+    # ---------------------------------------------------------------
+    # Load trained model once.
+    #
+    # IMPORTANT:
+    # The same frozen model is used for every geological complexity
+    # level.
+    # ---------------------------------------------------------------
 
-    # -----------------------------------------------------
-    # Select evaluation strategy
-    # -----------------------------------------------------
+    model = load_model(
+        device
+    )
 
-    if DATASET_MODE.lower() == "synthetic":
+    # ---------------------------------------------------------------
+    # Store all results.
+    # ---------------------------------------------------------------
+
+    all_results = []
+
+    # ---------------------------------------------------------------
+    # Evaluate every geological complexity level.
+    # ---------------------------------------------------------------
+
+    for geological_mode in GEOLOGICAL_COMPLEXITY_LEVELS:
 
         print()
-        print(
-            "Synthetic mode detected."
-        )
+        print("-" * 70)
 
         print(
-            "Running controlled geological-complexity "
-            "evaluation."
+            f"Evaluating geological mode: "
+            f"{geological_mode}"
         )
 
-        results = (
-            evaluate_synthetic_complexity(
-                predictor
-            )
+        print("-" * 70)
+
+        mode_results = evaluate_geological_level(
+            model=model,
+            device=device,
+            geological_mode=geological_mode
         )
 
-    else:
-
-        print()
-        print(
-            f"Non-synthetic mode detected: "
-            f"{DATASET_MODE}"
+        all_results.extend(
+            mode_results
         )
 
         print(
-            "Running evaluation on configured "
-            "dataset samples."
+            f"Completed {geological_mode}: "
+            f"{len(mode_results)} samples"
         )
 
-        results = (
-            evaluate_configured_dataset(
-                predictor
-            )
-        )
+    # ---------------------------------------------------------------
+    # Calculate summaries.
+    # ---------------------------------------------------------------
 
-    # -----------------------------------------------------
-    # Save results
-    # -----------------------------------------------------
-
-    df = save_results(
-        results
+    summaries = calculate_summary(
+        all_results
     )
 
-    # -----------------------------------------------------
-    # Final output
-    # -----------------------------------------------------
+    # ---------------------------------------------------------------
+    # Output paths.
+    # ---------------------------------------------------------------
+
+    detailed_csv = (
+        OUTPUT_DIR
+        / "geological_complexity_results.csv"
+    )
+
+    summary_csv = (
+        OUTPUT_DIR
+        / "geological_complexity_summary.csv"
+    )
+
+    metadata_json = (
+        OUTPUT_DIR
+        / "geological_complexity_metadata.json"
+    )
+
+    # ---------------------------------------------------------------
+    # Save detailed results.
+    # ---------------------------------------------------------------
+
+    save_csv(
+        all_results,
+        detailed_csv
+    )
+
+    # ---------------------------------------------------------------
+    # Save summary.
+    # ---------------------------------------------------------------
+
+    save_csv(
+        summaries,
+        summary_csv
+    )
+
+    # ---------------------------------------------------------------
+    # Metadata.
+    # ---------------------------------------------------------------
+
+    metadata = {
+
+        "evaluation": (
+            "Geological Complexity Robustness"
+        ),
+
+        "dataset_mode": DATASET_MODE,
+
+        "device": str(device),
+
+        "checkpoint": str(
+            CHECKPOINT_PATH
+        ),
+
+        "geological_complexity_levels": (
+            GEOLOGICAL_COMPLEXITY_LEVELS
+        ),
+
+        "number_of_levels": len(
+            GEOLOGICAL_COMPLEXITY_LEVELS
+        ),
+
+        "seed": SEED,
+
+        "use_attention": USE_ATTENTION,
+
+        "use_residual": USE_RESIDUAL,
+
+        "use_uncertainty": USE_UNCERTAINTY,
+
+        "log_variance_min": (
+            LOG_VARIANCE_MIN
+        ),
+
+        "log_variance_max": (
+            LOG_VARIANCE_MAX
+        ),
+
+        "metric_source": (
+            "metrics.reconstruction_metrics"
+        ),
+
+        "uncertainty_method": (
+            "Deterministic aleatoric uncertainty "
+            "from predicted log-variance"
+        ),
+
+        "epistemic_uncertainty": (
+            "Not estimated in deterministic "
+            "geological-complexity evaluation; "
+            "MC-Dropout evaluation required."
+        ),
+
+        "predictive_uncertainty": (
+            "Not estimated in deterministic "
+            "geological-complexity evaluation; "
+            "MC-Dropout evaluation required."
+        ),
+
+        "data_consistency": (
+            "Observed seismic samples restored "
+            "exactly after reconstruction."
+        ),
+
+        "detailed_results": str(
+            detailed_csv
+        ),
+
+        "summary_results": str(
+            summary_csv
+        ),
+    }
+
+    save_json(
+        metadata,
+        metadata_json
+    )
+
+    # ---------------------------------------------------------------
+    # Final validation.
+    # ---------------------------------------------------------------
+
+    expected_levels = set(
+        GEOLOGICAL_COMPLEXITY_LEVELS
+    )
+
+    completed_levels = set(
+        result["Geological_Mode"]
+        for result in all_results
+    )
+
+    missing_levels = (
+        expected_levels
+        - completed_levels
+    )
+
+    if missing_levels:
+
+        raise RuntimeError(
+            "Evaluation incomplete. Missing geological "
+            f"levels: {sorted(missing_levels)}"
+        )
+
+    # ---------------------------------------------------------------
+    # Check observed-data preservation.
+    # ---------------------------------------------------------------
+
+    preservation_errors = [
+        result[
+            "Observed_Preservation_Error"
+        ]
+        for result in all_results
+    ]
+
+    max_preservation_error = max(
+        preservation_errors
+    )
+
+    if not math.isfinite(
+        max_preservation_error
+    ):
+
+        raise RuntimeError(
+            "Observed-data preservation error is not finite."
+        )
+
+    # ---------------------------------------------------------------
+    # Final report.
+    # ---------------------------------------------------------------
 
     print()
-    print("=" * 60)
-    print("ROBUSTNESS EVALUATION COMPLETED")
-    print("=" * 60)
+    print("=" * 70)
+    print(
+        "GEOLOGICAL COMPLEXITY EVALUATION COMPLETE"
+    )
+    print("=" * 70)
 
     print(
-        f"Experiment   : {EXPERIMENT_NAME}"
+        f"Total samples evaluated : "
+        f"{len(all_results)}"
     )
 
     print(
-        f"Dataset Mode : {DATASET_MODE}"
+        f"Geological levels       : "
+        f"{len(completed_levels)}"
     )
 
     print(
-        f"Results      : {len(df)}"
-    )
-
-    print()
-    print(
-        "Saved:"
-    )
-
-    print(
-        OUTPUT_FILE
+        f"Maximum observed-data "
+        f"preservation error     : "
+        f"{max_preservation_error:.6e}"
     )
 
     print()
-    print(df.to_string(
-        index=False
-    ))
+    print(
+        f"Detailed results : {detailed_csv}"
+    )
 
-    print("=" * 60)
+    print(
+        f"Summary results  : {summary_csv}"
+    )
+
+    print(
+        f"Metadata         : {metadata_json}"
+    )
+
+    print()
+    print("STATUS: PASS")
+    print("=" * 70)
 
 
-# =========================================================
-# Script Entry Point
-# =========================================================
+# ====================================================================
+# 22. SCRIPT ENTRY POINT
+# ====================================================================
 
 if __name__ == "__main__":
 

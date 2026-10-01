@@ -1,104 +1,70 @@
 """
-======================================================================
-PROPOSED MODEL — 750-CASE CONTROLLED EXPERIMENTAL MATRIX
-======================================================================
+====================================================================
+Focused Test — Proposed Physics-Informed 3D Encoder–Decoder Model
+====================================================================
 
-Physics-Informed 3D Encoder-Decoder Framework
-with Predictive Uncertainty for Seismic Data Reconstruction
+Purpose
+-------
+Focused validation test for the proposed-model reconstruction
+implementation used by the controlled experimental matrix.
 
-This script extends the already validated single controlled
-proposed-model experiment to the complete 750-case matrix.
+This test is NOT the 750-case controlled experiment.
 
-Experimental matrix
+The full controlled experiment remains in:
+
+    evaluation/baselines/proposed_model_controlled_matrix.py
+
+This test validates ONE deterministic representative case.
+
+Validation includes
 -------------------
-
-Missing rates:
-    10%, 20%, 30%, 40%, 50%
-
-Missing mechanisms:
-    random_voxels
-    missing_traces
-    missing_inlines
-    missing_crosslines
-    missing_blocks
-
-Geological modes:
-    horizontal
-    dipping
-    faulted
-    folded
-    complex
-    highly_complex
-
-Seeds:
-    42, 43, 44, 45, 46
-
-Total:
-    5 × 5 × 6 × 5 = 750 cases
-
-Cube:
-    64 × 128 × 128
-
-IMPORTANT
----------
-The uncertainty calculations in this script follow the
-already validated Colab controlled single-run implementation.
+1. Dataset generation
+2. Tensor shapes
+3. Metadata consistency
+4. Input/target consistency on observed samples
+5. Missing-data existence
+6. Proposed model loading
+7. MC-Dropout inference
+8. Aleatoric uncertainty
+9. Epistemic uncertainty
+10. Predictive uncertainty
+11. Reconstruction validity
+12. Data-consistency projection
+13. Exact observed-data preservation
+14. Missing-region reconstruction
+15. Reconstruction metrics
+16. Uncertainty non-negativity
+17. Reproducibility
 
 Author: Ormin Joseph
-======================================================================
+====================================================================
 """
 
+# ==================================================================
+# 1. IMPORTS
+# ==================================================================
 
-# =====================================================================
-# 1. STANDARD LIBRARY
-# =====================================================================
-
-import sys
-import time
-from pathlib import Path
-
-
-# =====================================================================
-# 2. NUMERICAL / DEEP LEARNING LIBRARIES
-# =====================================================================
+import random
 
 import numpy as np
-import pandas as pd
 import torch
 
-
-# =====================================================================
-# 3. PROJECT ROOT
-# =====================================================================
-
-PROJECT_ROOT = (
-    Path(__file__).resolve().parents[1]
-)
-
-if str(PROJECT_ROOT) not in sys.path:
-
-    sys.path.insert(
-        0,
-        str(PROJECT_ROOT)
-    )
-
-
-# =====================================================================
-# 4. PROJECT IMPORTS
-# =====================================================================
-
-from dataset.synthetic_dataset import (
-    SyntheticSeismicDataset
-)
+from dataset.synthetic_dataset import SyntheticSeismicDataset
 
 from models.network import Network3D
 
-from models.mc_dropout import (
-    MCDropout3D
-)
+from models.mc_dropout import MCDropout3D
 
-from models.predictive_uncertainty import (
-    PredictiveUncertaintyEstimator
+from models.predictive_uncertainty import PredictiveUncertaintyEstimator
+
+from utils.config import (
+    BASELINE_CUBE_SIZE,
+    BASELINE_GEOLOGICAL_MODE,
+    BASELINE_MASK_MODE,
+    BASELINE_MISSING_RATE,
+    BASELINE_SEED,
+    MC_DROPOUT_SAMPLES,
+    OBSERVED_PRESERVATION_TOLERANCE,
 )
 
 from metrics.reconstruction_metrics import (
@@ -109,1544 +75,1302 @@ from metrics.reconstruction_metrics import (
     ssim,
 )
 
-from utils.config import (
-    MC_DROPOUT_SAMPLES
-)
+
+# ==================================================================
+# 2. DEVICE RESOLUTION
+# ==================================================================
+
+def resolve_device():
+    """
+    Resolve the computational device.
+
+    The project configuration may use:
+
+        DEVICE = "auto"
+        DEVICE = "cpu"
+        DEVICE = "cuda"
+
+    The focused test uses CUDA when explicitly available and
+    otherwise falls back to CPU.
+    """
+
+    # --------------------------------------------------------------
+    # Read the configured device if available.
+    # --------------------------------------------------------------
+
+    try:
+
+        from utils.config import DEVICE
+
+    except ImportError:
+
+        DEVICE = "auto"
+
+    # --------------------------------------------------------------
+    # Automatic device selection.
+    # --------------------------------------------------------------
+
+    if DEVICE == "auto":
+
+        if torch.cuda.is_available():
+
+            return torch.device("cuda")
+
+        return torch.device("cpu")
+
+    # --------------------------------------------------------------
+    # Explicit CPU selection.
+    # --------------------------------------------------------------
+
+    if DEVICE == "cpu":
+
+        return torch.device("cpu")
+
+    # --------------------------------------------------------------
+    # Explicit CUDA selection.
+    # --------------------------------------------------------------
+
+    if DEVICE == "cuda":
+
+        if not torch.cuda.is_available():
+
+            raise RuntimeError(
+                "DEVICE='cuda' was requested, but CUDA is not available."
+            )
+
+        return torch.device("cuda")
+
+    # --------------------------------------------------------------
+    # Reject unsupported device specifications.
+    # --------------------------------------------------------------
+
+    raise ValueError(
+        f"Unsupported DEVICE setting: {DEVICE}"
+    )
 
 
-# =====================================================================
-# 5. CONTROLLED EXPERIMENT CONFIGURATION
-# =====================================================================
-
-CUBE_SIZE = (
-    64,
-    128,
-    128,
-)
-
-
-MISSING_RATES = [
-    0.30,
-]
-
-
-MASK_MODES = [
-    "random_voxels",
-    "missing_traces",
-]
-
-
-GEOLOGICAL_MODES = [
-    "horizontal",
-    "dipping",
-]
-
-
-SEEDS = [
-    42,
-    43,
-]
-
-
-NUM_SAMPLES = 1
-
-
-# =====================================================================
-# 6. EXPECTED NUMBER OF CASES
-# =====================================================================
-
-EXPECTED_CASES = (
-    len(MISSING_RATES)
-    * len(MASK_MODES)
-    * len(GEOLOGICAL_MODES)
-    * len(SEEDS)
-)
-
-
-# =====================================================================
-# 7. DEVICE
-# =====================================================================
-
-DEVICE = torch.device(
-    "cuda"
-    if torch.cuda.is_available()
-    else "cpu"
-)
-
-
-# =====================================================================
-# 8. CHECKPOINT
-# =====================================================================
-
-CHECKPOINT = (
-    PROJECT_ROOT
-    / "outputs"
-    / "synthetic_training"
-    / "checkpoints"
-    / "best_model.pth"
-)
-
-
-# =====================================================================
-# 9. OUTPUT DIRECTORY
-# =====================================================================
-
-REPORT_DIR = (
-    PROJECT_ROOT
-    / "outputs"
-    / "synthetic_training"
-    / "reports"
-)
-
-REPORT_DIR.mkdir(
-    parents=True,
-    exist_ok=True
-)
-
-
-# =====================================================================
-# 10. OUTPUT FILES
-# =====================================================================
-
-RAW_RESULTS_FILE = (
-    REPORT_DIR
-    / "proposed_controlled_matrix.csv"
-)
-
-SUMMARY_RESULTS_FILE = (
-    REPORT_DIR
-    / "proposed_controlled_matrix_summary.csv"
-)
-
-
-# =====================================================================
-# 11. RANDOM SEED
-# =====================================================================
+# ==================================================================
+# 3. RANDOM-SEED CONTROL
+# ==================================================================
 
 def set_seed(seed):
     """
-    Set random seeds for reproducibility.
+    Set all relevant random seeds for deterministic testing.
     """
 
+    # Python random generator.
+    random.seed(seed)
+
+    # NumPy random generator.
     np.random.seed(seed)
 
+    # PyTorch CPU generator.
     torch.manual_seed(seed)
 
+    # PyTorch CUDA generators.
     if torch.cuda.is_available():
 
         torch.cuda.manual_seed_all(seed)
 
 
-# =====================================================================
-# 12. LOAD TRAINED PROPOSED MODEL
-# =====================================================================
+# ==================================================================
+# 4. ASSERTION HELPER
+# ==================================================================
 
-def load_model():
+def check(condition, message):
+    """
+    Raise a clear error when a validation condition fails.
+    """
 
-    # ---------------------------------------------------------------
-    # Check checkpoint.
-    # ---------------------------------------------------------------
+    if not condition:
 
-    if not CHECKPOINT.is_file():
+        raise AssertionError(message)
 
-        raise FileNotFoundError(
-            "\nFresh best_model.pth was not found:\n"
-            f"{CHECKPOINT}\n"
+
+# ==================================================================
+# 5. LOAD PROPOSED MODEL
+# ==================================================================
+
+def load_proposed_model(device):
+    """
+    Construct the proposed Physics-Informed 3D Encoder–Decoder
+    network and load the trained best checkpoint.
+
+    The checkpoint path is obtained from the centralized
+    configuration rather than being hard-coded.
+    """
+
+    # --------------------------------------------------------------
+    # Import the centralized checkpoint directory.
+    # --------------------------------------------------------------
+
+    from pathlib import Path
+
+    from utils.config import CHECKPOINT_DIR
+
+    # --------------------------------------------------------------
+    # Construct checkpoint path.
+    # --------------------------------------------------------------
+
+    checkpoint_path = (
+        Path(CHECKPOINT_DIR) /
+        "best_model.pth"
+    )
+
+    # --------------------------------------------------------------
+    # Verify checkpoint existence.
+    # --------------------------------------------------------------
+
+    check(
+        checkpoint_path.exists(),
+        (
+            "Proposed-model checkpoint was not found:\n"
+            f"{checkpoint_path}\n\n"
+            "Train the model first or verify CHECKPOINT_DIR "
+            "in utils/config.py."
         )
+    )
 
-
-    # ---------------------------------------------------------------
-    # Create the SAME architecture used in the successful
-    # single controlled experiment.
-    # ---------------------------------------------------------------
+    # --------------------------------------------------------------
+    # Construct the same architecture used by the proposed model.
+    # --------------------------------------------------------------
 
     model = Network3D(
         use_attention=True,
         use_residual=True,
         use_uncertainty=True,
-    ).to(DEVICE)
-
-
-    # ---------------------------------------------------------------
-    # Load checkpoint.
-    # ---------------------------------------------------------------
-
-    checkpoint = torch.load(
-        CHECKPOINT,
-        map_location=DEVICE,
     )
 
+    # --------------------------------------------------------------
+    # Load checkpoint.
+    # --------------------------------------------------------------
 
-    # ---------------------------------------------------------------
-    # Check checkpoint structure.
-    # ---------------------------------------------------------------
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location=device,
+    )
 
-    if "model_state_dict" not in checkpoint:
+    # --------------------------------------------------------------
+    # Extract model state dictionary.
+    # --------------------------------------------------------------
 
-        raise RuntimeError(
-            "Checkpoint does not contain "
+    check(
+        "model_state_dict" in checkpoint,
+        (
+            "The checkpoint does not contain "
             "'model_state_dict'."
         )
-
-
-    # ---------------------------------------------------------------
-    # Load trained weights.
-    # ---------------------------------------------------------------
+    )
 
     model.load_state_dict(
         checkpoint["model_state_dict"]
     )
 
+    # --------------------------------------------------------------
+    # Move model to selected device.
+    # --------------------------------------------------------------
 
-    # ---------------------------------------------------------------
+    model = model.to(device)
+
+    # --------------------------------------------------------------
     # Evaluation mode.
-    # ---------------------------------------------------------------
+    # --------------------------------------------------------------
 
     model.eval()
-
 
     return model
 
 
-# =====================================================================
-# 13. RUN ONE CONTROLLED CASE
-# =====================================================================
+# ==================================================================
+# 6. RUN PROPOSED MODEL ON ONE CASE
+# ==================================================================
 
-def run_single_case(
-    model,
-    missing_rate,
-    mask_mode,
-    geological_mode,
-    seed,
-):
+def run_proposed_model_case(model, device):
+    """
+    Run one deterministic representative case through the proposed
+    reconstruction model and uncertainty pipeline.
+    """
 
-    # ================================================================
-    # REPRODUCIBILITY
-    # ================================================================
-
-    set_seed(seed)
-
-
-    # ================================================================
-    # DATASET
-    # ================================================================
+    # --------------------------------------------------------------
+    # Generate exactly one synthetic sample.
+    # --------------------------------------------------------------
 
     dataset = SyntheticSeismicDataset(
-        num_samples=NUM_SAMPLES,
-        cube_size=CUBE_SIZE,
-        missing_probability=missing_rate,
-        geological_mode=geological_mode,
-        mask_mode=mask_mode,
-        seed=seed,
+        num_samples=1,
+        cube_size=BASELINE_CUBE_SIZE,
+        missing_probability=BASELINE_MISSING_RATE,
+        geological_mode=BASELINE_GEOLOGICAL_MODE,
+        mask_mode=BASELINE_MASK_MODE,
+        seed=BASELINE_SEED,
     )
 
+    # --------------------------------------------------------------
+    # Verify dataset length.
+    # --------------------------------------------------------------
 
-    # ================================================================
-    # GET CONTROLLED SAMPLE
-    # ================================================================
+    check(
+        len(dataset) == 1,
+        "Focused proposed-model test must contain exactly one sample."
+    )
+
+    # --------------------------------------------------------------
+    # Retrieve sample.
+    # --------------------------------------------------------------
 
     sample = dataset[0]
 
-
-    # ---------------------------------------------------------------
-    # Current standard dataset returns:
+    # --------------------------------------------------------------
+    # Expected dataset structure:
     #
-    # input_cube
-    # target_cube
+    # corrupted
+    # target
     # mask
-    # velocity_model
-    # mask_type
-    # geological_mode
-    # ---------------------------------------------------------------
+    # velocity
+    # actual_mask_mode
+    # actual_geological_mode
+    # --------------------------------------------------------------
 
     (
-        input_cube,
-        target_cube,
+        corrupted,
+        target,
         mask,
-        velocity_model,
-        returned_mask_mode,
-        returned_geological_mode,
+        velocity,
+        actual_mask_mode,
+        actual_geological_mode,
     ) = sample
 
-
-    # ================================================================
-    # EXPECTED SHAPE
-    # ================================================================
+    # --------------------------------------------------------------
+    # Expected shape:
+    #
+    # [C, D, H, W]
+    #
+    # For this project:
+    #
+    # [1, 64, 128, 128]
+    # --------------------------------------------------------------
 
     expected_shape = (
         1,
-        *CUBE_SIZE
+        BASELINE_CUBE_SIZE[0],
+        BASELINE_CUBE_SIZE[1],
+        BASELINE_CUBE_SIZE[2],
     )
 
-
-    if tuple(input_cube.shape) != expected_shape:
-
-        raise RuntimeError(
-            "Input shape mismatch: "
-            f"{tuple(input_cube.shape)}"
+    check(
+        tuple(corrupted.shape) == expected_shape,
+        (
+            "Corrupted cube has incorrect shape: "
+            f"{tuple(corrupted.shape)}; "
+            f"expected {expected_shape}"
         )
-
-
-    if tuple(target_cube.shape) != expected_shape:
-
-        raise RuntimeError(
-            "Target shape mismatch: "
-            f"{tuple(target_cube.shape)}"
-        )
-
-
-    if tuple(mask.shape) != expected_shape:
-
-        raise RuntimeError(
-            "Mask shape mismatch: "
-            f"{tuple(mask.shape)}"
-        )
-
-
-    if tuple(velocity_model.shape) != expected_shape:
-
-        raise RuntimeError(
-            "Velocity shape mismatch: "
-            f"{tuple(velocity_model.shape)}"
-        )
-
-
-    # ================================================================
-    # VERIFY CONTROLLED CONDITIONS
-    # ================================================================
-
-    if returned_mask_mode != mask_mode:
-
-        raise RuntimeError(
-            "Returned mask mode does not match "
-            "requested mask mode."
-        )
-
-
-    if returned_geological_mode != geological_mode:
-
-        raise RuntimeError(
-            "Returned geological mode does not match "
-            "requested geological mode."
-        )
-
-
-    # ================================================================
-    # INPUT CONSISTENCY
-    # ================================================================
-
-    input_difference = torch.max(
-        torch.abs(
-            input_cube[mask == 1]
-            - target_cube[mask == 1]
-        )
-    ).item()
-
-
-    if input_difference > 1e-6:
-
-        raise RuntimeError(
-            "Observed input samples do not match "
-            "target samples."
-        )
-
-
-    # ================================================================
-    # OBSERVED / MISSING COUNTS
-    # ================================================================
-
-    observed_voxels = int(
-        torch.sum(
-            mask == 1
-        ).item()
     )
 
-
-    missing_voxels = int(
-        torch.sum(
-            mask == 0
-        ).item()
+    check(
+        tuple(target.shape) == expected_shape,
+        (
+            "Target cube has incorrect shape: "
+            f"{tuple(target.shape)}; "
+            f"expected {expected_shape}"
+        )
     )
 
-
-    # ================================================================
-    # BATCH DIMENSION
-    # ================================================================
-
-    input_batch = (
-        input_cube
-        .unsqueeze(0)
-        .to(DEVICE)
+    check(
+        tuple(mask.shape) == expected_shape,
+        (
+            "Mask has incorrect shape: "
+            f"{tuple(mask.shape)}; "
+            f"expected {expected_shape}"
+        )
     )
 
-
-    target_batch = (
-        target_cube
-        .unsqueeze(0)
-        .to(DEVICE)
+    check(
+        tuple(velocity.shape) == expected_shape,
+        (
+            "Velocity has incorrect shape: "
+            f"{tuple(velocity.shape)}; "
+            f"expected {expected_shape}"
+        )
     )
 
+    # --------------------------------------------------------------
+    # Verify metadata.
+    # --------------------------------------------------------------
 
-    mask_batch = (
-        mask
-        .unsqueeze(0)
-        .to(DEVICE)
+    check(
+        actual_mask_mode == BASELINE_MASK_MODE,
+        (
+            "Mask-mode mismatch: "
+            f"expected {BASELINE_MASK_MODE}, "
+            f"received {actual_mask_mode}"
+        )
     )
 
-
-    # ================================================================
-    # MC DROPOUT
-    # ================================================================
-
-    mc_dropout = MCDropout3D(
-        model=model,
-        num_samples=MC_DROPOUT_SAMPLES,
+    check(
+        actual_geological_mode == BASELINE_GEOLOGICAL_MODE,
+        (
+            "Geological-mode mismatch: "
+            f"expected {BASELINE_GEOLOGICAL_MODE}, "
+            f"received {actual_geological_mode}"
+        )
     )
 
+    # --------------------------------------------------------------
+    # Verify finite input data.
+    # --------------------------------------------------------------
 
-    # ================================================================
-    # RUNTIME
-    # ================================================================
+    check(
+        torch.isfinite(corrupted).all().item(),
+        "Corrupted seismic cube contains NaN or Inf values."
+    )
 
-    if DEVICE.type == "cuda":
+    check(
+        torch.isfinite(target).all().item(),
+        "Target seismic cube contains NaN or Inf values."
+    )
 
-        torch.cuda.synchronize()
+    check(
+        torch.isfinite(mask).all().item(),
+        "Mask contains NaN or Inf values."
+    )
 
+    check(
+        torch.isfinite(velocity).all().item(),
+        "Velocity contains NaN or Inf values."
+    )
 
-    start_time = time.perf_counter()
+    # --------------------------------------------------------------
+    # Verify mask values.
+    # --------------------------------------------------------------
 
+    unique_mask_values = torch.unique(mask)
 
-    with torch.no_grad():
+    for value in unique_mask_values:
 
-        predictions = (
-            mc_dropout.predict(
-                input_batch
+        check(
+            float(value) in (0.0, 1.0),
+            (
+                "Mask contains an unexpected value: "
+                f"{float(value)}"
             )
         )
 
+    # --------------------------------------------------------------
+    # Identify observed and missing regions.
+    # --------------------------------------------------------------
 
-    if DEVICE.type == "cuda":
+    observed = mask == 1
 
-        torch.cuda.synchronize()
+    missing = mask == 0
 
+    observed_count = int(observed.sum().item())
 
-    runtime = (
-        time.perf_counter()
-        - start_time
+    missing_count = int(missing.sum().item())
+
+    # --------------------------------------------------------------
+    # Both regions must exist.
+    # --------------------------------------------------------------
+
+    check(
+        observed_count > 0,
+        "No observed samples exist in the test case."
     )
 
-
-    # ================================================================
-    # EXTRACT MC OUTPUTS
-    # ================================================================
-
-    reconstruction_samples = (
-        predictions[
-            "reconstruction_samples"
-        ]
+    check(
+        missing_count > 0,
+        "No missing samples exist in the test case."
     )
 
+    # --------------------------------------------------------------
+    # Verify corrupted input equals target at observed locations.
+    # --------------------------------------------------------------
 
-    travel_time_samples = (
-        predictions[
-            "travel_time_samples"
-        ]
+    observed_difference = torch.abs(
+        corrupted[observed] -
+        target[observed]
     )
 
-
-    log_variance_samples = (
-        predictions[
-            "log_variance_samples"
-        ]
+    check(
+        torch.max(observed_difference).item()
+        <= OBSERVED_PRESERVATION_TOLERANCE,
+        (
+            "Corrupted input does not preserve the target "
+            "at observed locations."
+        )
     )
 
+    # --------------------------------------------------------------
+    # Move tensors to the selected device.
+    # --------------------------------------------------------------
 
-    # ================================================================
-    # CREATE UNCERTAINTY ESTIMATOR
-    # ================================================================
+    corrupted_device = corrupted.to(device)
+
+    target_device = target.to(device)
+
+    mask_device = mask.to(device)
+
+    velocity_device = velocity.to(device)
+
+    # --------------------------------------------------------------
+    # Add batch dimension.
     #
-    # EXACTLY AS IN THE SUCCESSFUL COLAB RUN.
-    # ================================================================
+    # [C,D,H,W]
+    #
+    # becomes
+    #
+    # [B,C,D,H,W]
+    # --------------------------------------------------------------
+
+    corrupted_batch = corrupted_device.unsqueeze(0)
+
+    target_batch = target_device.unsqueeze(0)
+
+    mask_batch = mask_device.unsqueeze(0)
+
+    velocity_batch = velocity_device.unsqueeze(0)
+
+    # --------------------------------------------------------------
+    # Verify final model input shape.
+    # --------------------------------------------------------------
+
+    check(
+        corrupted_batch.ndim == 5,
+        (
+            "Proposed model input must be 5-dimensional "
+            "[B,C,D,H,W]."
+        )
+    )
+
+    # --------------------------------------------------------------
+    # Create MC-Dropout predictor.
+    # --------------------------------------------------------------
+
+    mc_predictor = MCDropout3D(
+        model,
+        num_samples=MC_DROPOUT_SAMPLES,
+    )
+
+    # --------------------------------------------------------------
+    # Run Monte Carlo inference.
+    # --------------------------------------------------------------
+
+    with torch.no_grad():
+
+        (
+            reconstruction_samples,
+            travel_time_samples,
+            log_variance_samples,
+        ) = mc_predictor(
+            corrupted_batch,
+            mask_batch,
+            velocity_batch,
+        )
+
+    # --------------------------------------------------------------
+    # Verify MC-Dropout sample count.
+    # --------------------------------------------------------------
+
+    check(
+        reconstruction_samples.shape[0]
+        == MC_DROPOUT_SAMPLES,
+        (
+            "Incorrect number of reconstruction samples: "
+            f"{reconstruction_samples.shape[0]}; "
+            f"expected {MC_DROPOUT_SAMPLES}"
+        )
+    )
+
+    check(
+        log_variance_samples.shape[0]
+        == MC_DROPOUT_SAMPLES,
+        (
+            "Incorrect number of log-variance samples: "
+            f"{log_variance_samples.shape[0]}; "
+            f"expected {MC_DROPOUT_SAMPLES}"
+        )
+    )
+
+    # --------------------------------------------------------------
+    # Verify reconstruction sample shape.
+    # --------------------------------------------------------------
+
+    expected_batch_shape = (
+        1,
+        1,
+        BASELINE_CUBE_SIZE[0],
+        BASELINE_CUBE_SIZE[1],
+        BASELINE_CUBE_SIZE[2],
+    )
+
+    check(
+        tuple(reconstruction_samples.shape[1:])
+        == expected_batch_shape,
+        (
+            "Unexpected reconstruction-sample shape: "
+            f"{tuple(reconstruction_samples.shape)}"
+        )
+    )
+
+    # --------------------------------------------------------------
+    # Construct predictive uncertainty estimator.
+    # --------------------------------------------------------------
 
     uncertainty_estimator = (
         PredictiveUncertaintyEstimator()
     )
 
+    # --------------------------------------------------------------
+    # Calculate aleatoric uncertainty.
+    # --------------------------------------------------------------
 
-    # ================================================================
-    # ALEATORIC VARIANCE
-    # ================================================================
+    with torch.no_grad():
 
-    aleatoric_variance = (
-        uncertainty_estimator.aleatoric_variance(
-            log_variance_samples
+        aleatoric_variance = (
+            uncertainty_estimator.aleatoric_variance(
+                log_variance_samples
+            )
         )
-    )
 
+    # --------------------------------------------------------------
+    # Calculate epistemic uncertainty.
+    # --------------------------------------------------------------
 
-    # ================================================================
-    # EPISTEMIC VARIANCE
-    # ================================================================
+    with torch.no_grad():
 
-    epistemic_variance = (
-        uncertainty_estimator.epistemic_variance(
-            reconstruction_samples
+        epistemic_variance = (
+            uncertainty_estimator.epistemic_variance(
+                reconstruction_samples
+            )
         )
-    )
 
-
-    # ================================================================
-    # PREDICTIVE VARIANCE
-    # ================================================================
+    # --------------------------------------------------------------
+    # Calculate predictive uncertainty.
     #
     # IMPORTANT:
-    #
-    # We deliberately use the ORIGINAL validated Colab call:
-    #
-    # predictive_variance =
-    #     estimator.predictive_variance(
-    #         log_variance_samples,
-    #         reconstruction_samples
-    #     )
-    #
-    # ================================================================
+    # This follows the uncertainty calculation already validated
+    # in the project's proposed-model implementation.
+    # --------------------------------------------------------------
 
-    predictive_variance = (
-        uncertainty_estimator.predictive_variance(
-            log_variance_samples,
-            reconstruction_samples
+    with torch.no_grad():
+
+        predictive_variance = (
+            uncertainty_estimator.predictive_variance(
+                log_variance_samples,
+                reconstruction_samples,
+            )
         )
-    )
 
-
-    # ================================================================
-    # PREDICTIVE STANDARD DEVIATION
-    # ================================================================
+    # --------------------------------------------------------------
+    # Convert predictive variance to predictive standard deviation.
+    # --------------------------------------------------------------
 
     predictive_std = torch.sqrt(
         torch.clamp(
             predictive_variance,
-            min=0.0
+            min=0.0,
         )
     )
 
+    # --------------------------------------------------------------
+    # Mean reconstruction across MC samples.
+    # --------------------------------------------------------------
 
-    # ================================================================
-    # RECONSTRUCTION MEAN
-    # ================================================================
+    reconstruction = (
+        reconstruction_samples.mean(dim=0)
+    )
 
-    reconstruction_mean = (
-        reconstruction_samples.mean(
-            dim=0
+    # --------------------------------------------------------------
+    # Data-consistency projection.
+    #
+    # Observed seismic samples are restored exactly from the
+    # corrupted input.
+    # --------------------------------------------------------------
+
+    reconstruction = torch.where(
+        mask_batch == 1,
+        corrupted_batch,
+        reconstruction,
+    )
+
+    # --------------------------------------------------------------
+    # Validate reconstruction shape.
+    # --------------------------------------------------------------
+
+    check(
+        tuple(reconstruction.shape)
+        == expected_batch_shape,
+        (
+            "Final reconstruction has incorrect shape: "
+            f"{tuple(reconstruction.shape)}"
         )
     )
 
+    # --------------------------------------------------------------
+    # Validate finite reconstruction.
+    # --------------------------------------------------------------
 
-    # ================================================================
-    # DATA-CONSISTENCY PROJECTION
-    # ================================================================
-    #
-    # EXACTLY AS IN THE SUCCESSFUL COLAB RUN:
-    #
-    # observed reconstruction =
-    #     original observed input
-    #
-    # ================================================================
-
-    reconstruction_mean = (
-        reconstruction_mean.clone()
+    check(
+        torch.isfinite(reconstruction).all().item(),
+        "Final reconstruction contains NaN or Inf values."
     )
 
+    # --------------------------------------------------------------
+    # Validate uncertainty tensors.
+    # --------------------------------------------------------------
 
-    reconstruction_mean[
-        mask_batch == 1
-    ] = input_batch[
-        mask_batch == 1
-    ]
+    check(
+        torch.isfinite(aleatoric_variance).all().item(),
+        "Aleatoric variance contains NaN or Inf values."
+    )
 
+    check(
+        torch.isfinite(epistemic_variance).all().item(),
+        "Epistemic variance contains NaN or Inf values."
+    )
 
-    # ================================================================
-    # SHAPE CHECKS
-    # ================================================================
+    check(
+        torch.isfinite(predictive_variance).all().item(),
+        "Predictive variance contains NaN or Inf values."
+    )
 
-    if reconstruction_mean.shape != expected_shape:
+    check(
+        torch.isfinite(predictive_std).all().item(),
+        "Predictive standard deviation contains NaN or Inf values."
+    )
 
-        raise RuntimeError(
-            "Reconstruction shape mismatch."
+    # --------------------------------------------------------------
+    # Variances must not be negative.
+    # --------------------------------------------------------------
+
+    check(
+        torch.min(aleatoric_variance).item() >= -1e-8,
+        "Aleatoric variance contains negative values."
+    )
+
+    check(
+        torch.min(epistemic_variance).item() >= -1e-8,
+        "Epistemic variance contains negative values."
+    )
+
+    check(
+        torch.min(predictive_variance).item() >= -1e-8,
+        "Predictive variance contains negative values."
+    )
+
+    # --------------------------------------------------------------
+    # Predictive standard deviation must be non-negative.
+    # --------------------------------------------------------------
+
+    check(
+        torch.min(predictive_std).item() >= -1e-8,
+        "Predictive standard deviation contains negative values."
+    )
+
+    # --------------------------------------------------------------
+    # Check observed-data preservation after reconstruction.
+    # --------------------------------------------------------------
+
+    observed_reconstruction_error = torch.abs(
+        reconstruction[mask_batch == 1]
+        -
+        corrupted_batch[mask_batch == 1]
+    )
+
+    max_observed_error = (
+        torch.max(observed_reconstruction_error)
+        .item()
+    )
+
+    check(
+        max_observed_error
+        <= OBSERVED_PRESERVATION_TOLERANCE,
+        (
+            "Observed-data preservation failed. "
+            f"Maximum error = {max_observed_error:.12e}; "
+            f"allowed tolerance = "
+            f"{OBSERVED_PRESERVATION_TOLERANCE:.12e}"
         )
+    )
 
+    # --------------------------------------------------------------
+    # Calculate reconstruction metrics.
+    # --------------------------------------------------------------
 
-    if aleatoric_variance.shape != expected_shape:
+    reconstruction_cpu = reconstruction.detach().cpu()
 
-        raise RuntimeError(
-            "Aleatoric variance shape mismatch."
-        )
+    target_cpu = target_batch.detach().cpu()
 
+    mae_value = mae(
+        reconstruction_cpu,
+        target_cpu,
+    )
 
-    if epistemic_variance.shape != expected_shape:
+    rmse_value = rmse(
+        reconstruction_cpu,
+        target_cpu,
+    )
 
-        raise RuntimeError(
-            "Epistemic variance shape mismatch."
-        )
+    psnr_value = psnr(
+        reconstruction_cpu,
+        target_cpu,
+    )
 
+    snr_value = snr(
+        reconstruction_cpu,
+        target_cpu,
+    )
 
-    if predictive_variance.shape != expected_shape:
+    ssim_value = ssim(
+        reconstruction_cpu,
+        target_cpu,
+    )
 
-        raise RuntimeError(
-            "Predictive variance shape mismatch."
-        )
+    # --------------------------------------------------------------
+    # Calculate missing-region metrics.
+    # --------------------------------------------------------------
 
+    missing_mask_batch = (
+        mask_batch == 0
+    )
 
-    if predictive_std.shape != expected_shape:
+    missing_difference = torch.abs(
+        reconstruction[missing_mask_batch]
+        -
+        target_batch[missing_mask_batch]
+    )
 
-        raise RuntimeError(
-            "Predictive standard deviation shape mismatch."
-        )
+    missing_mae_value = (
+        missing_difference.mean().item()
+    )
 
-
-    # ================================================================
-    # FINITE-VALUE CHECKS
-    # ================================================================
-
-    for name, tensor in {
-
-        "reconstruction":
-            reconstruction_mean,
-
-        "aleatoric_variance":
-            aleatoric_variance,
-
-        "epistemic_variance":
-            epistemic_variance,
-
-        "predictive_variance":
-            predictive_variance,
-
-        "predictive_std":
-            predictive_std,
-
-    }.items():
-
-        if not torch.isfinite(
-            tensor
-        ).all():
-
-            raise RuntimeError(
-                f"{name} contains NaN or Inf."
-            )
-
-
-    # ================================================================
-    # NON-NEGATIVE VARIANCE CHECKS
-    # ================================================================
-
-    if not (
-        aleatoric_variance >= 0
-    ).all():
-
-        raise RuntimeError(
-            "Aleatoric variance contains "
-            "negative values."
-        )
-
-
-    if not (
-        epistemic_variance >= 0
-    ).all():
-
-        raise RuntimeError(
-            "Epistemic variance contains "
-            "negative values."
-        )
-
-
-    if not (
-        predictive_variance >= 0
-    ).all():
-
-        raise RuntimeError(
-            "Predictive variance contains "
-            "negative values."
-        )
-
-
-    if not (
-        predictive_std >= 0
-    ).all():
-
-        raise RuntimeError(
-            "Predictive standard deviation "
-            "contains negative values."
-        )
-
-
-    # ================================================================
-    # OBSERVED DATA PRESERVATION
-    # ================================================================
-
-    observed_difference = torch.max(
-        torch.abs(
-            reconstruction_mean[
-                mask_batch == 1
-            ]
-            - input_batch[
-                mask_batch == 1
-            ]
-        )
-    ).item()
-
-
-    if observed_difference > 1e-6:
-
-        raise RuntimeError(
-            "Observed samples were not preserved."
-        )
-
-
-    # ================================================================
-    # RECONSTRUCTION METRICS
-    # ================================================================
-
-    metric_mae = mae(
-        reconstruction_mean,
-        target_batch
-    ).item()
-
-
-    metric_rmse = rmse(
-        reconstruction_mean,
-        target_batch
-    ).item()
-
-
-    metric_psnr = psnr(
-        reconstruction_mean,
-        target_batch
-    ).item()
-
-
-    metric_snr = snr(
-        reconstruction_mean,
-        target_batch
-    ).item()
-
-
-    metric_ssim = ssim(
-        reconstruction_mean,
-        target_batch
-    ).item()
-
-
-    # ================================================================
-    # MISSING-ONLY MAE
-    # ================================================================
-
-    missing_mae = torch.mean(
-        torch.abs(
-            reconstruction_mean[
-                mask_batch == 0
-            ]
-            - target_batch[
-                mask_batch == 0
-            ]
-        )
-    ).item()
-
-
-    # ================================================================
-    # MISSING-ONLY RMSE
-    # ================================================================
-
-    missing_rmse = torch.sqrt(
+    missing_rmse_value = torch.sqrt(
         torch.mean(
             (
-                reconstruction_mean[
-                    mask_batch == 0
-                ]
-                - target_batch[
-                    mask_batch == 0
-                ]
+                reconstruction[missing_mask_batch]
+                -
+                target_batch[missing_mask_batch]
             ) ** 2
         )
     ).item()
 
+    # --------------------------------------------------------------
+    # Calculate uncertainty summaries.
+    # --------------------------------------------------------------
 
-    # ================================================================
-    # UNCERTAINTY STATISTICS
-    # ================================================================
-
-    mean_aleatoric = (
-        aleatoric_variance.mean()
-        .item()
+    predictive_std_mean = (
+        predictive_std.mean().item()
     )
 
-
-    mean_epistemic = (
-        epistemic_variance.mean()
-        .item()
-    )
-
-
-    mean_predictive = (
-        predictive_variance.mean()
-        .item()
-    )
-
-
-    mean_predictive_std = (
-        predictive_std.mean()
-        .item()
-    )
-
-
-    missing_predictive_std = (
+    predictive_std_missing_mean = (
         predictive_std[
-            mask_batch == 0
+            missing_mask_batch
         ]
         .mean()
         .item()
     )
 
+    aleatoric_variance_mean = (
+        aleatoric_variance.mean().item()
+    )
 
-    # ================================================================
-    # RETURN CASE RESULT
-    # ================================================================
+    epistemic_variance_mean = (
+        epistemic_variance.mean().item()
+    )
+
+    predictive_variance_mean = (
+        predictive_variance.mean().item()
+    )
+
+    # --------------------------------------------------------------
+    # Verify that the missing-region reconstruction actually differs
+    # from the corrupted input where missing values exist.
+    #
+    # This prevents a trivial "do nothing" reconstruction from
+    # passing the test.
+    # --------------------------------------------------------------
+
+    missing_input_difference = torch.abs(
+        reconstruction[missing_mask_batch]
+        -
+        corrupted_batch[missing_mask_batch]
+    )
+
+    missing_changed_count = int(
+        (
+            missing_input_difference > 1e-8
+        ).sum().item()
+    )
+
+    check(
+        missing_changed_count > 0,
+        (
+            "The proposed model did not modify any missing-region "
+            "samples."
+        )
+    )
+
+    # --------------------------------------------------------------
+    # Return diagnostic information.
+    # --------------------------------------------------------------
 
     return {
-
-        "missing_rate":
-            missing_rate,
-
-        "missing_percentage":
-            missing_rate * 100.0,
-
-        "mask_mode":
-            mask_mode,
-
-        "geological_mode":
-            geological_mode,
-
-        "seed":
-            seed,
-
-        "cube_depth":
-            CUBE_SIZE[0],
-
-        "cube_height":
-            CUBE_SIZE[1],
-
-        "cube_width":
-            CUBE_SIZE[2],
-
-        "observed_voxels":
-            observed_voxels,
-
-        "missing_voxels":
-            missing_voxels,
-
-        "mc_samples":
-            MC_DROPOUT_SAMPLES,
-
-        "observed_difference":
-            observed_difference,
-
-        "mae":
-            metric_mae,
-
-        "rmse":
-            metric_rmse,
-
-        "psnr_db":
-            metric_psnr,
-
-        "snr_db":
-            metric_snr,
-
-        "ssim":
-            metric_ssim,
-
-        "missing_mae":
-            missing_mae,
-
-        "missing_rmse":
-            missing_rmse,
-
-        "mean_aleatoric_variance":
-            mean_aleatoric,
-
-        "mean_epistemic_variance":
-            mean_epistemic,
-
-        "mean_predictive_variance":
-            mean_predictive,
-
-        "mean_predictive_std":
-            mean_predictive_std,
-
-        "missing_predictive_std":
-            missing_predictive_std,
-
-        "runtime_seconds":
-            runtime,
-
-        "status":
-            "SUCCESS",
+        "mae": float(mae_value),
+        "rmse": float(rmse_value),
+        "psnr": float(psnr_value),
+        "snr": float(snr_value),
+        "ssim": float(ssim_value),
+        "missing_mae": float(missing_mae_value),
+        "missing_rmse": float(missing_rmse_value),
+        "observed_count": observed_count,
+        "missing_count": missing_count,
+        "max_observed_error": max_observed_error,
+        "aleatoric_variance_mean": (
+            aleatoric_variance_mean
+        ),
+        "epistemic_variance_mean": (
+            epistemic_variance_mean
+        ),
+        "predictive_variance_mean": (
+            predictive_variance_mean
+        ),
+        "predictive_std_mean": (
+            predictive_std_mean
+        ),
+        "predictive_std_missing_mean": (
+            predictive_std_missing_mean
+        ),
     }
 
 
-# =====================================================================
-# 14. MAIN
-# =====================================================================
+# ==================================================================
+# 7. REPRODUCIBILITY TEST
+# ==================================================================
+
+def test_reproducibility(model, device):
+    """
+    Verify that resetting the random seed produces the same
+    synthetic input and reconstruction.
+    """
+
+    # --------------------------------------------------------------
+    # First run.
+    # --------------------------------------------------------------
+
+    set_seed(BASELINE_SEED)
+
+    dataset_1 = SyntheticSeismicDataset(
+        num_samples=1,
+        cube_size=BASELINE_CUBE_SIZE,
+        missing_probability=BASELINE_MISSING_RATE,
+        geological_mode=BASELINE_GEOLOGICAL_MODE,
+        mask_mode=BASELINE_MASK_MODE,
+        seed=BASELINE_SEED,
+    )
+
+    sample_1 = dataset_1[0]
+
+    corrupted_1 = sample_1[0].to(device)
+    target_1 = sample_1[1].to(device)
+    mask_1 = sample_1[2].to(device)
+    velocity_1 = sample_1[3].to(device)
+
+    input_1 = corrupted_1.unsqueeze(0)
+    mask_batch_1 = mask_1.unsqueeze(0)
+    velocity_batch_1 = velocity_1.unsqueeze(0)
+
+    mc_predictor_1 = MCDropout3D(
+        model,
+        num_samples=MC_DROPOUT_SAMPLES,
+    )
+
+    with torch.no_grad():
+
+        (
+            reconstruction_samples_1,
+            _,
+            _,
+        ) = mc_predictor_1(
+            input_1,
+            mask_batch_1,
+            velocity_batch_1,
+        )
+
+    reconstruction_1 = (
+        reconstruction_samples_1.mean(dim=0)
+    )
+
+    reconstruction_1 = torch.where(
+        mask_batch_1 == 1,
+        input_1,
+        reconstruction_1,
+    )
+
+    # --------------------------------------------------------------
+    # Second run.
+    # --------------------------------------------------------------
+
+    set_seed(BASELINE_SEED)
+
+    dataset_2 = SyntheticSeismicDataset(
+        num_samples=1,
+        cube_size=BASELINE_CUBE_SIZE,
+        missing_probability=BASELINE_MISSING_RATE,
+        geological_mode=BASELINE_GEOLOGICAL_MODE,
+        mask_mode=BASELINE_MASK_MODE,
+        seed=BASELINE_SEED,
+    )
+
+    sample_2 = dataset_2[0]
+
+    corrupted_2 = sample_2[0].to(device)
+    target_2 = sample_2[1].to(device)
+    mask_2 = sample_2[2].to(device)
+    velocity_2 = sample_2[3].to(device)
+
+    input_2 = corrupted_2.unsqueeze(0)
+    mask_batch_2 = mask_2.unsqueeze(0)
+    velocity_batch_2 = velocity_2.unsqueeze(0)
+
+    mc_predictor_2 = MCDropout3D(
+        model,
+        num_samples=MC_DROPOUT_SAMPLES,
+    )
+
+    with torch.no_grad():
+
+        (
+            reconstruction_samples_2,
+            _,
+            _,
+        ) = mc_predictor_2(
+            input_2,
+            mask_batch_2,
+            velocity_batch_2,
+        )
+
+    reconstruction_2 = (
+        reconstruction_samples_2.mean(dim=0)
+    )
+
+    reconstruction_2 = torch.where(
+        mask_batch_2 == 1,
+        input_2,
+        reconstruction_2,
+    )
+
+    # --------------------------------------------------------------
+    # Compare generated input.
+    # --------------------------------------------------------------
+
+    check(
+        torch.equal(
+            corrupted_1.cpu(),
+            corrupted_2.cpu(),
+        ),
+        "Synthetic dataset is not reproducible."
+    )
+
+    # --------------------------------------------------------------
+    # Compare target.
+    # --------------------------------------------------------------
+
+    check(
+        torch.equal(
+            target_1.cpu(),
+            target_2.cpu(),
+        ),
+        "Synthetic target is not reproducible."
+    )
+
+    # --------------------------------------------------------------
+    # Compare masks.
+    # --------------------------------------------------------------
+
+    check(
+        torch.equal(
+            mask_1.cpu(),
+            mask_2.cpu(),
+        ),
+        "Synthetic mask is not reproducible."
+    )
+
+    # --------------------------------------------------------------
+    # Compare velocity.
+    # --------------------------------------------------------------
+
+    check(
+        torch.equal(
+            velocity_1.cpu(),
+            velocity_2.cpu(),
+        ),
+        "Synthetic velocity model is not reproducible."
+    )
+
+    # --------------------------------------------------------------
+    # Compare model reconstruction.
+    # --------------------------------------------------------------
+
+    reconstruction_difference = torch.max(
+        torch.abs(
+            reconstruction_1 -
+            reconstruction_2
+        )
+    ).item()
+
+    check(
+        reconstruction_difference
+        <= 1e-6,
+        (
+            "Proposed-model reconstruction is not reproducible. "
+            f"Maximum difference = "
+            f"{reconstruction_difference:.12e}"
+        )
+    )
+
+
+# ==================================================================
+# 8. MAIN TEST
+# ==================================================================
 
 def main():
+    """
+    Execute the complete focused proposed-model test.
+    """
 
-    # ================================================================
-    # HEADER
-    # ================================================================
+    print("=" * 70)
+
+    print(
+        "FOCUSED TEST — PROPOSED MODEL"
+    )
+
+    print("=" * 70)
 
     print()
-    print("=" * 80)
-    print(
-        "PROPOSED MODEL CONTROLLED MATRIX"
-    )
-    print("=" * 80)
 
+    # --------------------------------------------------------------
+    # Display test configuration.
+    # --------------------------------------------------------------
+
+    print(
+        f"Cube size:              {BASELINE_CUBE_SIZE}"
+    )
+
+    print(
+        f"Missing rate:           {BASELINE_MISSING_RATE}"
+    )
+
+    print(
+        f"Geological mode:        {BASELINE_GEOLOGICAL_MODE}"
+    )
+
+    print(
+        f"Mask mode:              {BASELINE_MASK_MODE}"
+    )
+
+    print(
+        f"Seed:                    {BASELINE_SEED}"
+    )
+
+    print(
+        f"MC-Dropout samples:     {MC_DROPOUT_SAMPLES}"
+    )
+
+    # --------------------------------------------------------------
+    # Resolve device.
+    # --------------------------------------------------------------
+
+    device = resolve_device()
+
+    print(
+        f"Device:                  {device}"
+    )
 
     print()
-    print("Configuration")
-    print("-------------")
 
+    # --------------------------------------------------------------
+    # Set deterministic seed.
+    # --------------------------------------------------------------
 
-    print(
-        f"Device              : {DEVICE}"
-    )
+    set_seed(BASELINE_SEED)
 
-
-    print(
-        f"Cube size           : {CUBE_SIZE}"
-    )
-
+    # --------------------------------------------------------------
+    # Load trained proposed model.
+    # --------------------------------------------------------------
 
     print(
-        f"Missing rates       : {MISSING_RATES}"
+        "Loading proposed-model checkpoint..."
     )
 
+    model = load_proposed_model(device)
 
     print(
-        f"Missing mechanisms  : {len(MASK_MODES)}"
+        "Checkpoint loaded successfully."
     )
-
-
-    print(
-        f"Geological modes    : {len(GEOLOGICAL_MODES)}"
-    )
-
-
-    print(
-        f"Seeds               : {SEEDS}"
-    )
-
-
-    print(
-        f"MC samples          : "
-        f"{MC_DROPOUT_SAMPLES}"
-    )
-
-
-    print(
-        f"Expected cases      : "
-        f"{EXPECTED_CASES}"
-    )
-
 
     print()
-    print("Checkpoint")
-    print("----------")
+
+    # --------------------------------------------------------------
+    # Run reconstruction and uncertainty validation.
+    # --------------------------------------------------------------
 
     print(
-        CHECKPOINT
+        "Running focused proposed-model case..."
     )
 
-
-    # ================================================================
-    # CHECKPOINT VALIDATION
-    # ================================================================
-
-    if not CHECKPOINT.is_file():
-
-        raise FileNotFoundError(
-            "\nCheckpoint not found:\n"
-            f"{CHECKPOINT}"
-        )
-
+    results = run_proposed_model_case(
+        model,
+        device,
+    )
 
     print(
-        "Checkpoint exists   : PASS"
+        "Proposed-model reconstruction passed."
     )
-
-
-    # ================================================================
-    # LOAD MODEL ONCE
-    # ================================================================
 
     print()
-    print("=" * 80)
-    print(
-        "LOADING PROPOSED MODEL"
-    )
-    print("=" * 80)
 
-
-    model = load_model()
-
+    # --------------------------------------------------------------
+    # Reproducibility validation.
+    # --------------------------------------------------------------
 
     print(
-        "Model loading       : PASS"
+        "Testing reproducibility..."
     )
 
-
-    # ================================================================
-    # RESULTS
-    # ================================================================
-
-    results = []
-
-
-    # ================================================================
-    # CASE COUNTER
-    # ================================================================
-
-    case_number = 0
-
-
-    # ================================================================
-    # MATRIX LOOP
-    # ================================================================
-
-    for missing_rate in MISSING_RATES:
-
-        for mask_mode in MASK_MODES:
-
-            for geological_mode in GEOLOGICAL_MODES:
-
-                for seed in SEEDS:
-
-                    case_number += 1
-
-
-                    print()
-                    print("-" * 80)
-
-
-                    print(
-                        f"CASE "
-                        f"{case_number}/"
-                        f"{EXPECTED_CASES}"
-                    )
-
-
-                    print(
-                        f"Missing rate      : "
-                        f"{missing_rate:.0%}"
-                    )
-
-
-                    print(
-                        f"Missing mechanism : "
-                        f"{mask_mode}"
-                    )
-
-
-                    print(
-                        f"Geological mode   : "
-                        f"{geological_mode}"
-                    )
-
-
-                    print(
-                        f"Seed              : "
-                        f"{seed}"
-                    )
-
-
-                    # =================================================
-                    # RUN CASE
-                    # =================================================
-
-                    case_start = (
-                        time.perf_counter()
-                    )
-
-
-                    try:
-
-                        result = run_single_case(
-                            model=model,
-                            missing_rate=missing_rate,
-                            mask_mode=mask_mode,
-                            geological_mode=geological_mode,
-                            seed=seed,
-                        )
-
-
-                        result[
-                            "case_number"
-                        ] = case_number
-
-
-                        results.append(
-                            result
-                        )
-
-
-                        case_runtime = (
-                            time.perf_counter()
-                            - case_start
-                        )
-
-
-                        print()
-                        print(
-                            "Status            : "
-                            "SUCCESS"
-                        )
-
-
-                        print(
-                            f"Missing MAE       : "
-                            f"{result['missing_mae']:.6f}"
-                        )
-
-
-                        print(
-                            f"MAE               : "
-                            f"{result['mae']:.6f}"
-                        )
-
-
-                        print(
-                            f"RMSE              : "
-                            f"{result['rmse']:.6f}"
-                        )
-
-
-                        print(
-                            f"PSNR              : "
-                            f"{result['psnr_db']:.6f} dB"
-                        )
-
-
-                        print(
-                            f"SNR               : "
-                            f"{result['snr_db']:.6f} dB"
-                        )
-
-
-                        print(
-                            f"SSIM              : "
-                            f"{result['ssim']:.6f}"
-                        )
-
-
-                        print(
-                            f"Predictive std    : "
-                            f"{result['mean_predictive_std']:.6e}"
-                        )
-
-
-                        print(
-                            f"Runtime           : "
-                            f"{case_runtime:.4f} s"
-                        )
-
-
-                    except Exception as error:
-
-                        # ------------------------------------------------
-                        # Record failure without stopping the complete
-                        # experiment.
-                        # ------------------------------------------------
-
-                        case_runtime = (
-                            time.perf_counter()
-                            - case_start
-                        )
-
-
-                        failed_result = {
-
-                            "case_number":
-                                case_number,
-
-                            "missing_rate":
-                                missing_rate,
-
-                            "missing_percentage":
-                                missing_rate * 100.0,
-
-                            "mask_mode":
-                                mask_mode,
-
-                            "geological_mode":
-                                geological_mode,
-
-                            "seed":
-                                seed,
-
-                            "cube_depth":
-                                CUBE_SIZE[0],
-
-                            "cube_height":
-                                CUBE_SIZE[1],
-
-                            "cube_width":
-                                CUBE_SIZE[2],
-
-                            "status":
-                                "FAILED",
-
-                            "error":
-                                str(error),
-
-                            "runtime_seconds":
-                                case_runtime,
-                        }
-
-
-                        results.append(
-                            failed_result
-                        )
-
-
-                        print()
-                        print(
-                            "Status            : "
-                            "FAILED"
-                        )
-
-
-                        print(
-                            f"Error             : "
-                            f"{error}"
-                        )
-
-
-                    # =================================================
-                    # SAVE PROGRESS AFTER EVERY CASE
-                    # =================================================
-
-                    progress_dataframe = (
-                        pd.DataFrame(
-                            results
-                        )
-                    )
-
-
-                    progress_dataframe.to_csv(
-                        RAW_RESULTS_FILE,
-                        index=False,
-                    )
-
-
-    # ================================================================
-    # FINAL RAW RESULTS
-    # ================================================================
-
-    results_dataframe = (
-        pd.DataFrame(
-            results
-        )
+    test_reproducibility(
+        model,
+        device,
     )
 
-
-    results_dataframe.to_csv(
-        RAW_RESULTS_FILE,
-        index=False,
+    print(
+        "Reproducibility passed."
     )
-
-
-    # ================================================================
-    # SUCCESS / FAILURE COUNTS
-    # ================================================================
-
-    successful_cases = int(
-        (
-            results_dataframe[
-                "status"
-            ]
-            == "SUCCESS"
-        ).sum()
-    )
-
-
-    failed_cases = int(
-        (
-            results_dataframe[
-                "status"
-            ]
-            == "FAILED"
-        ).sum()
-    )
-
-
-    # ================================================================
-    # SUMMARY
-    # ================================================================
-
-    successful_results = (
-        results_dataframe[
-            results_dataframe[
-                "status"
-            ]
-            == "SUCCESS"
-        ]
-        .copy()
-    )
-
-
-    if len(successful_results) > 0:
-
-        summary_dataframe = (
-            successful_results
-            .groupby(
-                [
-                    "missing_rate",
-                    "missing_percentage",
-                    "mask_mode",
-                    "geological_mode",
-                ],
-                as_index=False,
-            )
-            .agg(
-
-                seed_count=(
-                    "seed",
-                    "count"
-                ),
-
-                mae_mean=(
-                    "mae",
-                    "mean"
-                ),
-
-                mae_std=(
-                    "mae",
-                    "std"
-                ),
-
-                rmse_mean=(
-                    "rmse",
-                    "mean"
-                ),
-
-                rmse_std=(
-                    "rmse",
-                    "std"
-                ),
-
-                psnr_mean=(
-                    "psnr_db",
-                    "mean"
-                ),
-
-                psnr_std=(
-                    "psnr_db",
-                    "std"
-                ),
-
-                snr_mean=(
-                    "snr_db",
-                    "mean"
-                ),
-
-                snr_std=(
-                    "snr_db",
-                    "std"
-                ),
-
-                ssim_mean=(
-                    "ssim",
-                    "mean"
-                ),
-
-                ssim_std=(
-                    "ssim",
-                    "std"
-                ),
-
-                missing_mae_mean=(
-                    "missing_mae",
-                    "mean"
-                ),
-
-                missing_mae_std=(
-                    "missing_mae",
-                    "std"
-                ),
-
-                missing_rmse_mean=(
-                    "missing_rmse",
-                    "mean"
-                ),
-
-                missing_rmse_std=(
-                    "missing_rmse",
-                    "std"
-                ),
-
-                aleatoric_variance_mean=(
-                    "mean_aleatoric_variance",
-                    "mean"
-                ),
-
-                epistemic_variance_mean=(
-                    "mean_epistemic_variance",
-                    "mean"
-                ),
-
-                predictive_variance_mean=(
-                    "mean_predictive_variance",
-                    "mean"
-                ),
-
-                predictive_std_mean=(
-                    "mean_predictive_std",
-                    "mean"
-                ),
-
-                missing_predictive_std_mean=(
-                    "missing_predictive_std",
-                    "mean"
-                ),
-
-                runtime_mean=(
-                    "runtime_seconds",
-                    "mean"
-                ),
-
-                runtime_std=(
-                    "runtime_seconds",
-                    "std"
-                ),
-            )
-        )
-
-
-    else:
-
-        summary_dataframe = (
-            pd.DataFrame()
-        )
-
-
-    # ================================================================
-    # SAVE SUMMARY
-    # ================================================================
-
-    summary_dataframe.to_csv(
-        SUMMARY_RESULTS_FILE,
-        index=False,
-    )
-
-
-    # ================================================================
-    # FINAL REPORT
-    # ================================================================
 
     print()
-    print("=" * 80)
-    print(
-        "PROPOSED MODEL CONTROLLED MATRIX COMPLETE"
-    )
-    print("=" * 80)
 
+    # --------------------------------------------------------------
+    # Display results.
+    # --------------------------------------------------------------
+
+    print("-" * 70)
+
+    print(
+        "RECONSTRUCTION RESULTS"
+    )
+
+    print("-" * 70)
+
+    print(
+        f"MAE:                         "
+        f"{results['mae']:.6f}"
+    )
+
+    print(
+        f"RMSE:                        "
+        f"{results['rmse']:.6f}"
+    )
+
+    print(
+        f"PSNR:                        "
+        f"{results['psnr']:.6f}"
+    )
+
+    print(
+        f"SNR:                         "
+        f"{results['snr']:.6f}"
+    )
+
+    print(
+        f"SSIM:                        "
+        f"{results['ssim']:.6f}"
+    )
+
+    print(
+        f"Missing-region MAE:         "
+        f"{results['missing_mae']:.6f}"
+    )
+
+    print(
+        f"Missing-region RMSE:        "
+        f"{results['missing_rmse']:.6f}"
+    )
 
     print()
-    print(
-        f"Expected cases     : "
-        f"{EXPECTED_CASES}"
-    )
 
+    print("-" * 70)
 
     print(
-        f"Completed cases    : "
-        f"{len(results_dataframe)}"
+        "UNCERTAINTY RESULTS"
     )
 
+    print("-" * 70)
 
     print(
-        f"Successful cases   : "
-        f"{successful_cases}"
+        f"Mean aleatoric variance:     "
+        f"{results['aleatoric_variance_mean']:.6f}"
     )
-
 
     print(
-        f"Failed cases       : "
-        f"{failed_cases}"
+        f"Mean epistemic variance:     "
+        f"{results['epistemic_variance_mean']:.6f}"
     )
 
+    print(
+        f"Mean predictive variance:    "
+        f"{results['predictive_variance_mean']:.6f}"
+    )
+
+    print(
+        f"Mean predictive std:         "
+        f"{results['predictive_std_mean']:.6f}"
+    )
+
+    print(
+        f"Missing predictive std:     "
+        f"{results['predictive_std_missing_mean']:.6f}"
+    )
 
     print()
-    print(
-        "Raw results:"
-    )
 
+    print("-" * 70)
 
     print(
-        RAW_RESULTS_FILE
+        "DATA-CONSISTENCY RESULTS"
     )
 
+    print("-" * 70)
+
+    print(
+        f"Observed samples:            "
+        f"{results['observed_count']}"
+    )
+
+    print(
+        f"Missing samples:             "
+        f"{results['missing_count']}"
+    )
+
+    print(
+        f"Maximum observed error:      "
+        f"{results['max_observed_error']:.12e}"
+    )
 
     print()
+
+    # --------------------------------------------------------------
+    # Final PASS.
+    # --------------------------------------------------------------
+
+    print("=" * 70)
+
     print(
-        "Summary results:"
+        "PASS — Proposed-model focused test completed successfully."
     )
 
-
-    print(
-        SUMMARY_RESULTS_FILE
-    )
+    print("=" * 70)
 
 
-    # ================================================================
-    # OVERALL STATUS
-    # ================================================================
-
-    if (
-        len(results_dataframe)
-        == EXPECTED_CASES
-        and failed_cases == 0
-    ):
-
-        print()
-        print("=" * 80)
-        print(
-            "OVERALL STATUS: PASS"
-        )
-        print(
-            "All controlled proposed-model "
-            "experiments completed successfully."
-        )
-        print("=" * 80)
-
-
-    else:
-
-        print()
-        print("=" * 80)
-        print(
-            "OVERALL STATUS: REVIEW"
-        )
-        print(
-            "One or more controlled experiments "
-            "failed."
-        )
-        print("=" * 80)
-
-
-# =====================================================================
-# 15. SCRIPT ENTRY POINT
-# =====================================================================
+# ==================================================================
+# 9. PYTHON ENTRY POINT
+# ==================================================================
 
 if __name__ == "__main__":
 

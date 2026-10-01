@@ -1,115 +1,76 @@
 """
 ======================================================================
-CONTROLLED F-X PREDICTION EXPERIMENTAL MATRIX
+F-X PREDICTION BASELINE TEST
 ======================================================================
 
-Physics-Informed 3D Encoder-Decoder Framework with Predictive
-Uncertainty for Seismic Data Reconstruction in Complex Geological
-Settings
+Focused validation test for the classical f-x prediction
+seismic reconstruction baseline.
 
 Purpose
 -------
-PhD-standard controlled validation of the classical f-x prediction
-baseline across:
+This test validates ONLY the f-x prediction reconstruction
+implementation.
 
-    Geological complexity:
-        6 levels
+It does NOT execute the 750-case controlled experimental matrix.
 
-    Missing-data mechanisms:
-        5 mechanisms
+The complete controlled experimental matrix belongs to:
 
-    Missing-data percentages:
-        10%, 20%, 30%, 40%, 50%
+    evaluation/baselines/
+        fx_controlled_matrix.py
 
-    Independent random seeds:
-        5 seeds
+This focused test validates:
 
-Total:
-    6 × 5 × 5 × 5 = 750 experimental cases
+    1. Synthetic dataset generation
+    2. Tensor shapes
+    3. Dataset metadata
+    4. Tensor finiteness
+    5. Mask validity
+    6. Input consistency
+    7. F-X reconstruction
+    8. Reconstruction shape
+    9. Reconstruction finiteness
+   10. Observed-data preservation
+   11. Missing-region reconstruction
+   12. Reconstruction metrics
+   13. Dataset reproducibility
+   14. F-X reconstruction reproducibility
 
-For every experiment:
+Test configuration
+------------------
+Cube size       : 64 × 128 × 128
+Missing rate    : 30%
+Geological mode : folded
+Mask mechanism  : missing_crosslines
+Seed            : 42
 
-    Complete synthetic volume
-              |
-              v
-       Controlled mask
-              |
-              v
-       Incomplete volume
-              |
-              v
-       F-X reconstruction
-              |
-              v
-       Common metrics
+F-X configuration
+-----------------
+Prediction order : 4
+Iterations       : 2
 
-Metrics
--------
-    MAE
-    RMSE
-    PSNR
-    SNR
-    SSIM
-
-Additional experimental quantities
-----------------------------------
-    Runtime
-    Number of missing voxels
-    Number of observed voxels
-    Input consistency
-    Observed-data preservation
-    Reconstruction validity
-    Seed
-    Geological mode
-    Missing-data mechanism
-    Missing percentage
-
-Important
----------
-This script validates the existing f-x implementation.
-
-It does NOT modify the f-x algorithm.
-
-Results are written to:
-
-    outputs/synthetic_training/reports/
-
+Author: Ormin Joseph
 ======================================================================
 """
+
 
 # =====================================================================
 # IMPORTS
 # =====================================================================
-
-import csv
-import math
-import os
-import sys
-import time
-from pathlib import Path
 
 import numpy as np
 import torch
 
 
 # =====================================================================
-# PROJECT ROOT
-# =====================================================================
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-
-# =====================================================================
 # PROJECT IMPORTS
 # =====================================================================
 
-from dataset.synthetic_dataset import SyntheticSeismicDataset
+from dataset.synthetic_dataset import (
+    SyntheticSeismicDataset
+)
 
-from evaluation.baselines.fx_prediction import (
-    fx_prediction_reconstruction,
+from evaluation.baselines.fx_controlled_matrix import (
+    fx_prediction_reconstruction
 )
 
 from metrics.reconstruction_metrics import (
@@ -117,39 +78,12 @@ from metrics.reconstruction_metrics import (
     rmse,
     psnr,
     snr,
-    ssim,
+    ssim
 )
 
 
 # =====================================================================
-# CONTROLLED EXPERIMENTAL MATRIX
-# =====================================================================
-
-GEOLOGICAL_MODES = [
-    "horizontal",
-    "dipping",
-]
-
-
-MASK_MODES = [
-    "random_voxels",
-    "missing_traces",
-]
-
-
-MISSING_RATES = [
-    0.30,
-]
-
-
-SEEDS = [
-    42,
-    43,
-]
-
-
-# =====================================================================
-# SYNTHETIC EXPERIMENT CONFIGURATION
+# TEST CONFIGURATION
 # =====================================================================
 
 CUBE_SIZE = (
@@ -158,65 +92,46 @@ CUBE_SIZE = (
     128,
 )
 
+MISSING_RATE = 0.30
 
-# One synthetic sample is sufficient for each controlled condition
-# because this experiment is repeated across independent seeds.
-NUM_SAMPLES = 1
+GEOLOGICAL_MODE = "folded"
+
+MASK_MODE = "missing_crosslines"
+
+SEED = 42
 
 
-# F-X algorithm configuration
+# =====================================================================
+# F-X CONFIGURATION
+# =====================================================================
+
 FX_PREDICTION_ORDER = 4
+
 FX_ITERATIONS = 2
 
 
 # =====================================================================
-# OUTPUT DIRECTORY
+# NUMERICAL VALIDATION
 # =====================================================================
 
-OUTPUT_DIR = (
-    PROJECT_ROOT
-    / "outputs"
-    / "synthetic_training"
-    / "reports"
-)
-
-
-OUTPUT_DIR.mkdir(
-    parents=True,
-    exist_ok=True,
-)
-
-
-RESULTS_FILE = (
-    OUTPUT_DIR
-    / "fx_controlled_matrix.csv"
-)
-
-
-SUMMARY_FILE = (
-    OUTPUT_DIR
-    / "fx_controlled_matrix_summary.csv"
-)
+OBSERVED_TOLERANCE = 1.0e-6
 
 
 # =====================================================================
-# NUMERICAL SETTINGS
+# HELPER: FINITE TENSOR VALIDATION
 # =====================================================================
 
-TOLERANCE = 1.0e-6
-
-
-# =====================================================================
-# HELPER: FINITE VALUE CHECK
-# =====================================================================
-
-def tensor_is_finite(tensor):
+def tensor_is_finite(
+    tensor
+):
     """
-    Check whether every element of a tensor is finite.
+    Return True when every tensor element is finite.
     """
 
     return bool(
-        torch.isfinite(tensor).all().item()
+        torch.isfinite(
+            tensor
+        ).all().item()
     )
 
 
@@ -224,61 +139,205 @@ def tensor_is_finite(tensor):
 # HELPER: METRIC CONVERSION
 # =====================================================================
 
-def metric_to_float(value):
-    """
-    Convert a metric output to a Python float.
-
-    Handles:
-        torch.Tensor
-        NumPy scalar
-        Python numeric
-    """
-
-    if isinstance(value, torch.Tensor):
-        return float(value.detach().cpu().item())
-
-    if isinstance(value, np.ndarray):
-        return float(value.item())
-
-    return float(value)
-
-
-# =====================================================================
-# RUN ONE EXPERIMENT
-# =====================================================================
-
-def run_single_experiment(
-    geological_mode,
-    mask_mode,
-    missing_rate,
-    seed,
+def metric_to_float(
+    value
 ):
     """
-    Run one controlled f-x experiment.
+    Convert a metric result to a Python float.
 
-    Returns
-    -------
-    dict
-        Experimental result record.
+    Supports:
+
+        torch.Tensor
+        NumPy scalar
+        Python numeric values
     """
 
-    # ---------------------------------------------------------------
-    # Build exactly one deterministic synthetic sample.
-    # ---------------------------------------------------------------
+    if isinstance(
+        value,
+        torch.Tensor
+    ):
 
-    dataset = SyntheticSeismicDataset(
-        num_samples=NUM_SAMPLES,
-        cube_size=CUBE_SIZE,
-        missing_probability=missing_rate,
-        geological_mode=geological_mode,
-        mask_mode=mask_mode,
-        seed=seed,
+        return float(
+            value.detach()
+            .cpu()
+            .item()
+        )
+
+
+    if isinstance(
+        value,
+        np.ndarray
+    ):
+
+        return float(
+            value.item()
+        )
+
+
+    return float(
+        value
     )
 
 
-    # ---------------------------------------------------------------
-    # Retrieve the single sample.
-    # ---------------------------------------------------------------
+# =====================================================================
+# HELPER: COMPUTE METRICS
+# =====================================================================
+
+def compute_metrics(
+    reconstruction,
+    target
+):
+    """
+    Compute the project's standard reconstruction metrics.
+    """
+
+    return {
+
+        "MAE":
+            metric_to_float(
+                mae(
+                    reconstruction,
+                    target
+                )
+            ),
+
+        "RMSE":
+            metric_to_float(
+                rmse(
+                    reconstruction,
+                    target
+                )
+            ),
+
+        "PSNR":
+            metric_to_float(
+                psnr(
+                    reconstruction,
+                    target
+                )
+            ),
+
+        "SNR":
+            metric_to_float(
+                snr(
+                    reconstruction,
+                    target
+                )
+            ),
+
+        "SSIM":
+            metric_to_float(
+                ssim(
+                    reconstruction,
+                    target
+                )
+            ),
+    }
+
+
+# =====================================================================
+# MAIN TEST
+# =====================================================================
+
+def main():
+
+    print()
+    print("=" * 70)
+    print(
+        "F-X PREDICTION BASELINE TEST"
+    )
+    print("=" * 70)
+
+    print()
+    print(
+        "This is a focused single-baseline validation test."
+    )
+
+    print(
+        "It does NOT execute the 750-case controlled matrix."
+    )
+
+    print()
+
+
+    # =================================================================
+    # DISPLAY TEST CONFIGURATION
+    # =================================================================
+
+    print(
+        "Test configuration"
+    )
+
+    print(
+        "-" * 70
+    )
+
+    print(
+        f"Cube size             : {CUBE_SIZE}"
+    )
+
+    print(
+        f"Missing rate          : {MISSING_RATE}"
+    )
+
+    print(
+        f"Geological mode       : {GEOLOGICAL_MODE}"
+    )
+
+    print(
+        f"Mask mode             : {MASK_MODE}"
+    )
+
+    print(
+        f"Seed                  : {SEED}"
+    )
+
+    print()
+
+    print(
+        "F-X configuration"
+    )
+
+    print(
+        f"Prediction order      : "
+        f"{FX_PREDICTION_ORDER}"
+    )
+
+    print(
+        f"Iterations            : "
+        f"{FX_ITERATIONS}"
+    )
+
+    print()
+
+
+    # =================================================================
+    # CREATE SYNTHETIC DATASET
+    # =================================================================
+
+    print(
+        "Creating synthetic dataset..."
+    )
+
+    dataset = SyntheticSeismicDataset(
+
+        num_samples=1,
+
+        cube_size=CUBE_SIZE,
+
+        missing_probability=MISSING_RATE,
+
+        geological_mode=GEOLOGICAL_MODE,
+
+        mask_mode=MASK_MODE,
+
+        seed=SEED,
+    )
+
+
+    # =================================================================
+    # RETRIEVE SINGLE SAMPLE
+    # =================================================================
 
     (
         corrupted,
@@ -290,256 +349,398 @@ def run_single_experiment(
     ) = dataset[0]
 
 
-    # ---------------------------------------------------------------
-    # Confirm experimental metadata.
-    # ---------------------------------------------------------------
+    # =================================================================
+    # EXPECTED SHAPE
+    # =================================================================
 
-    if returned_mask_mode != mask_mode:
+    expected_shape = (
+        1,
+        *CUBE_SIZE
+    )
+
+
+    # =================================================================
+    # TEST 1: CORRUPTED INPUT SHAPE
+    # =================================================================
+
+    if tuple(
+        corrupted.shape
+    ) != expected_shape:
+
         raise RuntimeError(
-            "Mask mode mismatch: "
-            f"expected={mask_mode}, "
-            f"received={returned_mask_mode}"
+            "F-X test failed: "
+            f"corrupted input shape is "
+            f"{tuple(corrupted.shape)}, "
+            f"expected {expected_shape}."
+        )
+
+    print(
+        "PASS: corrupted input shape"
+    )
+
+
+    # =================================================================
+    # TEST 2: TARGET SHAPE
+    # =================================================================
+
+    if tuple(
+        target.shape
+    ) != expected_shape:
+
+        raise RuntimeError(
+            "F-X test failed: "
+            f"target shape is "
+            f"{tuple(target.shape)}, "
+            f"expected {expected_shape}."
+        )
+
+    print(
+        "PASS: target shape"
+    )
+
+
+    # =================================================================
+    # TEST 3: MASK SHAPE
+    # =================================================================
+
+    if tuple(
+        mask.shape
+    ) != expected_shape:
+
+        raise RuntimeError(
+            "F-X test failed: "
+            f"mask shape is "
+            f"{tuple(mask.shape)}, "
+            f"expected {expected_shape}."
+        )
+
+    print(
+        "PASS: mask shape"
+    )
+
+
+    # =================================================================
+    # TEST 4: VELOCITY SHAPE
+    # =================================================================
+
+    if tuple(
+        velocity.shape
+    ) != expected_shape:
+
+        raise RuntimeError(
+            "F-X test failed: "
+            f"velocity shape is "
+            f"{tuple(velocity.shape)}, "
+            f"expected {expected_shape}."
+        )
+
+    print(
+        "PASS: velocity shape"
+    )
+
+
+    # =================================================================
+    # TEST 5: DATASET METADATA
+    # =================================================================
+
+    if returned_mask_mode != MASK_MODE:
+
+        raise RuntimeError(
+            "F-X test failed: "
+            f"expected mask mode '{MASK_MODE}', "
+            f"received '{returned_mask_mode}'."
         )
 
 
-    if returned_geological_mode != geological_mode:
+    if returned_geological_mode != GEOLOGICAL_MODE:
+
         raise RuntimeError(
-            "Geological mode mismatch: "
-            f"expected={geological_mode}, "
-            f"received={returned_geological_mode}"
+            "F-X test failed: "
+            f"expected geological mode "
+            f"'{GEOLOGICAL_MODE}', "
+            f"received '{returned_geological_mode}'."
         )
 
 
-    # ---------------------------------------------------------------
-    # Validate tensor shapes.
-    # ---------------------------------------------------------------
-
-    if corrupted.shape != target.shape:
-        raise RuntimeError(
-            "Input/target shape mismatch."
-        )
+    print(
+        "PASS: dataset metadata"
+    )
 
 
-    if corrupted.shape != mask.shape:
-        raise RuntimeError(
-            "Input/mask shape mismatch."
-        )
+    # =================================================================
+    # TEST 6: FINITE INPUT VALUES
+    # =================================================================
 
+    for name, tensor in [
 
-    if corrupted.shape != velocity.shape:
-        raise RuntimeError(
-            "Input/velocity shape mismatch."
-        )
+        ("corrupted", corrupted),
 
+        ("target", target),
 
-    # ---------------------------------------------------------------
-    # Validate finite values.
-    # ---------------------------------------------------------------
+        ("mask", mask),
 
-    if not tensor_is_finite(corrupted):
-        raise RuntimeError(
-            "Corrupted input contains non-finite values."
-        )
+        ("velocity", velocity),
 
+    ]:
 
-    if not tensor_is_finite(target):
-        raise RuntimeError(
-            "Target contains non-finite values."
-        )
-
-
-    if not tensor_is_finite(mask):
-        raise RuntimeError(
-            "Mask contains non-finite values."
-        )
-
-
-    # ---------------------------------------------------------------
-    # Verify mask values.
-    # ---------------------------------------------------------------
-
-    unique_mask_values = torch.unique(mask)
-
-    allowed_values = {
-        0.0,
-        1.0,
-    }
-
-
-    for value in unique_mask_values.tolist():
-
-        if float(value) not in allowed_values:
+        if not tensor_is_finite(
+            tensor
+        ):
 
             raise RuntimeError(
-                "Mask contains values other than "
-                "0 and 1."
+                "F-X test failed: "
+                f"{name} contains NaN or "
+                f"infinite values."
             )
 
 
-    # ---------------------------------------------------------------
-    # Verify input consistency.
-    #
-    # Observed samples must remain equal to the target.
-    # ---------------------------------------------------------------
-
-    observed_difference = (
-        torch.abs(
-            corrupted[mask == 1]
-            - target[mask == 1]
-        )
+    print(
+        "PASS: input tensors contain finite values"
     )
 
 
-    if observed_difference.numel() > 0:
+    # =================================================================
+    # TEST 7: MASK VALUES
+    # =================================================================
 
-        maximum_observed_difference = float(
-            observed_difference.max().item()
-        )
-
-    else:
-
-        maximum_observed_difference = 0.0
+    unique_mask = torch.unique(
+        mask
+    )
 
 
-    if (
-        maximum_observed_difference
-        > TOLERANCE
+    valid_mask = torch.all(
+        (unique_mask == 0)
+        |
+        (unique_mask == 1)
+    )
+
+
+    if not bool(
+        valid_mask.item()
     ):
 
         raise RuntimeError(
-            "Observed samples are not identical "
-            "to the target."
+            "F-X test failed: "
+            "mask contains values other than "
+            "0 and 1."
         )
 
 
-    # ---------------------------------------------------------------
-    # Count observed and missing voxels.
-    # ---------------------------------------------------------------
-
-    total_voxels = int(
-        mask.numel()
+    print(
+        "PASS: mask contains only 0 and 1"
     )
 
 
-    observed_voxels = int(
-        (mask == 1).sum().item()
+    # =================================================================
+    # TEST 8: INPUT CONSISTENCY
+    # =================================================================
+
+    expected_corrupted = (
+        target
+        * mask
     )
 
 
-    missing_voxels = int(
-        (mask == 0).sum().item()
+    input_difference = torch.max(
+        torch.abs(
+            corrupted
+            - expected_corrupted
+        )
+    ).item()
+
+
+    if (
+        input_difference
+        > OBSERVED_TOLERANCE
+    ):
+
+        raise RuntimeError(
+            "F-X test failed: "
+            "corrupted input is inconsistent "
+            "with target × mask."
+        )
+
+
+    print(
+        "PASS: corrupted input consistency"
+    )
+
+    print(
+        f"      Maximum input difference: "
+        f"{input_difference:.6e}"
     )
 
 
-    # ---------------------------------------------------------------
-    # Verify that the requested missing percentage is represented.
-    # ---------------------------------------------------------------
+    # =================================================================
+    # COUNT OBSERVED AND MISSING SAMPLES
+    # =================================================================
 
-    measured_missing_rate = (
-        missing_voxels
-        / total_voxels
+    observed_samples = int(
+        torch.sum(
+            mask == 1
+        ).item()
     )
 
 
-    # ---------------------------------------------------------------
-    # Run f-x reconstruction.
-    # ---------------------------------------------------------------
+    missing_samples = int(
+        torch.sum(
+            mask == 0
+        ).item()
+    )
 
-    start_time = time.perf_counter()
+
+    print()
+
+    print(
+        f"Observed samples       : "
+        f"{observed_samples}"
+    )
+
+    print(
+        f"Missing samples        : "
+        f"{missing_samples}"
+    )
+
+
+    # =================================================================
+    # TEST 9: BOTH REGIONS MUST EXIST
+    # =================================================================
+
+    if observed_samples == 0:
+
+        raise RuntimeError(
+            "F-X test failed: "
+            "there are no observed samples."
+        )
+
+
+    if missing_samples == 0:
+
+        raise RuntimeError(
+            "F-X test failed: "
+            "there are no missing samples."
+        )
+
+
+    print(
+        "PASS: observed and missing regions exist"
+    )
+
+
+    # =================================================================
+    # RUN F-X RECONSTRUCTION
+    # =================================================================
+
+    print()
+
+    print(
+        "Running f-x prediction reconstruction..."
+    )
 
 
     reconstruction = (
         fx_prediction_reconstruction(
+
             corrupted_cube=corrupted,
+
             mask=mask,
-            prediction_order=FX_PREDICTION_ORDER,
-            iterations=FX_ITERATIONS,
+
+            prediction_order=(
+                FX_PREDICTION_ORDER
+            ),
+
+            iterations=(
+                FX_ITERATIONS
+            ),
         )
     )
 
 
-    end_time = time.perf_counter()
+    # =================================================================
+    # TEST 10: RECONSTRUCTION SHAPE
+    # =================================================================
 
-
-    runtime_seconds = (
-        end_time
-        - start_time
-    )
-
-
-    # ---------------------------------------------------------------
-    # Validate reconstruction shape.
-    # ---------------------------------------------------------------
-
-    if reconstruction.shape != target.shape:
+    if tuple(
+        reconstruction.shape
+    ) != expected_shape:
 
         raise RuntimeError(
-            "F-X reconstruction shape mismatch."
+            "F-X test failed: "
+            f"reconstruction shape is "
+            f"{tuple(reconstruction.shape)}, "
+            f"expected {expected_shape}."
         )
 
 
-    # ---------------------------------------------------------------
-    # Validate reconstruction values.
-    # ---------------------------------------------------------------
+    print(
+        "PASS: reconstruction shape"
+    )
+
+
+    # =================================================================
+    # TEST 11: RECONSTRUCTION FINITENESS
+    # =================================================================
 
     if not tensor_is_finite(
         reconstruction
     ):
 
         raise RuntimeError(
-            "F-X reconstruction contains "
-            "non-finite values."
+            "F-X test failed: "
+            "reconstruction contains NaN "
+            "or infinite values."
         )
 
 
-    # ---------------------------------------------------------------
-    # Verify exact preservation of observed samples.
-    # ---------------------------------------------------------------
-
-    reconstruction_observed_difference = (
-        torch.abs(
-            reconstruction[mask == 1]
-            - target[mask == 1]
-        )
+    print(
+        "PASS: reconstruction contains finite values"
     )
 
 
-    if (
-        reconstruction_observed_difference.numel()
-        > 0
-    ):
+    # =================================================================
+    # TEST 12: OBSERVED-DATA PRESERVATION
+    # =================================================================
 
-        maximum_reconstruction_observed_difference = (
-            float(
-                reconstruction_observed_difference
-                .max()
-                .item()
-            )
+    observed_difference = torch.max(
+        torch.abs(
+            reconstruction[mask == 1]
+            - corrupted[mask == 1]
         )
-
-    else:
-
-        maximum_reconstruction_observed_difference = 0.0
+    ).item()
 
 
     if (
-        maximum_reconstruction_observed_difference
-        > TOLERANCE
+        observed_difference
+        > OBSERVED_TOLERANCE
     ):
 
         raise RuntimeError(
-            "F-X reconstruction modified "
-            "observed samples."
+            "F-X test failed: "
+            f"observed-data preservation error "
+            f"is {observed_difference:.6e}, "
+            f"which exceeds the tolerance "
+            f"of {OBSERVED_TOLERANCE:.6e}."
         )
 
 
-    # ---------------------------------------------------------------
-    # Evaluate only the reconstructed missing samples.
-    #
-    # This is the scientifically relevant reconstruction error.
-    # ---------------------------------------------------------------
+    print(
+        "PASS: observed seismic samples preserved"
+    )
 
-    missing_target = target[mask == 0]
+    print(
+        f"      Maximum observed difference: "
+        f"{observed_difference:.6e}"
+    )
+
+
+    # =================================================================
+    # MISSING-REGION EXTRACTION
+    # =================================================================
+
+    missing_target = (
+        target[mask == 0]
+    )
+
 
     missing_reconstruction = (
         reconstruction[mask == 0]
@@ -549,18 +750,63 @@ def run_single_experiment(
     if missing_target.numel() == 0:
 
         raise RuntimeError(
-            "No missing samples were generated."
+            "F-X test failed: "
+            "no missing samples are available "
+            "for reconstruction evaluation."
         )
 
 
-    # ---------------------------------------------------------------
-    # Compute reconstruction metrics.
-    # ---------------------------------------------------------------
+    # =================================================================
+    # TEST 13: MISSING REGION WAS MODIFIED
+    # =================================================================
+
+    missing_change = torch.mean(
+        torch.abs(
+            reconstruction[mask == 0]
+            - corrupted[mask == 0]
+        )
+    ).item()
+
+
+    if missing_change <= 0.0:
+
+        raise RuntimeError(
+            "F-X test failed: "
+            "reconstruction did not modify "
+            "the missing region."
+        )
+
+
+    print(
+        "PASS: missing region was reconstructed"
+    )
+
+    print(
+        f"      Mean missing-region change: "
+        f"{missing_change:.6f}"
+    )
+
+
+    # =================================================================
+    # ZERO-FILLED BASELINE
+    # =================================================================
+
+    zero_filled_missing_mae = torch.mean(
+        torch.abs(
+            corrupted[mask == 0]
+            - target[mask == 0]
+        )
+    ).item()
+
+
+    # =================================================================
+    # MISSING-REGION F-X ERROR
+    # =================================================================
 
     missing_mae = metric_to_float(
         mae(
             missing_reconstruction,
-            missing_target,
+            missing_target
         )
     )
 
@@ -568,7 +814,7 @@ def run_single_experiment(
     missing_rmse = metric_to_float(
         rmse(
             missing_reconstruction,
-            missing_target,
+            missing_target
         )
     )
 
@@ -576,7 +822,7 @@ def run_single_experiment(
     missing_psnr = metric_to_float(
         psnr(
             missing_reconstruction,
-            missing_target,
+            missing_target
         )
     )
 
@@ -584,7 +830,7 @@ def run_single_experiment(
     missing_snr = metric_to_float(
         snr(
             missing_reconstruction,
-            missing_target,
+            missing_target
         )
     )
 
@@ -592,581 +838,366 @@ def run_single_experiment(
     missing_ssim = metric_to_float(
         ssim(
             missing_reconstruction,
-            missing_target,
+            missing_target
         )
     )
 
 
-    # ---------------------------------------------------------------
-    # Return complete experimental record.
-    # ---------------------------------------------------------------
+    # =================================================================
+    # GLOBAL METRICS
+    # =================================================================
 
-    return {
+    print()
 
-        "method":
-            "f-x_prediction",
-
-        "seed":
-            seed,
-
-        "geological_mode":
-            geological_mode,
-
-        "mask_mode":
-            mask_mode,
-
-        "requested_missing_rate":
-            missing_rate,
-
-        "measured_missing_rate":
-            measured_missing_rate,
-
-        "cube_depth":
-            CUBE_SIZE[0],
-
-        "cube_height":
-            CUBE_SIZE[1],
-
-        "cube_width":
-            CUBE_SIZE[2],
-
-        "total_voxels":
-            total_voxels,
-
-        "observed_voxels":
-            observed_voxels,
-
-        "missing_voxels":
-            missing_voxels,
-
-        "prediction_order":
-            FX_PREDICTION_ORDER,
-
-        "iterations":
-            FX_ITERATIONS,
-
-        "runtime_seconds":
-            runtime_seconds,
-
-        "input_consistency_error":
-            maximum_observed_difference,
-
-        "observed_preservation_error":
-            maximum_reconstruction_observed_difference,
-
-        "MAE":
-            missing_mae,
-
-        "RMSE":
-            missing_rmse,
-
-        "PSNR":
-            missing_psnr,
-
-        "SNR":
-            missing_snr,
-
-        "SSIM":
-            missing_ssim,
-
-        "status":
-            "PASS",
-    }
+    print(
+        "Computing global reconstruction metrics..."
+    )
 
 
-# =====================================================================
-# SUMMARY STATISTICS
-# =====================================================================
-
-def calculate_summary(records):
-    """
-    Calculate grouped summary statistics.
-
-    Groups by:
-
-        geological mode
-        mask mode
-        requested missing rate
-
-    For each group:
-
-        mean
-        standard deviation
-
-    are calculated for all reconstruction metrics.
-    """
-
-    grouped = {}
+    metrics = compute_metrics(
+        reconstruction,
+        target
+    )
 
 
-    # ---------------------------------------------------------------
-    # Group experimental records.
-    # ---------------------------------------------------------------
+    # =================================================================
+    # TEST 14: METRICS ARE VALID
+    # =================================================================
 
-    for record in records:
+    for metric_name, metric_value in metrics.items():
 
-        key = (
-            record["geological_mode"],
-            record["mask_mode"],
-            record["requested_missing_rate"],
-        )
+        if metric_name in [
+            "PSNR",
+            "SNR",
+        ]:
 
-
-        if key not in grouped:
-            grouped[key] = []
+            continue
 
 
-        grouped[key].append(record)
+        if not np.isfinite(
+            metric_value
+        ):
 
-
-    # ---------------------------------------------------------------
-    # Build summary records.
-    # ---------------------------------------------------------------
-
-    summary_records = []
-
-
-    metric_names = [
-        "MAE",
-        "RMSE",
-        "PSNR",
-        "SNR",
-        "SSIM",
-        "runtime_seconds",
-    ]
-
-
-    for key, group in grouped.items():
-
-        (
-            geological_mode,
-            mask_mode,
-            missing_rate,
-        ) = key
-
-
-        summary = {
-
-            "geological_mode":
-                geological_mode,
-
-            "mask_mode":
-                mask_mode,
-
-            "requested_missing_rate":
-                missing_rate,
-
-            "n_seeds":
-                len(group),
-        }
-
-
-        # -----------------------------------------------------------
-        # Mean and standard deviation.
-        # -----------------------------------------------------------
-
-        for metric_name in metric_names:
-
-            values = np.asarray(
-                [
-                    float(
-                        record[metric_name]
-                    )
-                    for record in group
-                ],
-                dtype=np.float64,
+            raise RuntimeError(
+                "F-X test failed: "
+                f"{metric_name} is not finite."
             )
 
 
-            summary[
-                f"{metric_name}_mean"
-            ] = float(
-                values.mean()
-            )
-
-
-            summary[
-                f"{metric_name}_std"
-            ] = float(
-                values.std(
-                    ddof=1
-                )
-                if len(values) > 1
-                else 0.0
-            )
-
-
-        summary_records.append(
-            summary
-        )
-
-
-    return summary_records
-
-
-# =====================================================================
-# WRITE CSV
-# =====================================================================
-
-def write_csv(
-    filename,
-    records,
-):
-    """
-    Write experiment records to CSV.
-    """
-
-    if not records:
-        return
-
-
-    fieldnames = list(
-        records[0].keys()
+    print(
+        "PASS: reconstruction metrics computed"
     )
 
 
-    with open(
-        filename,
-        "w",
-        newline="",
-        encoding="utf-8",
-    ) as file:
+    # =================================================================
+    # DISPLAY RESULTS
+    # =================================================================
 
-        writer = csv.DictWriter(
-            file,
-            fieldnames=fieldnames,
-        )
+    print()
 
-        writer.writeheader()
+    print("=" * 70)
 
-        writer.writerows(
-            records
-        )
+    print(
+        "F-X PREDICTION RESULTS"
+    )
+
+    print("=" * 70)
 
 
-# =====================================================================
-# MAIN EXPERIMENT
-# =====================================================================
+    print(
+        f"Global MAE                : "
+        f"{metrics['MAE']:.6f}"
+    )
 
-def main():
 
-    # ---------------------------------------------------------------
-    # Expected experiment count.
-    # ---------------------------------------------------------------
+    print(
+        f"Global RMSE               : "
+        f"{metrics['RMSE']:.6f}"
+    )
 
-    expected_experiments = (
-        len(GEOLOGICAL_MODES)
-        * len(MASK_MODES)
-        * len(MISSING_RATES)
-        * len(SEEDS)
+
+    print(
+        f"Global PSNR               : "
+        f"{metrics['PSNR']:.6f} dB"
+    )
+
+
+    print(
+        f"Global SNR                : "
+        f"{metrics['SNR']:.6f} dB"
+    )
+
+
+    print(
+        f"Global SSIM               : "
+        f"{metrics['SSIM']:.6f}"
     )
 
 
     print()
-    print("=" * 78)
+
     print(
-        "CONTROLLED F-X PREDICTION "
-        "EXPERIMENTAL MATRIX"
+        f"Missing-region MAE        : "
+        f"{missing_mae:.6f}"
     )
-    print("=" * 78)
+
+
+    print(
+        f"Missing-region RMSE       : "
+        f"{missing_rmse:.6f}"
+    )
+
+
+    print(
+        f"Missing-region PSNR       : "
+        f"{missing_psnr:.6f} dB"
+    )
+
+
+    print(
+        f"Missing-region SNR        : "
+        f"{missing_snr:.6f}"
+    )
+
+
+    print(
+        f"Missing-region SSIM       : "
+        f"{missing_ssim:.6f}"
+    )
+
 
     print()
-    print(
-        f"Cube size       : {CUBE_SIZE}"
-    )
 
     print(
-        f"Geological modes: {len(GEOLOGICAL_MODES)}"
+        f"Zero-filled missing MAE   : "
+        f"{zero_filled_missing_mae:.6f}"
     )
 
-    print(
-        f"Mask mechanisms : {len(MASK_MODES)}"
-    )
 
     print(
-        f"Missing rates   : {len(MISSING_RATES)}"
+        f"Missing-region change     : "
+        f"{missing_change:.6f}"
     )
 
-    print(
-        f"Independent seeds: {len(SEEDS)}"
-    )
 
     print(
-        f"Expected cases  : {expected_experiments}"
+        f"Observed preservation     : "
+        f"{observed_difference:.6e}"
     )
+
+
+    # =================================================================
+    # DATASET REPRODUCIBILITY TEST
+    # =================================================================
 
     print()
-    print(
-        "F-X configuration"
-    )
 
     print(
-        f"Prediction order: "
-        f"{FX_PREDICTION_ORDER}"
-    )
-
-    print(
-        f"Iterations      : "
-        f"{FX_ITERATIONS}"
-    )
-
-    print()
-    print(
-        "Results directory:"
-    )
-
-    print(
-        f"  {OUTPUT_DIR}"
-    )
-
-    print()
-    print("=" * 78)
-
-
-    # ---------------------------------------------------------------
-    # Experimental records.
-    # ---------------------------------------------------------------
-
-    records = []
-
-
-    completed = 0
-    failed = 0
-
-
-    # ---------------------------------------------------------------
-    # Execute controlled matrix.
-    # ---------------------------------------------------------------
-
-    for geological_mode in GEOLOGICAL_MODES:
-
-        print()
-        print(
-            f"GEology: {geological_mode}"
-        )
-        print(
-            "-" * 78
-        )
-
-
-        for mask_mode in MASK_MODES:
-
-            for missing_rate in MISSING_RATES:
-
-                for seed in SEEDS:
-
-                    completed_case = (
-                        completed
-                        + failed
-                        + 1
-                    )
-
-
-                    print(
-                        f"[{completed_case:03d}/"
-                        f"{expected_experiments:03d}] "
-                        f"{geological_mode:15s} | "
-                        f"{mask_mode:20s} | "
-                        f"{missing_rate:.0%} | "
-                        f"seed={seed}",
-                        end=" ... ",
-                    )
-
-
-                    try:
-
-                        result = (
-                            run_single_experiment(
-                                geological_mode=(
-                                    geological_mode
-                                ),
-                                mask_mode=(
-                                    mask_mode
-                                ),
-                                missing_rate=(
-                                    missing_rate
-                                ),
-                                seed=seed,
-                            )
-                        )
-
-
-                        records.append(
-                            result
-                        )
-
-
-                        completed += 1
-
-
-                        print(
-                            f"PASS | "
-                            f"MAE="
-                            f"{result['MAE']:.6f} | "
-                            f"SSIM="
-                            f"{result['SSIM']:.6f} | "
-                            f"time="
-                            f"{result['runtime_seconds']:.2f}s"
-                        )
-
-
-                    except Exception as error:
-
-                        failed += 1
-
-                        print(
-                            "FAIL"
-                        )
-
-
-                        records.append({
-
-                            "method":
-                                "f-x_prediction",
-
-                            "seed":
-                                seed,
-
-                            "geological_mode":
-                                geological_mode,
-
-                            "mask_mode":
-                                mask_mode,
-
-                            "requested_missing_rate":
-                                missing_rate,
-
-                            "status":
-                                "FAIL",
-
-                            "error":
-                                str(error),
-                        })
-
-
-    # ---------------------------------------------------------------
-    # Write raw experimental results.
-    # ---------------------------------------------------------------
-
-    write_csv(
-        RESULTS_FILE,
-        records,
+        "Testing deterministic dataset generation..."
     )
 
 
-    # ---------------------------------------------------------------
-    # Keep only successful experiments for statistics.
-    # ---------------------------------------------------------------
+    dataset_repeat = (
+        SyntheticSeismicDataset(
 
-    successful_records = [
-        record
-        for record in records
-        if record.get("status") == "PASS"
-    ]
+            num_samples=1,
 
+            cube_size=CUBE_SIZE,
 
-    summary_records = (
-        calculate_summary(
-            successful_records
+            missing_probability=MISSING_RATE,
+
+            geological_mode=GEOLOGICAL_MODE,
+
+            mask_mode=MASK_MODE,
+
+            seed=SEED,
         )
     )
 
 
-    # ---------------------------------------------------------------
-    # Write summary.
-    # ---------------------------------------------------------------
-
-    write_csv(
-        SUMMARY_FILE,
-        summary_records,
-    )
-
-
-    # ---------------------------------------------------------------
-    # Final validation.
-    # ---------------------------------------------------------------
-
-    print()
-    print("=" * 78)
-    print(
-        "CONTROLLED F-X MATRIX COMPLETE"
-    )
-    print("=" * 78)
-
-    print()
-    print(
-        f"Expected experiments : "
-        f"{expected_experiments}"
-    )
-
-    print(
-        f"Successful experiments: "
-        f"{completed}"
-    )
-
-    print(
-        f"Failed experiments    : "
-        f"{failed}"
-    )
-
-    print()
+    (
+        corrupted_repeat,
+        target_repeat,
+        mask_repeat,
+        velocity_repeat,
+        mask_mode_repeat,
+        geological_mode_repeat,
+    ) = dataset_repeat[0]
 
 
-    if completed == expected_experiments:
+    # =================================================================
+    # TEST 15: DATASET REPRODUCIBILITY
+    # =================================================================
 
-        print(
-            "OVERALL STATUS: PASS"
-        )
+    if not torch.equal(
+        corrupted,
+        corrupted_repeat
+    ):
 
-        print()
-        print(
-            "All controlled f-x experiments "
-            "completed successfully."
-        )
-
-    else:
-
-        print(
-            "OVERALL STATUS: FAIL"
-        )
-
-        print()
-        print(
-            "At least one controlled "
-            "experiment failed."
+        raise RuntimeError(
+            "F-X test failed: "
+            "repeated dataset generation produced "
+            "different corrupted data."
         )
 
 
+    if not torch.equal(
+        target,
+        target_repeat
+    ):
+
+        raise RuntimeError(
+            "F-X test failed: "
+            "repeated dataset generation produced "
+            "different targets."
+        )
+
+
+    if not torch.equal(
+        mask,
+        mask_repeat
+    ):
+
+        raise RuntimeError(
+            "F-X test failed: "
+            "repeated dataset generation produced "
+            "different masks."
+        )
+
+
+    if not torch.equal(
+        velocity,
+        velocity_repeat
+    ):
+
+        raise RuntimeError(
+            "F-X test failed: "
+            "repeated dataset generation produced "
+            "different velocity models."
+        )
+
+
+    if mask_mode_repeat != MASK_MODE:
+
+        raise RuntimeError(
+            "F-X test failed: "
+            "repeated dataset returned a "
+            "different mask mode."
+        )
+
+
+    if geological_mode_repeat != GEOLOGICAL_MODE:
+
+        raise RuntimeError(
+            "F-X test failed: "
+            "repeated dataset returned a "
+            "different geological mode."
+        )
+
+
+    print(
+        "PASS: dataset generation is reproducible"
+    )
+
+
+    # =================================================================
+    # F-X RECONSTRUCTION REPRODUCIBILITY
+    # =================================================================
+
+    print(
+        "Testing deterministic f-x reconstruction..."
+    )
+
+
+    reconstruction_repeat = (
+        fx_prediction_reconstruction(
+
+            corrupted_cube=corrupted_repeat,
+
+            mask=mask_repeat,
+
+            prediction_order=(
+                FX_PREDICTION_ORDER
+            ),
+
+            iterations=(
+                FX_ITERATIONS
+            ),
+        )
+    )
+
+
+    # =================================================================
+    # TEST 16: RECONSTRUCTION REPRODUCIBILITY
+    # =================================================================
+
+    reconstruction_difference = torch.max(
+        torch.abs(
+            reconstruction
+            - reconstruction_repeat
+        )
+    ).item()
+
+
+    if (
+        reconstruction_difference
+        > OBSERVED_TOLERANCE
+    ):
+
+        raise RuntimeError(
+            "F-X test failed: "
+            "repeated f-x reconstruction is not "
+            "deterministic within the configured "
+            "tolerance."
+        )
+
+
+    print(
+        "PASS: f-x reconstruction is reproducible"
+    )
+
+
+    print(
+        f"      Maximum repeated reconstruction "
+        f"difference: "
+        f"{reconstruction_difference:.6e}"
+    )
+
+
+    # =================================================================
+    # FINAL STATUS
+    # =================================================================
+
     print()
-    print(
-        "Raw results:"
-    )
+
+    print("=" * 70)
 
     print(
-        f"  {RESULTS_FILE}"
+        "F-X PREDICTION BASELINE TEST: PASS"
     )
 
+    print("=" * 70)
 
     print()
-    print(
-        "Summary results:"
-    )
 
     print(
-        f"  {SUMMARY_FILE}"
+        "The f-x prediction baseline passed the "
+        "focused single-case validation."
     )
-
 
     print()
-    print("=" * 78)
 
+    print(
+        "The complete 750-case controlled experiment "
+        "remains separate under:"
+    )
 
-    # ---------------------------------------------------------------
-    # Return failure code to the operating system.
-    # ---------------------------------------------------------------
+    print(
+        "evaluation/baselines/"
+        "fx_controlled_matrix.py"
+    )
 
-    if failed > 0:
-        raise SystemExit(1)
+    print()
 
 
 # =====================================================================

@@ -3,57 +3,121 @@
 Statistical Significance Test
 =========================================================
 
-Paired statistical comparison between the Full Model and
-each ablation model.
+Physics-Informed 3D Encoder-Decoder Framework
+with Predictive Uncertainty for Seismic Data Reconstruction
 
-The comparison is performed on paired SSIM values obtained
-from the SAME validation samples.
+Purpose
+-------
+Perform paired statistical comparisons between the trained
+Full Model and each controlled ablation configuration.
 
-Primary statistical test:
-    Paired t-test
+Experimental comparisons
+-------------------------
+1. Full_Model vs No_Attention
+2. Full_Model vs No_Residual
+3. Full_Model vs No_Uncertainty
+4. Full_Model vs Plain_UNet
 
-Multiple-comparison correction:
-    Holm-Bonferroni correction
+Primary metric
+--------------
+SSIM
 
-Additional reported statistic:
-    Cohen's dz effect size
+Primary statistical test
+------------------------
+Paired t-test
 
-The analysis requires:
-    1. A per-sample ablation_study.csv
-    2. A common Sample_ID for every model
-    3. Exactly one observation per Model/Sample_ID pair
-    4. The same validation samples for every model
-    5. At least two paired observations for the paired
-       t-test
+Multiple-comparison correction
+------------------------------
+Holm-Bonferroni correction
 
-Expected input structure:
+Effect size
+-----------
+Cohen's dz
 
-    Model,Sample_ID,Attention,Residual,Uncertainty,
-    MAE,RMSE,PSNR,SNR,SSIM,Checkpoint
+Experimental requirement
+------------------------
+Every model must be evaluated on exactly the SAME validation
+samples.
 
-Example:
+The ablation study must therefore contain:
 
-    Full_Model,0,True,True,True,...,0.91,...
-    No_Attention,0,False,True,True,...,0.87,...
-    Full_Model,1,True,True,True,...,0.89,...
-    No_Attention,1,False,True,True,...,0.84,...
+    Model
+    Sample_ID
+    SSIM
 
-Results are saved inside the current experiment directory:
+with exactly one observation for every:
 
-outputs/
-    <EXPERIMENT_NAME>/
-        reports/
-            statistical_significance.csv
+    Model / Sample_ID
 
-IMPORTANT:
-    If fewer than two paired validation samples are
-    available, inferential statistical testing is stopped.
-    This prevents meaningless p-values from being reported.
+combination.
+
+Example
+-------
+    Model,Sample_ID,SSIM
+
+    Full_Model,0,0.91
+    No_Attention,0,0.87
+    No_Residual,0,0.89
+    No_Uncertainty,0,0.90
+    Plain_UNet,0,0.88
+
+    Full_Model,1,0.89
+    No_Attention,1,0.84
+    No_Residual,1,0.87
+    No_Uncertainty,1,0.88
+    Plain_UNet,1,0.86
+
+Important
+---------
+The paired design compares each model's SSIM on the SAME
+validation sample.
+
+Therefore, the statistical comparison is based on paired
+differences:
+
+    Difference =
+        Full_Model_SSIM - Ablation_SSIM
+
+Cohen's dz is:
+
+    dz =
+        mean(Difference) /
+        standard_deviation(Difference)
+
+Interpretation of direction
+---------------------------
+Positive mean difference:
+    Full Model has higher SSIM for the paired observations.
+
+Negative mean difference:
+    Ablation model has higher SSIM for the paired observations.
+
+This script reports the direction descriptively and does not
+rank or declare an overall "best" model.
+
+Multiple-comparison family
+---------------------------
+Exactly four planned comparisons are tested:
+
+    Full_Model vs No_Attention
+    Full_Model vs No_Residual
+    Full_Model vs No_Uncertainty
+    Full_Model vs Plain_UNet
+
+Holm-Bonferroni correction is applied across these four
+planned comparisons.
+
+Output
+------
+REPORT_DIR/
+    statistical_significance.csv
+    statistical_significance_metadata.json
 
 Author: Ormin Joseph
 =========================================================
 """
 
+import json
 import os
 
 import numpy as np
@@ -63,50 +127,114 @@ from scipy.stats import ttest_rel
 
 from utils.config import (
     EXPERIMENT_NAME,
-    REPORT_DIR
+    REPORT_DIR,
+    STATISTICAL_ALPHA,
+    STATISTICAL_METRIC,
+    STATISTICAL_TEST,
+    MULTIPLE_COMPARISON_CORRECTION,
+    EFFECT_SIZE,
 )
 
 
 # =========================================================
-# CONFIGURATION
+# EXPERIMENTAL CONFIGURATION
 # =========================================================
-
-ALPHA = 0.05
 
 FULL_MODEL_NAME = "Full_Model"
 
-EXPECTED_ABLATION_MODELS = [
+
+EXPECTED_ABLATION_MODELS = (
     "No_Attention",
     "No_Residual",
     "No_Uncertainty",
-    "Plain_UNet"
-]
+    "Plain_UNet",
+)
+
 
 ABLATION_FILE = os.path.join(
     REPORT_DIR,
-    "ablation_study.csv"
+    "ablation_study.csv",
 )
+
 
 OUTPUT_FILE = os.path.join(
     REPORT_DIR,
-    "statistical_significance.csv"
+    "statistical_significance.csv",
+)
+
+
+METADATA_FILE = os.path.join(
+    REPORT_DIR,
+    "statistical_significance_metadata.json",
 )
 
 
 # =========================================================
-# HELPER FUNCTIONS
+# VALIDATION
 # =========================================================
 
-def identify_id_column(dataframe):
+def validate_configuration():
     """
-    Identify the column used to pair observations across
-    the Full Model and ablation models.
-
-    Sample_ID is preferred because it is the identifier
-    produced by the corrected ablation-study pipeline.
+    Validate the statistical-analysis configuration.
     """
 
-    preferred_columns = [
+    if not 0.0 < STATISTICAL_ALPHA < 1.0:
+
+        raise ValueError(
+            "STATISTICAL_ALPHA must be between 0 and 1. "
+            f"Received: {STATISTICAL_ALPHA}"
+        )
+
+    if STATISTICAL_METRIC != "SSIM":
+
+        raise ValueError(
+            "The current statistical-significance module "
+            "is configured specifically for SSIM."
+        )
+
+    if STATISTICAL_TEST != "paired_t_test":
+
+        raise ValueError(
+            "The current implementation requires "
+            "STATISTICAL_TEST='paired_t_test'."
+        )
+
+    if (
+        MULTIPLE_COMPARISON_CORRECTION
+        != "Holm-Bonferroni"
+    ):
+
+        raise ValueError(
+            "The current implementation requires "
+            "Holm-Bonferroni correction."
+        )
+
+    if EFFECT_SIZE != "Cohen_dz":
+
+        raise ValueError(
+            "The current implementation requires "
+            "Cohen_dz as the effect-size measure."
+        )
+
+
+# =========================================================
+# IDENTIFY SAMPLE ID
+# =========================================================
+
+def identify_sample_id_column(
+    dataframe
+):
+    """
+    Identify the validation-sample identifier.
+
+    The final ablation-study design should contain
+    'Sample_ID'.
+
+    Legacy alternatives are accepted only to make the
+    analysis robust to older result files.
+    """
+
+    preferred_columns = (
         "Sample_ID",
         "Patch_ID",
         "Sample",
@@ -116,57 +244,64 @@ def identify_id_column(dataframe):
         "patch_id",
         "sample",
         "patch",
-        "index"
-    ]
+        "index",
+    )
 
     for column in preferred_columns:
 
         if column in dataframe.columns:
+
             return column
 
     return None
 
 
-def normalize_id_column(
-        dataframe,
-        id_column
+# =========================================================
+# NORMALIZE SAMPLE ID
+# =========================================================
+
+def normalize_sample_id(
+    dataframe,
+    id_column
 ):
     """
-    Normalize the pairing identifier.
+    Normalize Sample_ID values.
 
-    Numeric identifiers are converted to integers where
-    possible so that values such as 1 and 1.0 represent
-    the same sample.
+    Integer-like numerical IDs are represented as integers.
 
-    Non-numeric identifiers are retained as strings.
+    Non-numeric identifiers are retained as cleaned strings.
     """
 
     dataframe = dataframe.copy()
 
     numeric_ids = pd.to_numeric(
         dataframe[id_column],
-        errors="coerce"
+        errors="coerce",
     )
 
     if numeric_ids.notna().all():
 
+        numeric_array = numeric_ids.to_numpy(
+            dtype=np.float64
+        )
+
         if np.isfinite(
-            numeric_ids.to_numpy(
-                dtype=np.float64
-            )
+            numeric_array
         ).all():
 
-            if np.all(
-                np.equal(
-                    numeric_ids.to_numpy(),
-                    np.floor(
-                        numeric_ids.to_numpy()
-                    )
-                )
-            ):
+            integer_like = np.equal(
+                numeric_array,
+                np.floor(
+                    numeric_array
+                ),
+            )
+
+            if integer_like.all():
 
                 dataframe[id_column] = (
-                    numeric_ids.astype(np.int64)
+                    numeric_ids.astype(
+                        np.int64
+                    )
                 )
 
                 return dataframe
@@ -180,137 +315,209 @@ def normalize_id_column(
     return dataframe
 
 
-def validate_ssim(dataframe):
+# =========================================================
+# VALIDATE SSIM
+# =========================================================
+
+def validate_ssim(
+    dataframe
+):
     """
-    Convert SSIM values to numeric and validate them.
+    Validate SSIM observations.
 
-    SSIM must contain finite numerical values.
-
-    The function does not impose an artificial SSIM range
-    because the exact SSIM implementation used by the
-    evaluation pipeline determines its theoretical range.
+    Invalid or missing SSIM values are rejected rather than
+    silently removed because paired statistical analysis
+    requires complete observations for every comparison.
     """
 
     dataframe = dataframe.copy()
 
     dataframe["SSIM"] = pd.to_numeric(
         dataframe["SSIM"],
-        errors="coerce"
+        errors="coerce",
     )
 
-    invalid_count = (
-        dataframe["SSIM"].isna().sum()
+    invalid_mask = (
+        dataframe["SSIM"].isna()
+        |
+        ~np.isfinite(
+            dataframe["SSIM"].to_numpy(
+                dtype=np.float64
+            )
+        )
+    )
+
+    invalid_count = int(
+        invalid_mask.sum()
     )
 
     if invalid_count > 0:
 
-        print()
-        print(
-            "Warning:",
-            invalid_count,
-            "row(s) contain invalid SSIM values "
-            "and will be removed."
-        )
-
-    dataframe = dataframe.dropna(
-        subset=["SSIM"]
-    ).copy()
-
-    if len(dataframe) == 0:
-
         raise ValueError(
-            "\nNo valid numeric SSIM observations remain."
-        )
-
-    if not np.isfinite(
-        dataframe["SSIM"].to_numpy(
-            dtype=np.float64
-        )
-    ).all():
-
-        raise ValueError(
-            "\nSSIM contains non-finite values."
+            "\nInvalid SSIM values detected.\n"
+            f"Invalid rows: {invalid_count}\n\n"
+            "The paired statistical analysis requires "
+            "a valid SSIM observation for every model/"
+            "Sample_ID pair.\n"
+            "Do not silently remove incomplete observations."
         )
 
     return dataframe
 
 
-def check_duplicate_pairs(
-        dataframe,
-        model_name,
-        id_column
+# =========================================================
+# VALIDATE MODEL NAMES
+# =========================================================
+
+def validate_model_names(
+    dataframe
 ):
     """
-    Check whether a model contains duplicate sample IDs.
+    Verify that the ablation study contains exactly the
+    planned statistical-analysis model family.
+    """
 
-    A valid paired analysis requires exactly one SSIM
-    observation for every model/sample combination.
+    models = (
+        dataframe["Model"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .unique()
+        .tolist()
+    )
+
+    expected_models = [
+        FULL_MODEL_NAME,
+        *EXPECTED_ABLATION_MODELS,
+    ]
+
+    missing_models = [
+        model
+        for model in expected_models
+        if model not in models
+    ]
+
+    if missing_models:
+
+        raise ValueError(
+            "\nRequired model(s) missing:\n"
+            f"{missing_models}\n\n"
+            "The statistical analysis requires Full_Model "
+            "and all four planned ablation configurations."
+        )
+
+    unexpected_models = [
+        model
+        for model in models
+        if model not in expected_models
+    ]
+
+    if unexpected_models:
+
+        raise ValueError(
+            "\nUnexpected model(s) detected:\n"
+            f"{unexpected_models}\n\n"
+            "The current statistical-analysis family "
+            "contains exactly five models.\n"
+            "Remove unexpected models or explicitly update "
+            "the planned comparison family."
+        )
+
+    return expected_models
+
+
+# =========================================================
+# DUPLICATE CHECK
+# =========================================================
+
+def check_duplicate_pairs(
+    dataframe,
+    model_name,
+    id_column
+):
+    """
+    Verify exactly one observation per model/sample pair.
     """
 
     model_data = dataframe[
         dataframe["Model"] == model_name
     ]
 
-    duplicate_ids = model_data[
-        model_data[id_column].duplicated(
+    duplicate_mask = (
+        model_data[id_column]
+        .duplicated(
             keep=False
         )
-    ][id_column].unique()
+    )
 
-    if len(duplicate_ids) > 0:
+    if duplicate_mask.any():
+
+        duplicate_ids = (
+            model_data.loc[
+                duplicate_mask,
+                id_column
+            ]
+            .unique()
+            .tolist()
+        )
 
         raise ValueError(
-            f"\nDuplicate {id_column} values detected "
-            f"for model '{model_name}':\n"
-            f"{duplicate_ids.tolist()}\n\n"
+            f"\nDuplicate observations detected for "
+            f"model '{model_name}'.\n\n"
+            f"{id_column} values:\n"
+            f"{duplicate_ids}\n\n"
             "Each model must contain exactly one SSIM "
-            "value per validation sample."
+            "observation per validation sample."
         )
 
 
+# =========================================================
+# MODEL SAMPLE IDS
+# =========================================================
+
 def get_model_ids(
-        dataframe,
-        model_name,
-        id_column
+    dataframe,
+    model_name,
+    id_column
 ):
     """
-    Return the unique sample IDs belonging to a model.
+    Return the validation sample IDs for one model.
     """
 
     return set(
         dataframe.loc[
             dataframe["Model"] == model_name,
-            id_column
+            id_column,
         ].tolist()
     )
 
 
-def validate_common_pairing(
-        dataframe,
-        models,
-        id_column
+# =========================================================
+# COMMON VALIDATION-SAMPLE CHECK
+# =========================================================
+
+def validate_common_validation_samples(
+    dataframe,
+    models,
+    id_column
 ):
     """
-    Verify that every model was evaluated on exactly the
+    Verify that all models were evaluated on exactly the
     same validation samples.
 
-    This is critical.
-
-    We do NOT allow an inner merge to silently discard
-    unmatched samples because that could invalidate the
-    intended paired experimental design.
+    No silent inner-join loss is permitted.
     """
 
     full_ids = get_model_ids(
         dataframe,
         FULL_MODEL_NAME,
-        id_column
+        id_column,
     )
 
-    if len(full_ids) == 0:
+    if not full_ids:
 
         raise ValueError(
-            "\nFull_Model contains no valid sample IDs."
+            "\nFull_Model contains no validation samples."
         )
 
     for model_name in models:
@@ -318,123 +525,228 @@ def validate_common_pairing(
         model_ids = get_model_ids(
             dataframe,
             model_name,
-            id_column
+            id_column,
         )
 
-        missing_from_model = (
+        missing_ids = (
             full_ids - model_ids
         )
 
-        extra_in_model = (
+        extra_ids = (
             model_ids - full_ids
         )
 
-        if missing_from_model:
+        if missing_ids:
 
             raise ValueError(
-                f"\nPairing mismatch for {model_name}.\n"
-                f"Samples missing from {model_name}: "
-                f"{sorted(missing_from_model)}\n\n"
-                "All models must be evaluated on exactly "
-                "the same validation samples."
+                f"\nValidation-sample mismatch for "
+                f"{model_name}.\n\n"
+                f"Missing Sample_ID values:\n"
+                f"{sorted(missing_ids)}\n\n"
+                "All ablation configurations must be "
+                "evaluated on exactly the same validation "
+                "samples."
             )
 
-        if extra_in_model:
+        if extra_ids:
 
             raise ValueError(
-                f"\nPairing mismatch for {model_name}.\n"
-                f"Extra samples found in {model_name}: "
-                f"{sorted(extra_in_model)}\n\n"
-                "All models must be evaluated on exactly "
-                "the same validation samples."
+                f"\nValidation-sample mismatch for "
+                f"{model_name}.\n\n"
+                f"Extra Sample_ID values:\n"
+                f"{sorted(extra_ids)}\n\n"
+                "All ablation configurations must be "
+                "evaluated on exactly the same validation "
+                "samples."
             )
 
+
+# =========================================================
+# COHEN'S DZ
+# =========================================================
 
 def calculate_cohens_dz(
-        full_values,
-        ablation_values
+    full_values,
+    ablation_values
 ):
     """
     Calculate Cohen's dz for paired observations.
 
-    Definition:
+    dz = mean(difference) / SD(difference)
 
-        dz = mean(difference) / SD(difference)
+    Difference:
 
-    where:
-
-        difference =
-            Full_Model_SSIM - Ablation_SSIM
-
-    Interpretation:
-
-        Positive dz:
-            Full Model tends to have higher SSIM.
-
-        Negative dz:
-            Ablation model tends to have higher SSIM.
+        Full_Model_SSIM - Ablation_SSIM
     """
 
     differences = (
-        full_values - ablation_values
+        full_values
+        -
+        ablation_values
     )
 
-    mean_difference = np.mean(
-        differences
+    mean_difference = float(
+        np.mean(
+            differences
+        )
     )
 
-    standard_deviation = np.std(
-        differences,
-        ddof=1
+    standard_deviation = float(
+        np.std(
+            differences,
+            ddof=1,
+        )
     )
 
-    if not np.isfinite(
-        standard_deviation
-    ):
+    # -----------------------------------------------------
+    # Zero-variance paired differences
+    # -----------------------------------------------------
 
-        return np.nan
+    if standard_deviation == 0.0:
 
-    if standard_deviation == 0:
+        if mean_difference == 0.0:
 
-        if mean_difference == 0:
             return 0.0
 
-        return np.inf
+        return (
+            np.inf
+            if mean_difference > 0
+            else -np.inf
+        )
 
     return (
         mean_difference
-        / standard_deviation
+        /
+        standard_deviation
     )
 
 
-def holm_correction(
-        p_values,
-        alpha=0.05
+# =========================================================
+# PAIRED T-TEST
+# =========================================================
+
+def run_paired_t_test(
+    full_values,
+    ablation_values
 ):
     """
-    Perform Holm-Bonferroni multiple-comparison
-    correction.
+    Perform a paired t-test.
+
+    The degenerate zero-variance case is handled explicitly
+    because scipy may return NaN when all paired differences
+    are identical.
+    """
+
+    differences = (
+        full_values
+        -
+        ablation_values
+    )
+
+    difference_mean = float(
+        np.mean(
+            differences
+        )
+    )
+
+    difference_std = float(
+        np.std(
+            differences,
+            ddof=1,
+        )
+    )
+
+    # -----------------------------------------------------
+    # All differences are exactly zero.
+    # -----------------------------------------------------
+
+    if difference_std == 0.0:
+
+        if difference_mean == 0.0:
+
+            return (
+                0.0,
+                1.0,
+            )
+
+        # If every paired difference is the same nonzero
+        # value, the t-statistic tends to ±infinity and
+        # the two-sided p-value tends to zero.
+        return (
+            np.inf
+            if difference_mean > 0
+            else -np.inf,
+            0.0,
+        )
+
+    statistic, p_value = ttest_rel(
+        full_values,
+        ablation_values,
+    )
+
+    statistic = float(
+        statistic
+    )
+
+    p_value = float(
+        p_value
+    )
+
+    if not np.isfinite(
+        statistic
+    ):
+
+        raise ValueError(
+            "The paired t-test returned a non-finite "
+            "test statistic."
+        )
+
+    if not np.isfinite(
+        p_value
+    ):
+
+        raise ValueError(
+            "The paired t-test returned a non-finite "
+            "p-value."
+        )
+
+    return (
+        statistic,
+        p_value,
+    )
+
+
+# =========================================================
+# HOLM-BONFERRONI CORRECTION
+# =========================================================
+
+def holm_bonferroni(
+    p_values,
+    alpha
+):
+    """
+    Apply Holm-Bonferroni correction.
 
     Parameters
     ----------
-    p_values : array-like
+    p_values:
         Raw p-values.
 
-    alpha : float
-        Significance level.
+    alpha:
+        Family-wise significance level.
 
     Returns
     -------
-    adjusted_p_values : numpy.ndarray
+    adjusted_p_values:
         Holm-adjusted p-values.
 
-    significant : numpy.ndarray
+    significant:
         Boolean significance decisions.
     """
 
     p_values = np.asarray(
         p_values,
-        dtype=np.float64
+        dtype=np.float64,
     )
 
     number_of_tests = len(
@@ -446,12 +758,12 @@ def holm_correction(
         return (
             np.array(
                 [],
-                dtype=np.float64
+                dtype=np.float64,
             ),
             np.array(
                 [],
-                dtype=bool
-            )
+                dtype=bool,
+            ),
         )
 
     if not np.isfinite(
@@ -459,21 +771,24 @@ def holm_correction(
     ).all():
 
         raise ValueError(
-            "\nHolm correction received "
+            "Holm-Bonferroni received "
             "non-finite p-values."
         )
 
     order = np.argsort(
-        p_values
+        p_values,
+        kind="stable",
     )
 
     sorted_p_values = (
-        p_values[order]
+        p_values[
+            order
+        ]
     )
 
     adjusted_sorted = np.empty(
         number_of_tests,
-        dtype=np.float64
+        dtype=np.float64,
     )
 
     running_max = 0.0
@@ -482,23 +797,33 @@ def holm_correction(
         sorted_p_values
     ):
 
+        multiplier = (
+            number_of_tests
+            -
+            rank
+        )
+
         adjusted_value = (
-            number_of_tests - rank
-        ) * p_value
+            multiplier
+            *
+            p_value
+        )
 
         running_max = max(
             running_max,
-            adjusted_value
+            adjusted_value,
         )
 
-        adjusted_sorted[rank] = min(
+        adjusted_sorted[
+            rank
+        ] = min(
             running_max,
-            1.0
+            1.0,
         )
 
     adjusted_p_values = np.empty(
         number_of_tests,
-        dtype=np.float64
+        dtype=np.float64,
     )
 
     adjusted_p_values[
@@ -506,22 +831,29 @@ def holm_correction(
     ] = adjusted_sorted
 
     significant = (
-        adjusted_p_values <= alpha
+        adjusted_p_values
+        <=
+        alpha
     )
 
     return (
         adjusted_p_values,
-        significant
+        significant,
     )
 
 
+# =========================================================
+# CREATE EMPTY RESULTS
+# =========================================================
+
 def create_empty_results_dataframe():
     """
-    Create a consistent empty result dataframe.
+    Return a consistent empty results structure.
     """
 
     return pd.DataFrame(
         columns=[
+            "Experiment",
             "Comparison",
             "Metric",
             "N_Pairs",
@@ -534,42 +866,155 @@ def create_empty_results_dataframe():
             "Cohens_dz",
             "Alpha",
             "Direction",
-            "Significance"
+            "Significance",
         ]
     )
 
 
 # =========================================================
-# STATISTICAL SIGNIFICANCE TEST
+# METADATA
+# =========================================================
+
+def save_metadata(
+    number_of_pairs,
+    number_of_comparisons,
+    id_column
+):
+    """
+    Save the statistical-analysis metadata.
+    """
+
+    metadata = {
+        "experiment":
+            EXPERIMENT_NAME,
+
+        "input_file":
+            ABLATION_FILE,
+
+        "output_file":
+            OUTPUT_FILE,
+
+        "metric":
+            STATISTICAL_METRIC,
+
+        "statistical_test":
+            STATISTICAL_TEST,
+
+        "multiple_comparison_correction":
+            MULTIPLE_COMPARISON_CORRECTION,
+
+        "effect_size":
+            EFFECT_SIZE,
+
+        "alpha":
+            STATISTICAL_ALPHA,
+
+        "pairing_column":
+            id_column,
+
+        "number_of_pairs":
+            number_of_pairs,
+
+        "number_of_planned_comparisons":
+            number_of_comparisons,
+
+        "full_model":
+            FULL_MODEL_NAME,
+
+        "ablation_models":
+            list(
+                EXPECTED_ABLATION_MODELS
+            ),
+
+        "pairing_design":
+            "Same validation Sample_ID for every model",
+
+        "analysis_type":
+            "Paired comparison of SSIM values",
+
+        "effect_size_definition":
+            "Mean paired SSIM difference divided by "
+            "the sample standard deviation of paired "
+            "differences",
+
+        "direction_definition":
+            "Full_Model_SSIM minus Ablation_SSIM",
+    }
+
+    with open(
+        METADATA_FILE,
+        "w",
+        encoding="utf-8",
+    ) as file:
+
+        json.dump(
+            metadata,
+            file,
+            indent=4,
+        )
+
+
+# =========================================================
+# MAIN ANALYSIS
 # =========================================================
 
 def run_significance_test():
 
     print()
     print("=" * 70)
-    print("STATISTICAL SIGNIFICANCE TEST")
+    print(
+        "STATISTICAL SIGNIFICANCE TEST"
+    )
     print("=" * 70)
 
     print()
     print(
         "Experiment :",
-        EXPERIMENT_NAME
+        EXPERIMENT_NAME,
     )
 
     print(
         "Input file :",
-        ABLATION_FILE
+        ABLATION_FILE,
     )
 
     print(
         "Output file:",
-        OUTPUT_FILE
+        OUTPUT_FILE,
+    )
+
+    print(
+        "Metric     :",
+        STATISTICAL_METRIC,
+    )
+
+    print(
+        "Test       :",
+        STATISTICAL_TEST,
+    )
+
+    print(
+        "Correction :",
+        MULTIPLE_COMPARISON_CORRECTION,
+    )
+
+    print(
+        "Effect size:",
+        EFFECT_SIZE,
     )
 
     print(
         "Alpha      :",
-        ALPHA
+        STATISTICAL_ALPHA,
     )
+
+    print("=" * 70)
+
+    # -----------------------------------------------------
+    # Validate configuration
+    # -----------------------------------------------------
+
+    validate_configuration()
 
     # -----------------------------------------------------
     # Check input file
@@ -596,23 +1041,23 @@ def run_significance_test():
     print()
     print(
         "Rows loaded:",
-        len(dataframe)
+        len(dataframe),
     )
 
-    if len(dataframe) == 0:
+    if dataframe.empty:
 
         raise ValueError(
-            "\nThe ablation study file is empty."
+            "\nThe ablation-study CSV is empty."
         )
 
     # -----------------------------------------------------
-    # Check required columns
+    # Required columns
     # -----------------------------------------------------
 
-    required_columns = [
+    required_columns = (
         "Model",
-        "SSIM"
-    ]
+        "SSIM",
+    )
 
     missing_columns = [
         column
@@ -623,51 +1068,51 @@ def run_significance_test():
     if missing_columns:
 
         raise ValueError(
-            "\nMissing required columns:\n"
+            "\nRequired column(s) missing:\n"
             f"{missing_columns}\n\n"
             "The ablation study must contain "
-            "'Model' and 'SSIM' columns."
+            "'Model' and 'SSIM'."
         )
 
     # -----------------------------------------------------
-    # Identify pairing column
+    # Identify Sample_ID
     # -----------------------------------------------------
 
-    id_column = identify_id_column(
+    id_column = identify_sample_id_column(
         dataframe
     )
 
     if id_column is None:
 
         raise ValueError(
-            "\nNo sample/patch identifier was found.\n\n"
-            "A paired t-test requires corresponding "
-            "observations from the same validation "
-            "samples.\n\n"
-            "The corrected ablation study should contain "
-            "a 'Sample_ID' column."
+            "\nNo validation-sample identifier was found.\n\n"
+            "The corrected ablation study must contain "
+            "'Sample_ID' so that corresponding validation "
+            "samples can be paired."
         )
 
     print()
     print(
         "Pairing column:",
-        id_column
+        id_column,
     )
 
     # -----------------------------------------------------
-    # Validate pairing column
+    # Missing Sample_ID values
     # -----------------------------------------------------
 
-    if dataframe[id_column].isna().any():
+    if dataframe[
+        id_column
+    ].isna().any():
 
         raise ValueError(
             f"\nThe pairing column '{id_column}' "
             "contains missing values."
         )
 
-    dataframe = normalize_id_column(
+    dataframe = normalize_sample_id(
         dataframe,
-        id_column
+        id_column,
     )
 
     # -----------------------------------------------------
@@ -679,89 +1124,38 @@ def run_significance_test():
     )
 
     # -----------------------------------------------------
-    # Display available models
+    # Normalize model names
     # -----------------------------------------------------
 
-    models = (
+    dataframe["Model"] = (
         dataframe["Model"]
-        .dropna()
         .astype(str)
-        .unique()
-        .tolist()
+        .str.strip()
+    )
+
+    # -----------------------------------------------------
+    # Validate model family
+    # -----------------------------------------------------
+
+    expected_models = (
+        validate_model_names(
+            dataframe
+        )
     )
 
     print()
     print(
-        "Models found:"
+        "Planned statistical model family:"
     )
 
-    for model_name in models:
+    for model_name in expected_models:
 
         print(
-            "  -",
-            model_name
+            f"  - {model_name}"
         )
 
     # -----------------------------------------------------
-    # Validate Full Model
-    # -----------------------------------------------------
-
-    if FULL_MODEL_NAME not in models:
-
-        raise ValueError(
-            "\nFull_Model was not found in "
-            "ablation_study.csv."
-        )
-
-    # -----------------------------------------------------
-    # Validate expected ablation models
-    # -----------------------------------------------------
-
-    missing_models = [
-        model
-        for model in EXPECTED_ABLATION_MODELS
-        if model not in models
-    ]
-
-    if missing_models:
-
-        raise ValueError(
-            "\nExpected ablation model(s) missing:\n"
-            f"{missing_models}\n\n"
-            "The controlled ablation study should contain "
-            "Full_Model plus all four ablation configurations."
-        )
-
-    # -----------------------------------------------------
-    # Check for unexpected model names.
-    #
-    # Unexpected models are not automatically included in
-    # the statistical family because doing so would change
-    # the multiple-comparison correction.
-    # -----------------------------------------------------
-
-    expected_models = [
-        FULL_MODEL_NAME
-    ] + EXPECTED_ABLATION_MODELS
-
-    unexpected_models = [
-        model
-        for model in models
-        if model not in expected_models
-    ]
-
-    if unexpected_models:
-
-        raise ValueError(
-            "\nUnexpected model(s) found:\n"
-            f"{unexpected_models}\n\n"
-            "Remove unexpected models or explicitly update "
-            "EXPECTED_ABLATION_MODELS before performing "
-            "statistical testing."
-        )
-
-    # -----------------------------------------------------
-    # Check duplicate model/sample pairs
+    # Duplicate model/sample checks
     # -----------------------------------------------------
 
     for model_name in expected_models:
@@ -769,76 +1163,87 @@ def run_significance_test():
         check_duplicate_pairs(
             dataframe,
             model_name,
-            id_column
+            id_column,
         )
 
     # -----------------------------------------------------
-    # Verify identical validation samples
+    # Verify common validation samples
     # -----------------------------------------------------
 
-    validate_common_pairing(
+    validate_common_validation_samples(
         dataframe,
-        EXPECTED_ABLATION_MODELS,
-        id_column
+        expected_models,
+        id_column,
     )
 
     # -----------------------------------------------------
-    # Full Model data
+    # Full Model validation IDs
     # -----------------------------------------------------
 
-    full_model = dataframe[
-        dataframe["Model"] == FULL_MODEL_NAME
-    ][
-        [id_column, "SSIM"]
-    ].copy()
+    full_ids = get_model_ids(
+        dataframe,
+        FULL_MODEL_NAME,
+        id_column,
+    )
 
-    number_of_full_samples = len(
-        full_model
+    number_of_pairs = len(
+        full_ids
     )
 
     print()
     print(
-        "Full Model validation samples:",
-        number_of_full_samples
+        "Common validation samples:",
+        number_of_pairs,
     )
 
     # -----------------------------------------------------
-    # Minimum requirement for paired t-test
+    # Minimum sample requirement
     # -----------------------------------------------------
 
-    if number_of_full_samples < 2:
+    if number_of_pairs < 2:
 
         raise ValueError(
             "\nSTATISTICAL TEST NOT PERFORMED.\n\n"
-            f"The current ablation study contains only "
-            f"{number_of_full_samples} paired validation "
-            "sample.\n\n"
+            f"Only {number_of_pairs} paired validation "
+            "sample(s) are available.\n\n"
             "A paired t-test requires at least two paired "
-            "observations.\n\n"
-            "More importantly, with one validation sample "
-            "there is no estimate of between-sample "
-            "variability, so a statistical significance "
-            "claim would be scientifically invalid.\n\n"
-            "Increase the validation-set size and rerun the "
-            "corrected ablation study before performing "
-            "statistical significance testing."
+            "observations, and a meaningful estimate of "
+            "between-sample variability requires more than "
+            "one observation.\n\n"
+            "Increase the validation-set size and rerun "
+            "the ablation study."
         )
 
-    # -----------------------------------------------------
-    # Statistical results
-    # -----------------------------------------------------
+    # =====================================================
+    # PREPARE FULL MODEL DATA
+    # =====================================================
 
-    results = []
+    full_model = dataframe[
+        dataframe["Model"]
+        ==
+        FULL_MODEL_NAME
+    ][
+        [id_column, "SSIM"]
+    ].copy()
+
+    full_model = full_model.rename(
+        columns={
+            "SSIM":
+                "Full_Model_SSIM"
+        }
+    )
+
+    # =====================================================
+    # PERFORM FOUR PLANNED COMPARISONS
+    # =====================================================
+
+    preliminary_results = []
 
     raw_p_values = []
 
-    comparison_indices = []
-
-    # -----------------------------------------------------
-    # Perform Full Model versus each ablation comparison
-    # -----------------------------------------------------
-
-    for model_name in EXPECTED_ABLATION_MODELS:
+    for model_name in (
+        EXPECTED_ABLATION_MODELS
+    ):
 
         print()
         print(
@@ -849,7 +1254,7 @@ def run_significance_test():
             "Comparison:",
             FULL_MODEL_NAME,
             "vs",
-            model_name
+            model_name,
         )
 
         # -------------------------------------------------
@@ -857,64 +1262,59 @@ def run_significance_test():
         # -------------------------------------------------
 
         ablation_model = dataframe[
-            dataframe["Model"] == model_name
+            dataframe["Model"]
+            ==
+            model_name
         ][
             [id_column, "SSIM"]
         ].copy()
 
-        # -------------------------------------------------
-        # Rename SSIM columns
-        # -------------------------------------------------
-
-        full_ssim = full_model.rename(
-            columns={
-                "SSIM":
-                    "Full_Model_SSIM"
-            }
-        )
-
-        ablation_ssim = ablation_model.rename(
-            columns={
-                "SSIM":
-                    "Ablation_SSIM"
-            }
+        ablation_model = (
+            ablation_model.rename(
+                columns={
+                    "SSIM":
+                        "Ablation_SSIM"
+                }
+            )
         )
 
         # -------------------------------------------------
-        # Pair by Sample_ID.
-        #
-        # An outer merge is deliberately NOT used here
-        # because pairing completeness was already validated.
+        # Pair observations
         # -------------------------------------------------
 
         paired = pd.merge(
-            full_ssim,
-            ablation_ssim,
+            full_model,
+            ablation_model,
             on=id_column,
             how="inner",
-            validate="one_to_one"
+            validate="one_to_one",
         )
 
-        number_of_pairs = len(
-            paired
-        )
-
-        # -------------------------------------------------
-        # Final pairing check
-        # -------------------------------------------------
-
-        if number_of_pairs != number_of_full_samples:
+        if len(paired) != number_of_pairs:
 
             raise ValueError(
                 f"\nPairing failure for {model_name}.\n"
-                f"Expected {number_of_full_samples} "
-                f"paired samples but found "
-                f"{number_of_pairs}.\n\n"
+                f"Expected {number_of_pairs} pairs.\n"
+                f"Found {len(paired)} pairs.\n\n"
                 "The statistical analysis cannot continue."
             )
 
         # -------------------------------------------------
-        # Convert to NumPy
+        # Sort by Sample_ID
+        #
+        # This is not mathematically necessary after the
+        # merge, but makes the paired data explicit and
+        # reproducible.
+        # -------------------------------------------------
+
+        paired = paired.sort_values(
+            by=id_column
+        ).reset_index(
+            drop=True
+        )
+
+        # -------------------------------------------------
+        # Convert SSIM values
         # -------------------------------------------------
 
         full_values = paired[
@@ -930,7 +1330,7 @@ def run_significance_test():
         )
 
         # -------------------------------------------------
-        # Validate finite values
+        # Final finite-value check
         # -------------------------------------------------
 
         if not np.isfinite(
@@ -939,7 +1339,7 @@ def run_significance_test():
 
             raise ValueError(
                 f"\nNon-finite Full_Model SSIM values "
-                f"found for comparison with {model_name}."
+                f"found for {model_name}."
             )
 
         if not np.isfinite(
@@ -957,236 +1357,225 @@ def run_significance_test():
 
         differences = (
             full_values
-            - ablation_values
+            -
+            ablation_values
+        )
+
+        mean_difference = float(
+            np.mean(
+                differences
+            )
         )
 
         # -------------------------------------------------
         # Paired t-test
         # -------------------------------------------------
 
-        statistic, p_value = ttest_rel(
+        (
+            t_statistic,
+            p_value
+        ) = run_paired_t_test(
             full_values,
-            ablation_values
-        )
-
-        # -------------------------------------------------
-        # Mean SSIM
-        # -------------------------------------------------
-
-        full_mean = np.mean(
-            full_values
-        )
-
-        ablation_mean = np.mean(
-            ablation_values
-        )
-
-        # -------------------------------------------------
-        # Mean paired difference
-        #
-        # Positive:
-        #     Full Model has higher SSIM.
-        #
-        # Negative:
-        #     Ablation has higher SSIM.
-        # -------------------------------------------------
-
-        mean_difference = np.mean(
-            differences
+            ablation_values,
         )
 
         # -------------------------------------------------
         # Cohen's dz
         # -------------------------------------------------
 
-        cohens_dz = calculate_cohens_dz(
-            full_values,
-            ablation_values
-        )
-
-        # -------------------------------------------------
-        # Handle degenerate paired differences
-        # -------------------------------------------------
-
-        if not np.isfinite(p_value):
-
-            print()
-            print(
-                "Warning:",
-                "Paired t-test returned a non-finite "
-                "p-value for",
-                model_name
+        cohens_dz = (
+            calculate_cohens_dz(
+                full_values,
+                ablation_values,
             )
+        )
 
         # -------------------------------------------------
-        # Store preliminary result
+        # Means
         # -------------------------------------------------
 
-        results.append({
-
-            "Comparison":
-                f"{FULL_MODEL_NAME} vs {model_name}",
-
-            "Metric":
-                "SSIM",
-
-            "N_Pairs":
-                number_of_pairs,
-
-            "Full_Model_Mean_SSIM":
-                full_mean,
-
-            "Ablation_Mean_SSIM":
-                ablation_mean,
-
-            "Mean_Difference":
-                mean_difference,
-
-            "T_Statistic":
-                statistic,
-
-            "Raw_P_Value":
-                p_value,
-
-            "Cohens_dz":
-                cohens_dz,
-
-            "Alpha":
-                ALPHA
-
-        })
-
-        raw_p_values.append(
-            p_value
+        full_mean = float(
+            np.mean(
+                full_values
+            )
         )
 
-        comparison_indices.append(
-            len(results) - 1
-        )
-
-    # =====================================================
-    # MULTIPLE-COMPARISON CORRECTION
-    # =====================================================
-
-    raw_p_values_array = np.asarray(
-        raw_p_values,
-        dtype=np.float64
-    )
-
-    # -----------------------------------------------------
-    # Ensure all p-values are valid before correction.
-    # -----------------------------------------------------
-
-    if not np.isfinite(
-        raw_p_values_array
-    ).all():
-
-        raise ValueError(
-            "\nAt least one paired t-test produced a "
-            "non-finite p-value.\n\n"
-            "Holm-Bonferroni correction cannot be "
-            "performed reliably."
-        )
-
-    adjusted_p_values, significant = (
-        holm_correction(
-            raw_p_values_array,
-            alpha=ALPHA
-        )
-    )
-
-    # -----------------------------------------------------
-    # Add corrected p-values and conclusions
-    # -----------------------------------------------------
-
-    for index, adjusted_p, is_significant in zip(
-        comparison_indices,
-        adjusted_p_values,
-        significant
-    ):
-
-        results[index][
-            "Holm_Adjusted_P_Value"
-        ] = adjusted_p
-
-        results[index][
-            "Significance"
-        ] = (
-            "Statistically Significant"
-            if is_significant
-            else "Not Statistically Significant"
+        ablation_mean = float(
+            np.mean(
+                ablation_values
+            )
         )
 
         # -------------------------------------------------
         # Direction
         # -------------------------------------------------
 
-        difference = results[index][
-            "Mean_Difference"
-        ]
+        if mean_difference > 0:
 
-        if difference > 0:
+            direction = (
+                "Full Model Higher SSIM"
+            )
 
-            results[index][
-                "Direction"
-            ] = "Full Model Higher SSIM"
+        elif mean_difference < 0:
 
-        elif difference < 0:
-
-            results[index][
-                "Direction"
-            ] = "Ablation Higher SSIM"
+            direction = (
+                "Ablation Higher SSIM"
+            )
 
         else:
 
-            results[index][
-                "Direction"
-            ] = "Equal Mean SSIM"
+            direction = (
+                "Equal Mean SSIM"
+            )
+
+        preliminary_results.append(
+            {
+                "Experiment":
+                    EXPERIMENT_NAME,
+
+                "Comparison":
+                    (
+                        f"{FULL_MODEL_NAME} "
+                        f"vs {model_name}"
+                    ),
+
+                "Metric":
+                    STATISTICAL_METRIC,
+
+                "N_Pairs":
+                    number_of_pairs,
+
+                "Full_Model_Mean_SSIM":
+                    full_mean,
+
+                "Ablation_Mean_SSIM":
+                    ablation_mean,
+
+                "Mean_Difference":
+                    mean_difference,
+
+                "T_Statistic":
+                    t_statistic,
+
+                "Raw_P_Value":
+                    p_value,
+
+                "Cohens_dz":
+                    cohens_dz,
+
+                "Alpha":
+                    STATISTICAL_ALPHA,
+
+                "Direction":
+                    direction,
+            }
+        )
+
+        raw_p_values.append(
+            p_value
+        )
+
+        print(
+            f"N pairs       : {number_of_pairs}"
+        )
+
+        print(
+            f"Full mean SSIM: {full_mean:.6f}"
+        )
+
+        print(
+            f"Ablation mean : {ablation_mean:.6f}"
+        )
+
+        print(
+            f"Mean difference: "
+            f"{mean_difference:.6f}"
+        )
+
+        print(
+            f"t-statistic   : "
+            f"{t_statistic:.6f}"
+        )
+
+        print(
+            f"Raw p-value   : "
+            f"{p_value:.6e}"
+        )
+
+        print(
+            f"Cohen's dz   : "
+            f"{cohens_dz:.6f}"
+        )
 
     # =====================================================
-    # CREATE RESULTS DATAFRAME
+    # HOLM-BONFERRONI CORRECTION
+    # =====================================================
+
+    raw_p_values = np.asarray(
+        raw_p_values,
+        dtype=np.float64,
+    )
+
+    if not np.isfinite(
+        raw_p_values
+    ).all():
+
+        raise ValueError(
+            "\nAt least one paired t-test produced "
+            "a non-finite p-value.\n\n"
+            "Holm-Bonferroni correction cannot be applied."
+        )
+
+    (
+        adjusted_p_values,
+        significant
+    ) = holm_bonferroni(
+        raw_p_values,
+        STATISTICAL_ALPHA,
+    )
+
+    # -----------------------------------------------------
+    # Add corrected results
+    # -----------------------------------------------------
+
+    for index in range(
+        len(
+            preliminary_results
+        )
+    ):
+
+        preliminary_results[index][
+            "Holm_Adjusted_P_Value"
+        ] = float(
+            adjusted_p_values[index]
+        )
+
+        preliminary_results[index][
+            "Significance"
+        ] = (
+            "Statistically Significant"
+            if significant[index]
+            else
+            "Not Statistically Significant"
+        )
+
+    # =====================================================
+    # RESULTS DATAFRAME
     # =====================================================
 
     results = pd.DataFrame(
-        results
+        preliminary_results
     )
 
-    # =====================================================
-    # SAVE RESULTS
-    # =====================================================
+    # -----------------------------------------------------
+    # Column order
+    # -----------------------------------------------------
 
-    os.makedirs(
-        REPORT_DIR,
-        exist_ok=True
-    )
-
-    results.to_csv(
-        OUTPUT_FILE,
-        index=False
-    )
-
-    # =====================================================
-    # DISPLAY RESULTS
-    # =====================================================
-
-    print()
-    print("=" * 70)
-    print("STATISTICAL SIGNIFICANCE RESULTS")
-    print("=" * 70)
-
-    if len(results) == 0:
-
-        print()
-        print(
-            "No valid paired comparisons were available."
-        )
-
-    else:
-
-        print()
-
-        display_columns = [
+    results = results[
+        [
+            "Experiment",
             "Comparison",
+            "Metric",
             "N_Pairs",
             "Full_Model_Mean_SSIM",
             "Ablation_Mean_SSIM",
@@ -1195,41 +1584,82 @@ def run_significance_test():
             "Raw_P_Value",
             "Holm_Adjusted_P_Value",
             "Cohens_dz",
-            "Significance"
+            "Alpha",
+            "Direction",
+            "Significance",
         ]
+    ]
 
-        print(
-            results[
-                display_columns
-            ].to_string(
-                index=False
-            )
+    # =====================================================
+    # SAVE RESULTS
+    # =====================================================
+
+    os.makedirs(
+        REPORT_DIR,
+        exist_ok=True,
+    )
+
+    results.to_csv(
+        OUTPUT_FILE,
+        index=False,
+    )
+
+    save_metadata(
+        number_of_pairs=
+            number_of_pairs,
+
+        number_of_comparisons=
+            len(
+                EXPECTED_ABLATION_MODELS
+            ),
+
+        id_column=
+            id_column,
+    )
+
+    # =====================================================
+    # DISPLAY RESULTS
+    # =====================================================
+
+    print()
+    print("=" * 70)
+    print(
+        "STATISTICAL SIGNIFICANCE RESULTS"
+    )
+    print("=" * 70)
+
+    print()
+
+    print(
+        results.to_string(
+            index=False
         )
+    )
 
     print()
     print(
-        "Significance level (alpha):",
-        ALPHA
+        "Significance level:",
+        STATISTICAL_ALPHA,
     )
 
     print(
-        "Primary metric:",
-        "SSIM"
+        "Metric:",
+        STATISTICAL_METRIC,
     )
 
     print(
-        "Primary statistical test:",
-        "Paired t-test"
+        "Test:",
+        STATISTICAL_TEST,
     )
 
     print(
-        "Multiple-comparison correction:",
-        "Holm-Bonferroni"
+        "Correction:",
+        MULTIPLE_COMPARISON_CORRECTION,
     )
 
     print(
         "Effect size:",
-        "Cohen's dz"
+        EFFECT_SIZE,
     )
 
     print()
@@ -1242,15 +1672,26 @@ def run_significance_test():
     )
 
     print()
+    print(
+        "Metadata saved:"
+    )
+
+    print(
+        METADATA_FILE
+    )
+
+    print()
     print("=" * 70)
-    print("STATISTICAL SIGNIFICANCE TEST COMPLETE")
+    print(
+        "STATISTICAL SIGNIFICANCE TEST COMPLETE"
+    )
     print("=" * 70)
 
     return results
 
 
 # =========================================================
-# ENTRY POINT
+# SCRIPT ENTRY POINT
 # =========================================================
 
 if __name__ == "__main__":

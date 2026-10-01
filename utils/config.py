@@ -169,6 +169,53 @@ F3_MISSING_PROBABILITY = 0.30
 
 
 # =========================================================
+# 5. COMMON BASELINE COMPARISON CONFIGURATION
+# =========================================================
+
+# Number of samples used in the common seven-method
+# reconstruction comparison.
+
+BASELINE_NUM_SAMPLES = 1
+
+
+# Controlled benchmark cube dimensions:
+#
+#     [Depth, Crossline, Inline]
+
+BASELINE_CUBE_SIZE = (
+    64,
+    128,
+    128
+)
+
+
+# Missing-data probability used in the common
+# seven-method comparison.
+
+BASELINE_MISSING_RATE = 0.30
+
+
+# Geological configuration used for the common
+# benchmark comparison.
+
+BASELINE_GEOLOGICAL_MODE = "folded"
+
+
+# Missing-data pattern used for the common
+# benchmark comparison.
+
+BASELINE_MASK_MODE = "missing_crosslines"
+
+
+# Random seed used for reproducibility.
+
+BASELINE_SEED = 42
+
+
+# Maximum acceptable observed-data preservation error.
+
+OBSERVED_PRESERVATION_TOLERANCE = 1.0e-6
+# =========================================================
 # 5. TRAINING CONFIGURATION
 # =========================================================
 
@@ -223,6 +270,279 @@ SAVE_EVERY = 5
 
 PATIENCE = 15
 
+
+# =====================================================================
+# UNCERTAINTY EVALUATION CONFIGURATION
+# =====================================================================
+
+# None = evaluate all available F3 patches.
+# Integer = evaluate only the specified number of patches.
+F3_UNCERTAINTY_NUM_PATCHES = None
+
+# Deterministic evaluation seed.
+UNCERTAINTY_EVALUATION_SEED = 42
+
+# Maximum number of voxel pairs used for correlation analysis.
+# None = use all eligible voxels.
+UNCERTAINTY_CORRELATION_MAX_VOXELS = 500000
+
+# Whether to evaluate uncertainty on the missing region separately.
+EVALUATE_MISSING_REGION_UNCERTAINTY = True
+
+# Whether to evaluate uncertainty on the observed region separately.
+EVALUATE_OBSERVED_REGION_UNCERTAINTY = True
+
+# =====================================================================
+# UNCERTAINTY–ERROR CORRELATION CONFIGURATION
+# =====================================================================
+
+# None = analyse all available dataset patches.
+# Integer = analyse only the specified number of patches.
+UNCERTAINTY_ERROR_CORRELATION_NUM_PATCHES = None
+# Reproducibility seed.
+UNCERTAINTY_ERROR_CORRELATION_SEED = 42
+
+# =====================================================================
+# NOISE ROBUSTNESS EVALUATION CONFIGURATION
+# =====================================================================
+
+# Gaussian noise standard deviations.
+#
+# These values are expressed in the same normalized amplitude scale
+# as the seismic data.
+NOISE_ROBUSTNESS_LEVELS = [
+    0.00,
+    0.05,
+    0.10,
+    0.15,
+    0.20,
+]
+
+# Maximum number of dataset samples/patches used for the robustness
+# experiment.
+#
+# None = evaluate all available samples.
+# Integer = evaluate only the first N samples.
+NOISE_ROBUSTNESS_NUM_SAMPLES = 20
+
+# Reproducibility seed.
+NOISE_ROBUSTNESS_SEED = 42
+
+# =========================================================
+# Missing-Data Robustness Evaluation Configuration
+# =========================================================
+
+# Missing-data fractions to test during robustness evaluation.
+# These values represent the proportion of seismic voxels
+# artificially removed from the clean target volume.
+MISSING_DATA_ROBUSTNESS_LEVELS = (
+    0.10,
+    0.20,
+    0.30,
+    0.40,
+    0.50,
+)
+
+# Number of test samples/patches evaluated at each
+# missing-data level.
+MISSING_DATA_ROBUSTNESS_NUM_SAMPLES = 20
+
+# Random seed used to generate reproducible missing-data masks.
+MISSING_DATA_ROBUSTNESS_SEED = 42
+
+# =========================================================
+# STATISTICAL SIGNIFICANCE CONFIGURATION
+# =========================================================
+
+# Significance level used for inferential statistical tests.
+
+STATISTICAL_ALPHA = 0.05
+
+
+# Primary metric used for paired statistical comparison.
+
+STATISTICAL_METRIC = "SSIM"
+
+
+# Primary statistical test.
+
+STATISTICAL_TEST = "paired_t_test"
+
+
+# Multiple-comparison correction.
+
+MULTIPLE_COMPARISON_CORRECTION = "Holm-Bonferroni"
+
+
+# Effect-size measure.
+
+EFFECT_SIZE = "Cohen_dz"
+
+# =========================================================
+# GEOLOGICAL COMPLEXITY ROBUSTNESS CONFIGURATION
+# =========================================================
+
+# Controlled geological structures used for synthetic
+# geological-complexity evaluation.
+#
+# The order represents increasing structural complexity.
+
+GEOLOGICAL_COMPLEXITY_LEVELS = (
+    "horizontal",
+    "dipping",
+    "faulted",
+    "folded",
+    "complex",
+    "highly_complex",
+)
+
+
+# Number of independently masked test cases generated
+# for each geological structure.
+#
+# The geological target itself is deterministic for a given
+# structure; different samples use controlled missing-data
+# masks to measure reconstruction variability.
+
+GEOLOGICAL_COMPLEXITY_NUM_SAMPLES = 5
+
+
+# Missing-data probability applied to synthetic
+# geological-complexity test cases.
+
+GEOLOGICAL_COMPLEXITY_MISSING_PROBABILITY = 0.30
+
+
+# Number of patches evaluated for non-synthetic datasets.
+
+GEOLOGICAL_COMPLEXITY_DATASET_SAMPLES = 20
+
+
+# Reproducibility seed.
+
+GEOLOGICAL_COMPLEXITY_SEED = 42
+
+# =========================================================
+# FINAL REPORT CONFIGURATION
+# =========================================================
+
+FINAL_REPORT_FILENAME = "final_report.txt"
+FINAL_REPORT_METADATA_FILENAME = "final_report_metadata.json"
+
+# =========================================================
+# EVALUATION SETTINGS
+# =========================================================
+
+# Number of reconstruction examples to include in the
+# reconstruction gallery.
+GALLERY_NUMBER_OF_SAMPLES = 5
+
+# =========================================================
+# MASTER PIPELINE CONTROL
+# =========================================================
+
+# ---------------------------------------------------------
+# TRAINING CONTROL
+# ---------------------------------------------------------
+#
+# True:
+#     Run model training before evaluation.
+#
+# False:
+#     Skip training and use the existing trained model
+#     checkpoint for evaluation.
+#
+# This allows previously completed training runs to be
+# evaluated without retraining the model.
+#
+RUN_TRAINING = False
+
+# =========================================================
+# EVALUATION PIPELINE CONTROL
+# =========================================================
+
+# ---------------------------------------------------------
+# RESUME EVALUATION
+# ---------------------------------------------------------
+#
+# True:
+#     Existing valid evaluation outputs are reused.
+#     The pipeline continues from the first incomplete step.
+#
+# False:
+#     Evaluation steps are allowed to run again.
+#
+RESUME_EVALUATION = True
+
+
+# ---------------------------------------------------------
+# FORCE RERUN EVALUATION
+# ---------------------------------------------------------
+#
+# True:
+#     Ignore existing evaluation outputs and rerun all
+#     evaluation stages.
+#
+# False:
+#     Follow RESUME_EVALUATION.
+#
+# FORCE_RERUN_EVALUATION takes priority over
+# RESUME_EVALUATION.
+#
+FORCE_RERUN_EVALUATION = False
+
+# =========================================================
+# UNCERTAINTY EVALUATION SETTINGS
+# =========================================================
+UNCERTAINTY_EVALUATION_NUM_SAMPLES = None
+UNCERTAINTY_EVALUATION_SEED = 42
+
+# ====================================================================
+# CONTROLLED MATRIX EXECUTION
+# ====================================================================
+
+# Number of controlled-matrix cases to execute.
+#
+# 10   = smoke-test execution
+# None = execute the complete controlled experimental matrix
+#
+# The final PhD experiment must use None.
+CONTROLLED_MATRIX_CASE_LIMIT = 10
+
+
+# =====================================================================
+# CURVELET POCS CONTROLLED-EXPERIMENT PARAMETERS
+# =====================================================================
+
+CURVELET_NUM_SCALES = 3
+
+CURVELET_WEDGES_PER_DIRECTION = 3
+
+CURVELET_ITERATIONS = 12
+
+CURVELET_THRESHOLD = 0.05
+
+CURVELET_THRESHOLD_DECAY = 0.90
+
+CURVELET_TOLERANCE = 1.0e-5
+
+# =========================================================
+# UNCERTAINTY CONFIGURATION
+# =========================================================
+
+# Number of stochastic forward passes used by MC-Dropout.
+MC_DROPOUT_SAMPLES = 20
+
+# Lower and upper bounds for predicted log variance.
+#
+# The network predicts:
+#
+#     log_variance = log(sigma_a^2)
+#
+# The bounds prevent numerical overflow/underflow when
+# converting log variance to aleatoric variance.
+LOG_VARIANCE_MIN = -10.0
+LOG_VARIANCE_MAX = 10.0
 
 # =========================================================
 # 9. MODEL CONFIGURATION

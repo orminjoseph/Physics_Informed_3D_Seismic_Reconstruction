@@ -1,35 +1,67 @@
 """
-=========================================================
-Ablation Study
-=========================================================
+=====================================================================
+FINAL PhD ABLATION STUDY
+=====================================================================
 
-Evaluates the contribution of the major components of the
-Physics-Informed 3D Encoder-Decoder Framework.
+Physics-Informed 3D Encoder–Decoder Framework with Predictive
+Uncertainty for Seismic Data Reconstruction in Complex Geological
+Settings
 
-Configurations
---------------
+Purpose
+-------
+This module performs a controlled component ablation study to
+quantify the contribution of the major architectural components
+of the proposed Physics-Informed 3D Encoder–Decoder framework.
 
-1. Full Model
-2. No Attention
-3. No Residual
-4. No Uncertainty
-5. Plain U-Net
+Ablation configurations
+-----------------------
 
-Methodology
------------
+1. Full_Model
+   Attention       = True
+   Residual        = True
+   Uncertainty     = True
 
-- All five configurations are trained independently
-  from scratch.
-- Every configuration uses the SAME dataset split.
-- Every configuration is evaluated on the SAME validation
-  samples.
-- Each validation sample receives a Sample_ID.
-- Per-sample results are retained for paired statistical
-  analysis.
-- Each ablation configuration has its own isolated output
-  directory.
-- No ablation configuration resumes from a previous
-  checkpoint.
+2. No_Attention
+   Attention       = False
+   Residual        = True
+   Uncertainty     = True
+
+3. No_Residual
+   Attention       = True
+   Residual        = False
+   Uncertainty     = True
+
+4. No_Uncertainty
+   Attention       = True
+   Residual        = True
+   Uncertainty     = False
+
+5. Plain_UNet
+   Attention       = False
+   Residual        = False
+   Uncertainty     = False
+
+Experimental controls
+---------------------
+
+All configurations:
+
+    * use the same dataset;
+    * use the same train/validation split;
+    * use the same validation Sample_IDs;
+    * use the same missing-data configuration;
+    * use the same optimization hyperparameters;
+    * use the same number of epochs;
+    * are independently initialized;
+    * are trained from scratch;
+    * use isolated checkpoint directories;
+    * are evaluated on exactly the same validation samples.
+
+The purpose is therefore to isolate the contribution of:
+
+    * attention;
+    * residual connections;
+    * predictive uncertainty.
 
 Output
 ------
@@ -46,13 +78,14 @@ outputs/
         reports/
             ablation_study.csv
             ablation_summary.csv
+            ablation_metadata.json
 
 ablation_study.csv
 -------------------
 
-Contains one row per model per validation sample.
+One row per model per validation sample.
 
-Columns:
+Columns include:
 
     Model
     Sample_ID
@@ -69,17 +102,48 @@ Columns:
 ablation_summary.csv
 --------------------
 
-Contains model-level mean metrics and percentage changes
-relative to the Full Model.
+Model-level mean metrics and descriptive percentage changes
+relative to the Full_Model.
 
-=========================================================
+Important
+---------
+
+Percentage changes are descriptive comparisons only.
+
+They do NOT constitute statistical significance testing.
+
+Formal statistical significance should be performed by the
+dedicated statistical-significance evaluation module using the
+paired per-sample observations retained in ablation_study.csv.
+
+=====================================================================
 """
 
-import os
+# =====================================================================
+# STANDARD LIBRARY
+# =====================================================================
 
+import json
+import os
+import random
+from datetime import datetime
+from pathlib import Path
+
+
+# =====================================================================
+# THIRD-PARTY LIBRARIES
+# =====================================================================
+
+import numpy as np
 import pandas as pd
 import torch
+
 from torch.utils.data import DataLoader
+
+
+# =====================================================================
+# PROJECT MODULES
+# =====================================================================
 
 from models.network import Network3D
 
@@ -87,7 +151,10 @@ from dataset.build_dataset import build_dataset
 from dataset.split_dataset import split_dataset
 
 from trainer.trainer import Trainer
+
 from inference.predictor import Predictor
+
+from losses.total_loss import TotalLoss
 
 from metrics.reconstruction_metrics import (
     mae,
@@ -97,48 +164,62 @@ from metrics.reconstruction_metrics import (
     ssim,
 )
 
-from losses.total_loss import TotalLoss
-
 from utils.experiment_manager import ExperimentManager
 
 from utils.config import (
     EXPERIMENT_NAME,
     REPORT_DIR,
+    CHECKPOINT_DIR,
     BATCH_SIZE,
     NUM_EPOCHS,
     LEARNING_RATE,
+    WEIGHT_DECAY,
     DX,
     DY,
     DZ,
+    DEVICE as CONFIG_DEVICE,
+    USE_ATTENTION,
+    USE_RESIDUAL,
+    USE_UNCERTAINTY,
+    VALIDATION_SPLIT,
+    SEED,
 )
 
 
-# =========================================================
-# ABLATION CONFIGURATIONS
-# =========================================================
+# =====================================================================
+# 1. ABLATION CONFIGURATIONS
+# =====================================================================
+
+"""
+The Full_Model configuration is derived from utils.config.py.
+
+This prevents the ablation study from silently using a different
+architecture from the actual proposed model.
+"""
 
 ABLATION_MODELS = {
+
     "Full_Model": {
-        "use_attention": True,
-        "use_residual": True,
-        "use_uncertainty": True,
+        "use_attention": USE_ATTENTION,
+        "use_residual": USE_RESIDUAL,
+        "use_uncertainty": USE_UNCERTAINTY,
     },
 
     "No_Attention": {
         "use_attention": False,
-        "use_residual": True,
-        "use_uncertainty": True,
+        "use_residual": USE_RESIDUAL,
+        "use_uncertainty": USE_UNCERTAINTY,
     },
 
     "No_Residual": {
-        "use_attention": True,
+        "use_attention": USE_ATTENTION,
         "use_residual": False,
-        "use_uncertainty": True,
+        "use_uncertainty": USE_UNCERTAINTY,
     },
 
     "No_Uncertainty": {
-        "use_attention": True,
-        "use_residual": True,
+        "use_attention": USE_ATTENTION,
+        "use_residual": USE_RESIDUAL,
         "use_uncertainty": False,
     },
 
@@ -150,27 +231,120 @@ ABLATION_MODELS = {
 }
 
 
-# =========================================================
-# DEVICE
-# =========================================================
+# =====================================================================
+# 2. GLOBAL REPRODUCIBILITY
+# =====================================================================
+
+def set_global_seed(seed):
+    """
+    Set all relevant random seeds.
+
+    The seed is reset before each ablation configuration so that
+    the experimental procedure is reproducible.
+
+    Parameters
+    ----------
+    seed : int
+        Reproducibility seed.
+    """
+
+    random.seed(seed)
+
+    np.random.seed(seed)
+
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+
+        torch.cuda.manual_seed(seed)
+
+        torch.cuda.manual_seed_all(seed)
+
+    # -------------------------------------------------------------
+    # Deterministic CUDA behaviour
+    # -------------------------------------------------------------
+
+    if torch.backends.cudnn.is_available():
+
+        torch.backends.cudnn.deterministic = True
+
+        torch.backends.cudnn.benchmark = False
+
+
+# =====================================================================
+# 3. DEVICE RESOLUTION
+# =====================================================================
 
 def get_device():
     """
-    Select CUDA when available; otherwise use CPU.
+    Resolve the device using the centralized DEVICE configuration.
+
+    Supported configuration:
+
+        DEVICE = "cpu"
+        DEVICE = "cuda"
+        DEVICE = "auto"
+
+    Returns
+    -------
+    torch.device
+        Resolved computation device.
     """
 
-    return torch.device(
-        "cuda" if torch.cuda.is_available() else "cpu"
+    if CONFIG_DEVICE == "cpu":
+
+        return torch.device("cpu")
+
+    if CONFIG_DEVICE == "cuda":
+
+        if not torch.cuda.is_available():
+
+            raise RuntimeError(
+                "DEVICE='cuda' is configured, but CUDA "
+                "is not available on this system."
+            )
+
+        return torch.device("cuda")
+
+    if CONFIG_DEVICE == "auto":
+
+        return torch.device(
+            "cuda"
+            if torch.cuda.is_available()
+            else "cpu"
+        )
+
+    raise ValueError(
+        f"Unsupported DEVICE configuration: "
+        f"{CONFIG_DEVICE}"
     )
 
 
-# =========================================================
-# DATALOADER
-# =========================================================
+# =====================================================================
+# 4. DATALOADER FACTORY
+# =====================================================================
 
-def create_ablation_dataloader(dataset, shuffle=False):
+def create_ablation_dataloader(
+    dataset,
+    shuffle=False,
+):
     """
-    Create the DataLoader used by the ablation experiments.
+    Create the DataLoader used by the ablation study.
+
+    DataLoader settings are taken from the central configuration
+    wherever possible.
+
+    Parameters
+    ----------
+    dataset : Dataset
+        Dataset or Subset.
+
+    shuffle : bool
+        Whether to shuffle the dataset.
+
+    Returns
+    -------
+    DataLoader
     """
 
     return DataLoader(
@@ -182,14 +356,16 @@ def create_ablation_dataloader(dataset, shuffle=False):
     )
 
 
-# =========================================================
-# MODEL BUILDER
-# =========================================================
+# =====================================================================
+# 5. MODEL FACTORY
+# =====================================================================
 
-def build_model(settings, device):
+def build_ablation_model(
+    settings,
+    device,
+):
     """
-    Build an ablation Network3D model and explicitly move
-    it to the selected device.
+    Construct one independent Network3D instance.
 
     Parameters
     ----------
@@ -197,12 +373,12 @@ def build_model(settings, device):
         Ablation configuration.
 
     device : torch.device
-        CPU or CUDA device.
+        Computation device.
 
     Returns
     -------
     Network3D
-        Model placed on the selected device.
+        Independently initialized model.
     """
 
     model = Network3D(
@@ -216,144 +392,73 @@ def build_model(settings, device):
     return model
 
 
-# =========================================================
-# VALIDATE MODEL DEVICE
-# =========================================================
+# =====================================================================
+# 6. MODEL DEVICE VALIDATION
+# =====================================================================
 
 def validate_model_device(
     model,
     device,
 ):
     """
-    Validate that all model parameters and buffers are on
-    the requested device.
-
-    CUDA device normalization treats:
-
-        cuda
-        cuda:0
-
-    as equivalent when CUDA device 0 is active.
+    Verify that every trainable parameter and registered buffer
+    resides on the expected device.
     """
 
     expected_device = torch.device(device)
 
-    # -----------------------------------------------------
-    # Validate model parameters
-    # -----------------------------------------------------
+    # -----------------------------------------------------------------
+    # PARAMETERS
+    # -----------------------------------------------------------------
 
     for name, parameter in model.named_parameters():
 
         actual_device = parameter.device
 
-        if expected_device.type == "cuda":
-
-            expected_index = (
-                torch.cuda.current_device()
-                if expected_device.index is None
-                else expected_device.index
-            )
-
-            actual_index = (
-                torch.cuda.current_device()
-                if actual_device.index is None
-                else actual_device.index
-            )
-
-            device_match = (
-                actual_device.type == "cuda"
-                and actual_index == expected_index
-            )
-
-        else:
-
-            device_match = (
-                actual_device == expected_device
-            )
-
-        if not device_match:
+        if actual_device != expected_device:
 
             raise RuntimeError(
-                f"\nModel parameter '{name}' is on "
-                f"{actual_device}, but the expected device "
-                f"is {expected_device}."
+                f"Model parameter '{name}' is on "
+                f"{actual_device}, but expected "
+                f"{expected_device}."
             )
 
-    # -----------------------------------------------------
-    # Validate model buffers
-    # -----------------------------------------------------
+    # -----------------------------------------------------------------
+    # BUFFERS
+    # -----------------------------------------------------------------
 
     for name, buffer in model.named_buffers():
 
         actual_device = buffer.device
 
-        if expected_device.type == "cuda":
-
-            expected_index = (
-                torch.cuda.current_device()
-                if expected_device.index is None
-                else expected_device.index
-            )
-
-            actual_index = (
-                torch.cuda.current_device()
-                if actual_device.index is None
-                else actual_device.index
-            )
-
-            device_match = (
-                actual_device.type == "cuda"
-                and actual_index == expected_index
-            )
-
-        else:
-
-            device_match = (
-                actual_device == expected_device
-            )
-
-        if not device_match:
+        if actual_device != expected_device:
 
             raise RuntimeError(
-                f"\nModel buffer '{name}' is on "
-                f"{actual_device}, but the expected device "
-                f"is {expected_device}."
+                f"Model buffer '{name}' is on "
+                f"{actual_device}, but expected "
+                f"{expected_device}."
             )
 
     return True
 
 
-# =========================================================
-# GET SAMPLE ID
-# =========================================================
+# =====================================================================
+# 7. STABLE SAMPLE-ID EXTRACTION
+# =====================================================================
 
-def get_sample_id(dataset, index):
+def get_sample_id(
+    dataset,
+    index,
+):
     """
-    Obtain a stable Sample_ID for a validation sample.
+    Return a stable sample identifier.
 
-    When split_dataset() returns a torch.utils.data.Subset,
+    When validation data are represented by torch.utils.data.Subset,
     the original dataset index is retained.
 
-    This is important because all five ablation models must
-    be paired using the SAME validation samples.
-
-    Parameters
-    ----------
-    dataset : Dataset or Subset
-        Validation dataset.
-
-    index : int
-        Position within the validation dataset.
-
-    Returns
-    -------
-    int
-        Stable sample identifier.
+    This is essential because ablation results must be paired
+    sample-by-sample.
     """
-
-    # -----------------------------------------------------
-    # Preserve original dataset index when available
-    # -----------------------------------------------------
 
     if hasattr(dataset, "indices"):
 
@@ -361,16 +466,145 @@ def get_sample_id(dataset, index):
             dataset.indices[index]
         )
 
-    # -----------------------------------------------------
-    # Fallback
-    # -----------------------------------------------------
-
     return int(index)
 
 
-# =========================================================
-# METRIC EVALUATION
-# =========================================================
+# =====================================================================
+# 8. PREDICTION OUTPUT NORMALIZATION
+# =====================================================================
+
+def extract_reconstruction(
+    prediction,
+):
+    """
+    Extract the reconstruction from the production Predictor output.
+
+    The evaluation code deliberately does not assume one historical
+    Predictor uncertainty-return signature.
+
+    Supported forms include:
+
+        (reconstruction, travel_time, uncertainty)
+
+    and
+
+        (reconstruction, travel_time,
+         aleatoric_std, epistemic_std)
+
+    The ablation study requires only the reconstruction because
+    predictive uncertainty is not one of the primary ablation metrics.
+
+    Parameters
+    ----------
+    prediction : tuple
+        Predictor output.
+
+    Returns
+    -------
+    torch.Tensor
+        Reconstruction tensor.
+    """
+
+    if not isinstance(
+        prediction,
+        tuple,
+    ):
+
+        raise TypeError(
+            "Predictor.predict() must return a tuple."
+        )
+
+    if len(prediction) < 1:
+
+        raise ValueError(
+            "Predictor.predict() returned an empty tuple."
+        )
+
+    reconstruction = prediction[0]
+
+    if not torch.is_tensor(reconstruction):
+
+        raise TypeError(
+            "The first Predictor output must be "
+            "a torch.Tensor reconstruction."
+        )
+
+    return reconstruction
+
+
+# =====================================================================
+# 9. TENSOR SHAPE NORMALIZATION
+# =====================================================================
+
+def ensure_batched_tensor(
+    tensor,
+    name,
+):
+    """
+    Ensure a seismic tensor has shape:
+
+        [B, C, D, H, W]
+
+    Parameters
+    ----------
+    tensor : torch.Tensor
+        Input tensor.
+
+    name : str
+        Tensor name for diagnostics.
+    """
+
+    if not torch.is_tensor(tensor):
+
+        raise TypeError(
+            f"{name} must be a torch.Tensor."
+        )
+
+    if tensor.ndim == 4:
+
+        tensor = tensor.unsqueeze(0)
+
+    elif tensor.ndim != 5:
+
+        raise ValueError(
+            f"{name} must have 4 or 5 dimensions. "
+            f"Received shape: {tuple(tensor.shape)}"
+        )
+
+    return tensor
+
+
+# =====================================================================
+# 10. FINITE METRIC VALIDATION
+# =====================================================================
+
+def validate_metric_value(
+    metric_name,
+    value,
+    sample_id,
+):
+    """
+    Ensure a metric is finite.
+
+    Infinite or NaN values are not silently accepted because
+    they would contaminate the paired ablation analysis.
+    """
+
+    value = float(value)
+
+    if not np.isfinite(value):
+
+        raise RuntimeError(
+            f"Non-finite {metric_name} detected for "
+            f"Sample_ID={sample_id}: {value}"
+        )
+
+    return value
+
+
+# =====================================================================
+# 11. PER-SAMPLE EVALUATION
+# =====================================================================
 
 def evaluate_checkpoint(
     model,
@@ -379,57 +613,40 @@ def evaluate_checkpoint(
     device,
 ):
     """
-    Evaluate a trained model checkpoint over every sample
-    in a validation dataset.
+    Evaluate one trained ablation model on every validation sample.
 
-    IMPORTANT
-    ---------
+    No averaging is performed here.
 
-    This function intentionally returns PER-SAMPLE metrics.
+    One output row is produced for every validation sample.
 
-    It does NOT average the validation results.
-
-    This preserves the paired observations required for
-    downstream statistical analysis.
-
-    Parameters
-    ----------
-    model : Network3D
-        Model architecture.
-
-    checkpoint : str
-        Path to trained checkpoint.
-
-    dataset : Dataset
-        Validation dataset.
-
-    device : torch.device
-        Evaluation device.
-
-    Returns
-    -------
-    list of dict
-        One dictionary per validation sample.
+    This preserves the paired structure required by later statistical
+    significance analysis.
     """
 
-    # -----------------------------------------------------
-    # Move model to selected device
-    # -----------------------------------------------------
+    if len(dataset) == 0:
+
+        raise RuntimeError(
+            "Cannot evaluate an empty validation dataset."
+        )
+
+    # -----------------------------------------------------------------
+    # Move model
+    # -----------------------------------------------------------------
 
     model = model.to(device)
 
-    # -----------------------------------------------------
+    # -----------------------------------------------------------------
     # Validate model placement
-    # -----------------------------------------------------
+    # -----------------------------------------------------------------
 
     validate_model_device(
         model,
         device,
     )
 
-    # -----------------------------------------------------
-    # Create predictor
-    # -----------------------------------------------------
+    # -----------------------------------------------------------------
+    # Predictor
+    # -----------------------------------------------------------------
 
     predictor = Predictor(
         model=model,
@@ -437,29 +654,17 @@ def evaluate_checkpoint(
         device=device,
     )
 
-    # -----------------------------------------------------
-    # Validate dataset
-    # -----------------------------------------------------
-
-    num_samples = len(dataset)
-
-    if num_samples == 0:
-
-        raise RuntimeError(
-            "Cannot evaluate an empty validation dataset."
-        )
-
-    # -----------------------------------------------------
-    # Per-sample results
-    # -----------------------------------------------------
+    # -----------------------------------------------------------------
+    # Evaluation results
+    # -----------------------------------------------------------------
 
     sample_results = []
 
-    # -----------------------------------------------------
-    # Evaluation loop
-    # -----------------------------------------------------
+    # -----------------------------------------------------------------
+    # Sample-by-sample evaluation
+    # -----------------------------------------------------------------
 
-    for index in range(num_samples):
+    for index in range(len(dataset)):
 
         sample_id = get_sample_id(
             dataset,
@@ -468,46 +673,85 @@ def evaluate_checkpoint(
 
         print(
             f"Evaluating validation sample "
-            f"{index + 1}/{num_samples} "
+            f"{index + 1}/{len(dataset)} "
             f"(Sample_ID={sample_id})"
         )
 
-        # -------------------------------------------------
-        # Dataset sample
-        # -------------------------------------------------
+        # -------------------------------------------------------------
+        # Retrieve sample
+        # -------------------------------------------------------------
 
         sample = dataset[index]
 
-        # -------------------------------------------------
-        # Validate dataset structure
-        # -------------------------------------------------
-
-        if len(sample) < 4:
+        if len(sample) < 3:
 
             raise ValueError(
                 "Dataset sample must contain at least "
-                "(input_cube, target_cube, mask, "
-                "velocity_model)."
+                "(input_cube, target_cube, mask)."
             )
 
-        (
-            input_cube,
-            target_cube,
-            mask,
-            velocity_model,
-        ) = sample[:4]
+        input_cube = sample[0]
 
-        # -------------------------------------------------
-        # Move tensors to selected device
-        # -------------------------------------------------
+        target_cube = sample[1]
+
+        mask = sample[2]
+
+        # -------------------------------------------------------------
+        # Validate tensors
+        # -------------------------------------------------------------
+
+        input_cube = ensure_batched_tensor(
+            input_cube,
+            "input_cube",
+        )
+
+        target_cube = ensure_batched_tensor(
+            target_cube,
+            "target_cube",
+        )
+
+        mask = ensure_batched_tensor(
+            mask,
+            "mask",
+        )
+
+        # -------------------------------------------------------------
+        # Move tensors
+        # -------------------------------------------------------------
 
         input_cube = input_cube.to(device)
 
         target_cube = target_cube.to(device)
 
-        # -------------------------------------------------
+        mask = mask.to(device)
+
+        # -------------------------------------------------------------
+        # Shape consistency
+        # -------------------------------------------------------------
+
+        if input_cube.shape != target_cube.shape:
+
+            raise ValueError(
+                "Input and target shapes do not match for "
+                f"Sample_ID={sample_id}.\n"
+                f"Input : {tuple(input_cube.shape)}\n"
+                f"Target: {tuple(target_cube.shape)}"
+            )
+
+        if mask.shape != input_cube.shape:
+
+            raise ValueError(
+                "Mask and input shapes do not match for "
+                f"Sample_ID={sample_id}.\n"
+                f"Mask : {tuple(mask.shape)}\n"
+                f"Input: {tuple(input_cube.shape)}"
+            )
+
+        # -------------------------------------------------------------
         # Prediction
-        # -------------------------------------------------
+        # -------------------------------------------------------------
+
+        model.eval()
 
         with torch.no_grad():
 
@@ -515,124 +759,138 @@ def evaluate_checkpoint(
                 input_cube
             )
 
-            if not isinstance(
-                prediction,
-                tuple,
-            ):
+        reconstruction = extract_reconstruction(
+            prediction
+        )
 
-                raise TypeError(
-                    "\nPredictor.predict() must return "
-                    "a tuple."
-                )
-
-            if len(prediction) != 4:
-
-                raise ValueError(
-                    "\nUnexpected Predictor.predict() "
-                    "return signature.\n"
-                    f"Expected 4 values, received "
-                    f"{len(prediction)}."
-                )
-
-            (
-                reconstruction,
-                travel_time,
-                aleatoric_std,
-                epistemic_std,
-            ) = prediction
-
-        # -------------------------------------------------
-        # Ensure target has batch dimension
-        # -------------------------------------------------
-
-        target_batch = target_cube.unsqueeze(0)
-
-        # -------------------------------------------------
-        # Ensure prediction and target use same device
-        # -------------------------------------------------
+        reconstruction = ensure_batched_tensor(
+            reconstruction,
+            "reconstruction",
+        )
 
         reconstruction = reconstruction.to(device)
 
-        target_batch = target_batch.to(device)
+        # -------------------------------------------------------------
+        # Shape validation
+        # -------------------------------------------------------------
 
-        # -------------------------------------------------
-        # Calculate metrics
-        # -------------------------------------------------
+        if reconstruction.shape != target_cube.shape:
+
+            raise ValueError(
+                "Reconstruction and target shapes do not match "
+                f"for Sample_ID={sample_id}.\n"
+                f"Reconstruction: "
+                f"{tuple(reconstruction.shape)}\n"
+                f"Target: "
+                f"{tuple(target_cube.shape)}"
+            )
+
+        # -------------------------------------------------------------
+        # Numerical validation
+        # -------------------------------------------------------------
+
+        if not torch.isfinite(
+            reconstruction
+        ).all():
+
+            raise RuntimeError(
+                f"Reconstruction contains NaN or Inf values "
+                f"for Sample_ID={sample_id}."
+            )
+
+        if not torch.isfinite(
+            target_cube
+        ).all():
+
+            raise RuntimeError(
+                f"Target contains NaN or Inf values "
+                f"for Sample_ID={sample_id}."
+            )
+
+        # -------------------------------------------------------------
+        # Reconstruction metrics
+        # -------------------------------------------------------------
 
         sample_mae = mae(
             reconstruction,
-            target_batch,
+            target_cube,
         )
 
         sample_rmse = rmse(
             reconstruction,
-            target_batch,
+            target_cube,
         )
 
         sample_psnr = psnr(
             reconstruction,
-            target_batch,
+            target_cube,
         )
 
         sample_snr = snr(
             reconstruction,
-            target_batch,
+            target_cube,
         )
 
         sample_ssim = ssim(
             reconstruction,
-            target_batch,
+            target_cube,
         )
 
-        # -------------------------------------------------
-        # Validate metric values
-        # -------------------------------------------------
+        # -------------------------------------------------------------
+        # Convert and validate
+        # -------------------------------------------------------------
 
-        metric_values = {
-            "MAE": sample_mae,
-            "RMSE": sample_rmse,
-            "PSNR": sample_psnr,
-            "SNR": sample_snr,
-            "SSIM": sample_ssim,
-        }
+        sample_mae = validate_metric_value(
+            "MAE",
+            sample_mae.item(),
+            sample_id,
+        )
 
-        for metric_name, metric_value in metric_values.items():
+        sample_rmse = validate_metric_value(
+            "RMSE",
+            sample_rmse.item(),
+            sample_id,
+        )
 
-            if not torch.isfinite(metric_value):
+        sample_psnr = validate_metric_value(
+            "PSNR",
+            sample_psnr.item(),
+            sample_id,
+        )
 
-                raise RuntimeError(
-                    f"{metric_name} produced a "
-                    f"non-finite value for "
-                    f"Sample_ID={sample_id}."
-                )
+        sample_snr = validate_metric_value(
+            "SNR",
+            sample_snr.item(),
+            sample_id,
+        )
 
-        # -------------------------------------------------
-        # Store PER-SAMPLE results
-        # -------------------------------------------------
+        sample_ssim = validate_metric_value(
+            "SSIM",
+            sample_ssim.item(),
+            sample_id,
+        )
 
-        sample_result = {
-            "Sample_ID": sample_id,
-            "MAE": sample_mae.item(),
-            "RMSE": sample_rmse.item(),
-            "PSNR": sample_psnr.item(),
-            "SNR": sample_snr.item(),
-            "SSIM": sample_ssim.item(),
-        }
+        # -------------------------------------------------------------
+        # Store paired observation
+        # -------------------------------------------------------------
 
         sample_results.append(
-            sample_result
+            {
+                "Sample_ID": sample_id,
+                "MAE": sample_mae,
+                "RMSE": sample_rmse,
+                "PSNR": sample_psnr,
+                "SNR": sample_snr,
+                "SSIM": sample_ssim,
+            }
         )
-
-    # -----------------------------------------------------
-    # Return per-sample results
-    # -----------------------------------------------------
 
     return sample_results
 
 
-# =========================================================
-# TRAIN ONE ABLATION MODEL
-# =========================================================
+# =====================================================================
+# 12. TRAIN ONE ABLATION CONFIGURATION
+# =====================================================================
 
 def train_ablation_model(
     model_name,
@@ -641,14 +899,20 @@ def train_ablation_model(
     val_loader,
     device,
     experiment_root,
+    seed,
 ):
     """
-    Train one ablation configuration from scratch.
+    Train one ablation configuration completely from scratch.
 
-    Returns
-    -------
-    str
-        Path to the best checkpoint.
+    No checkpoint is resumed.
+
+    Each model receives its own:
+
+        model instance
+        optimizer
+        Trainer
+        ExperimentManager
+        checkpoint directory
     """
 
     print()
@@ -657,6 +921,16 @@ def train_ablation_model(
         f"TRAINING ABLATION MODEL: {model_name}"
     )
     print("=" * 70)
+
+    # -----------------------------------------------------------------
+    # Reset reproducibility state
+    # -----------------------------------------------------------------
+
+    set_global_seed(seed)
+
+    # -----------------------------------------------------------------
+    # Display configuration
+    # -----------------------------------------------------------------
 
     print()
     print(
@@ -674,40 +948,42 @@ def train_ablation_model(
         settings["use_uncertainty"],
     )
 
-    print()
     print(
-        "Experiment Root:",
+        "Seed        :",
+        seed,
+    )
+
+    print(
+        "Device      :",
+        device,
+    )
+
+    print(
+        "Experiment  :",
         experiment_root,
     )
 
-    # =====================================================
-    # BUILD MODEL
-    # =====================================================
+    # -----------------------------------------------------------------
+    # Build completely new model
+    # -----------------------------------------------------------------
 
-    model = Network3D(
-        use_attention=settings["use_attention"],
-        use_residual=settings["use_residual"],
-        use_uncertainty=settings["use_uncertainty"],
-    ).to(device)
+    model = build_ablation_model(
+        settings,
+        device,
+    )
 
-    # =====================================================
-    # VALIDATE MODEL DEVICE
-    # =====================================================
+    # -----------------------------------------------------------------
+    # Validate model device
+    # -----------------------------------------------------------------
 
     validate_model_device(
         model,
         device,
     )
 
-    print()
-    print(
-        "Model Device:",
-        next(model.parameters()).device,
-    )
-
-    # =====================================================
-    # LOSS
-    # =====================================================
+    # -----------------------------------------------------------------
+    # Loss
+    # -----------------------------------------------------------------
 
     criterion = TotalLoss(
         dx=DX,
@@ -715,26 +991,27 @@ def train_ablation_model(
         dz=DZ,
     )
 
-    # =====================================================
-    # OPTIMIZER
-    # =====================================================
+    # -----------------------------------------------------------------
+    # Optimizer
+    # -----------------------------------------------------------------
 
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=LEARNING_RATE,
+        weight_decay=WEIGHT_DECAY,
     )
 
-    # =====================================================
-    # EXPERIMENT MANAGER
-    # =====================================================
+    # -----------------------------------------------------------------
+    # Experiment manager
+    # -----------------------------------------------------------------
 
     experiment_manager = ExperimentManager(
         root=experiment_root,
     )
 
-    # =====================================================
-    # TRAINER
-    # =====================================================
+    # -----------------------------------------------------------------
+    # Trainer
+    # -----------------------------------------------------------------
 
     trainer = Trainer(
         model=model,
@@ -744,9 +1021,9 @@ def train_ablation_model(
         experiment_manager=experiment_manager,
     )
 
-    # =====================================================
-    # TRAIN FROM SCRATCH
-    # =====================================================
+    # -----------------------------------------------------------------
+    # Train strictly from scratch
+    # -----------------------------------------------------------------
 
     trainer.fit(
         train_loader,
@@ -755,21 +1032,20 @@ def train_ablation_model(
         resume=False,
     )
 
-    # =====================================================
-    # BEST CHECKPOINT
-    # =====================================================
+    # -----------------------------------------------------------------
+    # Locate best checkpoint
+    # -----------------------------------------------------------------
 
     checkpoint = os.path.join(
         experiment_manager.checkpoints,
         "best_model.pth",
     )
 
-    if not os.path.exists(checkpoint):
+    if not os.path.isfile(checkpoint):
 
         raise FileNotFoundError(
-            f"\nBest checkpoint was not created for "
-            f"{model_name}:\n"
-            f"{checkpoint}"
+            f"Best checkpoint was not created for "
+            f"{model_name}:\n{checkpoint}"
         )
 
     print()
@@ -782,50 +1058,337 @@ def train_ablation_model(
     return checkpoint
 
 
-# =========================================================
-# MAIN ABLATION PROCEDURE
-# =========================================================
+# =====================================================================
+# 13. VALIDATE ABLATION PAIRING
+# =====================================================================
+
+def validate_ablation_pairing(
+    dataframe,
+    expected_sample_ids,
+):
+    """
+    Perform strict validation of the paired ablation dataset.
+    """
+
+    # -----------------------------------------------------------------
+    # Expected number of rows
+    # -----------------------------------------------------------------
+
+    expected_rows = (
+        len(expected_sample_ids)
+        * len(ABLATION_MODELS)
+    )
+
+    if len(dataframe) != expected_rows:
+
+        raise RuntimeError(
+            "Unexpected number of ablation rows.\n"
+            f"Expected: {expected_rows}\n"
+            f"Received: {len(dataframe)}"
+        )
+
+    # -----------------------------------------------------------------
+    # Sample IDs
+    # -----------------------------------------------------------------
+
+    expected_ids = set(
+        expected_sample_ids
+    )
+
+    actual_ids = set(
+        dataframe["Sample_ID"].unique()
+    )
+
+    if actual_ids != expected_ids:
+
+        raise RuntimeError(
+            "Validation Sample_ID mismatch.\n"
+            f"Expected: {expected_ids}\n"
+            f"Received: {actual_ids}"
+        )
+
+    # -----------------------------------------------------------------
+    # Model IDs
+    # -----------------------------------------------------------------
+
+    expected_models = set(
+        ABLATION_MODELS.keys()
+    )
+
+    actual_models = set(
+        dataframe["Model"].unique()
+    )
+
+    if actual_models != expected_models:
+
+        raise RuntimeError(
+            "Ablation model set mismatch.\n"
+            f"Expected: {expected_models}\n"
+            f"Received: {actual_models}"
+        )
+
+    # -----------------------------------------------------------------
+    # Duplicate Model + Sample_ID pairs
+    # -----------------------------------------------------------------
+
+    duplicates = dataframe[
+        dataframe.duplicated(
+            subset=[
+                "Model",
+                "Sample_ID",
+            ],
+            keep=False,
+        )
+    ]
+
+    if not duplicates.empty:
+
+        raise RuntimeError(
+            "Duplicate Model + Sample_ID pairs detected:\n"
+            f"{duplicates}"
+        )
+
+    # -----------------------------------------------------------------
+    # Every model must contain every validation sample
+    # -----------------------------------------------------------------
+
+    for model_name in expected_models:
+
+        model_ids = set(
+            dataframe.loc[
+                dataframe["Model"] == model_name,
+                "Sample_ID",
+            ]
+        )
+
+        if model_ids != expected_ids:
+
+            raise RuntimeError(
+                f"Sample pairing failure for {model_name}.\n"
+                f"Expected: {expected_ids}\n"
+                f"Received: {model_ids}"
+            )
+
+    return True
+
+
+# =====================================================================
+# 14. BUILD ABLATION SUMMARY
+# =====================================================================
+
+def build_ablation_summary(
+    dataframe,
+):
+    """
+    Calculate model-level means and descriptive percentage changes
+    relative to the Full_Model.
+
+    The percentage change is:
+
+        ((Ablation - Full) / Full) * 100
+
+    Interpretation:
+
+        MAE/RMSE:
+            positive = larger error than Full_Model
+            negative = smaller error than Full_Model
+
+        PSNR/SNR/SSIM:
+            positive = larger metric than Full_Model
+            negative = smaller metric than Full_Model
+    """
+
+    metric_columns = [
+        "MAE",
+        "RMSE",
+        "PSNR",
+        "SNR",
+        "SSIM",
+    ]
+
+    # -----------------------------------------------------------------
+    # Model-level mean metrics
+    # -----------------------------------------------------------------
+
+    summary = (
+        dataframe
+        .groupby(
+            "Model",
+            as_index=False,
+        )[metric_columns]
+        .mean()
+    )
+
+    # -----------------------------------------------------------------
+    # Architecture configuration
+    # -----------------------------------------------------------------
+
+    configuration = (
+        dataframe[
+            [
+                "Model",
+                "Attention",
+                "Residual",
+                "Uncertainty",
+            ]
+        ]
+        .drop_duplicates(
+            subset=["Model"]
+        )
+    )
+
+    summary = configuration.merge(
+        summary,
+        on="Model",
+        how="left",
+    )
+
+    # -----------------------------------------------------------------
+    # Full Model reference
+    # -----------------------------------------------------------------
+
+    full_rows = summary[
+        summary["Model"] == "Full_Model"
+    ]
+
+    if full_rows.empty:
+
+        raise RuntimeError(
+            "Full_Model is missing from ablation summary."
+        )
+
+    full_model = full_rows.iloc[0]
+
+    # -----------------------------------------------------------------
+    # Percentage changes
+    # -----------------------------------------------------------------
+
+    for metric in metric_columns:
+
+        change_column = (
+            f"{metric}_Change_Percent"
+        )
+
+        reference = float(
+            full_model[metric]
+        )
+
+        if np.isfinite(reference) and reference != 0.0:
+
+            summary[change_column] = (
+                (
+                    summary[metric]
+                    - reference
+                )
+                / reference
+            ) * 100.0
+
+        else:
+
+            summary[change_column] = np.nan
+
+    # -----------------------------------------------------------------
+    # Reorder columns
+    # -----------------------------------------------------------------
+
+    summary_columns = [
+        "Model",
+        "Attention",
+        "Residual",
+        "Uncertainty",
+        "MAE",
+        "RMSE",
+        "PSNR",
+        "SNR",
+        "SSIM",
+        "MAE_Change_Percent",
+        "RMSE_Change_Percent",
+        "PSNR_Change_Percent",
+        "SNR_Change_Percent",
+        "SSIM_Change_Percent",
+    ]
+
+    summary = summary[
+        summary_columns
+    ]
+
+    return summary
+
+
+# =====================================================================
+# 15. MAIN ABLATION PROCEDURE
+# =====================================================================
 
 def run_ablation():
     """
     Execute the complete controlled ablation study.
     """
 
+    # =================================================================
+    # REPRODUCIBILITY
+    # =================================================================
+
+    set_global_seed(SEED)
+
+    # =================================================================
+    # HEADER
+    # =================================================================
+
     print()
     print("=" * 70)
-    print("ABLATION STUDY")
+    print("FINAL PhD ABLATION STUDY")
     print("=" * 70)
 
-    # =====================================================
+    # =================================================================
     # EXPERIMENT INFORMATION
-    # =====================================================
+    # =================================================================
 
     print()
     print(
-        "Experiment :",
+        "Experiment Name:",
         EXPERIMENT_NAME,
     )
 
     print(
-        "Report Dir :",
+        "Report Directory:",
         REPORT_DIR,
     )
 
-    # =====================================================
+    print(
+        "Checkpoint Directory:",
+        CHECKPOINT_DIR,
+    )
+
+    print(
+        "Validation Split:",
+        VALIDATION_SPLIT,
+    )
+
+    print(
+        "Seed:",
+        SEED,
+    )
+
+    # =================================================================
     # DEVICE
-    # =====================================================
+    # =================================================================
 
     device = get_device()
 
     print()
     print(
-        "Device     :",
+        "Configured Device:",
+        CONFIG_DEVICE,
+    )
+
+    print(
+        "Resolved Device:",
         device,
     )
 
-    # =====================================================
+    # =================================================================
     # BUILD DATASET
-    # =====================================================
+    # =================================================================
 
     print()
     print("=" * 70)
@@ -834,35 +1397,24 @@ def run_ablation():
 
     dataset = build_dataset()
 
-    print()
-    print(
-        "Dataset Length:",
-        len(dataset),
-    )
-
     if len(dataset) == 0:
 
         raise RuntimeError(
             "Ablation dataset is empty."
         )
 
-    # =====================================================
+    print()
+    print(
+        "Total Dataset Samples:",
+        len(dataset),
+    )
+
+    # =================================================================
     # TRAIN / VALIDATION SPLIT
-    # =====================================================
+    # =================================================================
 
     train_dataset, val_dataset = split_dataset(
         dataset
-    )
-
-    print()
-    print(
-        "Training Samples  :",
-        len(train_dataset),
-    )
-
-    print(
-        "Validation Samples:",
-        len(val_dataset),
     )
 
     if len(train_dataset) == 0:
@@ -877,9 +1429,20 @@ def run_ablation():
             "Validation dataset is empty."
         )
 
-    # =====================================================
-    # DISPLAY VALIDATION SAMPLE IDS
-    # =====================================================
+    print()
+    print(
+        "Training Samples:",
+        len(train_dataset),
+    )
+
+    print(
+        "Validation Samples:",
+        len(val_dataset),
+    )
+
+    # =================================================================
+    # VALIDATION SAMPLE IDs
+    # =================================================================
 
     validation_sample_ids = [
         get_sample_id(
@@ -900,9 +1463,9 @@ def run_ablation():
         validation_sample_ids
     )
 
-    # =====================================================
-    # DATALOADERS
-    # =====================================================
+    # =================================================================
+    # DATA LOADERS
+    # =================================================================
 
     train_loader = create_ablation_dataloader(
         train_dataset,
@@ -914,39 +1477,58 @@ def run_ablation():
         shuffle=False,
     )
 
-    # =====================================================
-    # RESULTS
-    # =====================================================
+    # =================================================================
+    # RESULT STORAGE
+    # =================================================================
 
     all_results = []
 
-    # =====================================================
-    # LOOP THROUGH ABLATION CONFIGURATIONS
-    # =====================================================
+    # =================================================================
+    # ABLATION LOOP
+    # =================================================================
 
     for model_name, settings in ABLATION_MODELS.items():
 
         print()
         print("=" * 70)
         print(
-            f"CONFIGURATION: {model_name}"
+            f"ABLATION CONFIGURATION: {model_name}"
         )
         print("=" * 70)
 
-        # =================================================
-        # ISOLATED EXPERIMENT DIRECTORY
-        # =================================================
+        # -------------------------------------------------------------
+        # Independent seed
+        #
+        # Same seed protocol for each configuration ensures that
+        # differences are attributable to the architecture rather
+        # than uncontrolled random-state differences.
+        # -------------------------------------------------------------
+
+        set_global_seed(SEED)
+
+        # -------------------------------------------------------------
+        # Isolated experiment directory
+        # -------------------------------------------------------------
 
         experiment_root = os.path.join(
-            "outputs",
-            EXPERIMENT_NAME,
+            CHECKPOINT_DIR,
+            "..",
             "ablation",
             model_name,
         )
 
-        # =================================================
-        # TRAIN FROM SCRATCH
-        # =================================================
+        experiment_root = os.path.abspath(
+            experiment_root
+        )
+
+        os.makedirs(
+            experiment_root,
+            exist_ok=True,
+        )
+
+        # -------------------------------------------------------------
+        # Train from scratch
+        # -------------------------------------------------------------
 
         checkpoint = train_ablation_model(
             model_name=model_name,
@@ -955,59 +1537,60 @@ def run_ablation():
             val_loader=val_loader,
             device=device,
             experiment_root=experiment_root,
+            seed=SEED,
         )
 
-        # =================================================
-        # BUILD MODEL FOR EVALUATION
-        # =================================================
+        # -------------------------------------------------------------
+        # New model instance for evaluation
+        # -------------------------------------------------------------
 
-        model = build_model(
+        evaluation_model = build_ablation_model(
             settings,
             device,
         )
 
-        # =================================================
-        # EVALUATE EVERY VALIDATION SAMPLE
-        # =================================================
+        # -------------------------------------------------------------
+        # Evaluate every validation sample
+        # -------------------------------------------------------------
 
         sample_metrics = evaluate_checkpoint(
-            model=model,
+            model=evaluation_model,
             checkpoint=checkpoint,
             dataset=val_dataset,
             device=device,
         )
 
-        # =================================================
-        # ADD CONFIGURATION INFORMATION TO EACH SAMPLE
-        # =================================================
+        # -------------------------------------------------------------
+        # Attach configuration information
+        # -------------------------------------------------------------
 
-        for sample_result in sample_metrics:
+        for result in sample_metrics:
 
-            sample_result["Model"] = model_name
+            result["Model"] = model_name
 
-            sample_result["Attention"] = (
+            result["Attention"] = (
                 settings["use_attention"]
             )
 
-            sample_result["Residual"] = (
+            result["Residual"] = (
                 settings["use_residual"]
             )
 
-            sample_result["Uncertainty"] = (
+            result["Uncertainty"] = (
                 settings["use_uncertainty"]
             )
 
-            sample_result["Checkpoint"] = (
+            result["Checkpoint"] = (
                 checkpoint
             )
 
             all_results.append(
-                sample_result
+                result
             )
 
-        # =================================================
-        # DISPLAY MODEL-LEVEL MEANS
-        # =================================================
+        # -------------------------------------------------------------
+        # Display model-level diagnostic means
+        # -------------------------------------------------------------
 
         model_dataframe = pd.DataFrame(
             sample_metrics
@@ -1015,109 +1598,37 @@ def run_ablation():
 
         print()
         print(
-            f"{model_name} RESULTS"
+            f"{model_name} validation means"
         )
 
         print("-" * 50)
 
-        print(
-            f"MAE  : "
-            f"{model_dataframe['MAE'].mean():.6f}"
-        )
+        for metric in [
+            "MAE",
+            "RMSE",
+            "PSNR",
+            "SNR",
+            "SSIM",
+        ]:
 
-        print(
-            f"RMSE : "
-            f"{model_dataframe['RMSE'].mean():.6f}"
-        )
+            print(
+                f"{metric:<6}: "
+                f"{model_dataframe[metric].mean():.6f}"
+            )
 
-        print(
-            f"PSNR : "
-            f"{model_dataframe['PSNR'].mean():.6f}"
-        )
-
-        print(
-            f"SNR  : "
-            f"{model_dataframe['SNR'].mean():.6f}"
-        )
-
-        print(
-            f"SSIM : "
-            f"{model_dataframe['SSIM'].mean():.6f}"
-        )
-
-    # =====================================================
-    # CREATE PER-SAMPLE DATAFRAME
-    # =====================================================
+    # =================================================================
+    # COMBINE RESULTS
+    # =================================================================
 
     dataframe = pd.DataFrame(
         all_results
     )
 
-    # =====================================================
-    # VALIDATE RESULTS
-    # =====================================================
+    # =================================================================
+    # REQUIRED COLUMNS
+    # =================================================================
 
-    expected_rows = (
-        len(val_dataset)
-        * len(ABLATION_MODELS)
-    )
-
-    if len(dataframe) != expected_rows:
-
-        raise RuntimeError(
-            "\nUnexpected number of ablation "
-            "result rows.\n"
-            f"Expected: {expected_rows}\n"
-            f"Received: {len(dataframe)}"
-        )
-
-    # -----------------------------------------------------
-    # Validate Sample_ID pairing
-    # -----------------------------------------------------
-
-    expected_sample_ids = set(
-        validation_sample_ids
-    )
-
-    actual_sample_ids = set(
-        dataframe["Sample_ID"].unique()
-    )
-
-    if actual_sample_ids != expected_sample_ids:
-
-        raise RuntimeError(
-            "\nValidation Sample_ID mismatch.\n"
-            f"Expected: {expected_sample_ids}\n"
-            f"Received: {actual_sample_ids}"
-        )
-
-    # -----------------------------------------------------
-    # Validate model/sample pairing
-    # -----------------------------------------------------
-
-    duplicate_pairs = dataframe[
-        dataframe.duplicated(
-            subset=[
-                "Model",
-                "Sample_ID",
-            ],
-            keep=False,
-        )
-    ]
-
-    if not duplicate_pairs.empty:
-
-        raise RuntimeError(
-            "\nDuplicate Model + Sample_ID "
-            "pairs detected.\n"
-            f"{duplicate_pairs}"
-        )
-
-    # =====================================================
-    # COLUMN ORDER
-    # =====================================================
-
-    columns = [
+    required_columns = [
         "Model",
         "Sample_ID",
         "Attention",
@@ -1131,13 +1642,31 @@ def run_ablation():
         "Checkpoint",
     ]
 
-    dataframe = dataframe[
-        columns
+    missing_columns = [
+        column
+        for column in required_columns
+        if column not in dataframe.columns
     ]
 
-    # =====================================================
+    if missing_columns:
+
+        raise RuntimeError(
+            "Ablation results are missing required columns:\n"
+            f"{missing_columns}"
+        )
+
+    # =================================================================
+    # VALIDATE PAIRED STRUCTURE
+    # =================================================================
+
+    validate_ablation_pairing(
+        dataframe,
+        validation_sample_ids,
+    )
+
+    # =================================================================
     # SORT RESULTS
-    # =====================================================
+    # =================================================================
 
     dataframe = dataframe.sort_values(
         by=[
@@ -1148,18 +1677,18 @@ def run_ablation():
         drop=True
     )
 
-    # =====================================================
+    # =================================================================
     # CREATE REPORT DIRECTORY
-    # =====================================================
+    # =================================================================
 
     os.makedirs(
         REPORT_DIR,
         exist_ok=True,
     )
 
-    # =====================================================
-    # SAVE PER-SAMPLE ABLATION RESULTS
-    # =====================================================
+    # =================================================================
+    # SAVE PER-SAMPLE RESULTS
+    # =================================================================
 
     output_file = os.path.join(
         REPORT_DIR,
@@ -1171,215 +1700,17 @@ def run_ablation():
         index=False,
     )
 
-    # =====================================================
-    # CREATE MODEL-LEVEL SUMMARY
-    # =====================================================
+    # =================================================================
+    # BUILD SUMMARY
+    # =================================================================
 
-    metric_columns = [
-        "MAE",
-        "RMSE",
-        "PSNR",
-        "SNR",
-        "SSIM",
-    ]
-
-    summary_dataframe = (
+    summary_dataframe = build_ablation_summary(
         dataframe
-        .groupby(
-            "Model",
-            as_index=False,
-        )[metric_columns]
-        .mean()
     )
 
-    # =====================================================
-    # ADD CONFIGURATION FLAGS
-    # =====================================================
-
-    configuration_dataframe = (
-        dataframe[
-            [
-                "Model",
-                "Attention",
-                "Residual",
-                "Uncertainty",
-            ]
-        ]
-        .drop_duplicates(
-            subset=["Model"]
-        )
-    )
-
-    summary_dataframe = (
-        configuration_dataframe
-        .merge(
-            summary_dataframe,
-            on="Model",
-            how="left",
-        )
-    )
-
-    # =====================================================
-    # ORDER SUMMARY COLUMNS
-    # =====================================================
-
-    summary_columns = [
-        "Model",
-        "Attention",
-        "Residual",
-        "Uncertainty",
-        "MAE",
-        "RMSE",
-        "PSNR",
-        "SNR",
-        "SSIM",
-    ]
-
-    summary_dataframe = summary_dataframe[
-        summary_columns
-    ]
-
-    # =====================================================
-    # CALCULATE PERCENTAGE CHANGE RELATIVE TO FULL MODEL
-    # =====================================================
-
-    full_model_rows = summary_dataframe[
-        summary_dataframe["Model"] == "Full_Model"
-    ]
-
-    if not full_model_rows.empty:
-
-        full_model = (
-            full_model_rows.iloc[0]
-        )
-
-        summary_rows = []
-
-        for _, row in summary_dataframe.iterrows():
-
-            summary_row = row.to_dict()
-
-            # ---------------------------------------------
-            # MAE percentage change
-            # ---------------------------------------------
-
-            if full_model["MAE"] != 0:
-
-                summary_row[
-                    "MAE_Change_Percent"
-                ] = (
-                    (
-                        row["MAE"]
-                        - full_model["MAE"]
-                    )
-                    / full_model["MAE"]
-                ) * 100.0
-
-            else:
-
-                summary_row[
-                    "MAE_Change_Percent"
-                ] = 0.0
-
-            # ---------------------------------------------
-            # RMSE percentage change
-            # ---------------------------------------------
-
-            if full_model["RMSE"] != 0:
-
-                summary_row[
-                    "RMSE_Change_Percent"
-                ] = (
-                    (
-                        row["RMSE"]
-                        - full_model["RMSE"]
-                    )
-                    / full_model["RMSE"]
-                ) * 100.0
-
-            else:
-
-                summary_row[
-                    "RMSE_Change_Percent"
-                ] = 0.0
-
-            # ---------------------------------------------
-            # PSNR percentage change
-            # ---------------------------------------------
-
-            if full_model["PSNR"] != 0:
-
-                summary_row[
-                    "PSNR_Change_Percent"
-                ] = (
-                    (
-                        row["PSNR"]
-                        - full_model["PSNR"]
-                    )
-                    / full_model["PSNR"]
-                ) * 100.0
-
-            else:
-
-                summary_row[
-                    "PSNR_Change_Percent"
-                ] = 0.0
-
-            # ---------------------------------------------
-            # SNR percentage change
-            # ---------------------------------------------
-
-            if full_model["SNR"] != 0:
-
-                summary_row[
-                    "SNR_Change_Percent"
-                ] = (
-                    (
-                        row["SNR"]
-                        - full_model["SNR"]
-                    )
-                    / full_model["SNR"]
-                ) * 100.0
-
-            else:
-
-                summary_row[
-                    "SNR_Change_Percent"
-                ] = 0.0
-
-            # ---------------------------------------------
-            # SSIM percentage change
-            # ---------------------------------------------
-
-            if full_model["SSIM"] != 0:
-
-                summary_row[
-                    "SSIM_Change_Percent"
-                ] = (
-                    (
-                        row["SSIM"]
-                        - full_model["SSIM"]
-                    )
-                    / full_model["SSIM"]
-                ) * 100.0
-
-            else:
-
-                summary_row[
-                    "SSIM_Change_Percent"
-                ] = 0.0
-
-            summary_rows.append(
-                summary_row
-            )
-
-        summary_dataframe = pd.DataFrame(
-            summary_rows
-        )
-
-    # =====================================================
+    # =================================================================
     # SAVE SUMMARY
-    # =====================================================
+    # =================================================================
 
     summary_file = os.path.join(
         REPORT_DIR,
@@ -1391,9 +1722,54 @@ def run_ablation():
         index=False,
     )
 
-    # =====================================================
-    # DISPLAY FINAL PER-SAMPLE TABLE
-    # =====================================================
+    # =================================================================
+    # SAVE METADATA
+    # =================================================================
+
+    metadata = {
+        "study": "Controlled PhD Ablation Study",
+        "experiment_name": EXPERIMENT_NAME,
+        "timestamp": datetime.now().isoformat(),
+        "seed": SEED,
+        "configured_device": CONFIG_DEVICE,
+        "resolved_device": str(device),
+        "dataset_size": len(dataset),
+        "training_samples": len(train_dataset),
+        "validation_samples": len(val_dataset),
+        "validation_sample_ids": validation_sample_ids,
+        "batch_size": BATCH_SIZE,
+        "epochs": NUM_EPOCHS,
+        "learning_rate": LEARNING_RATE,
+        "weight_decay": WEIGHT_DECAY,
+        "validation_split": VALIDATION_SPLIT,
+        "dx": DX,
+        "dy": DY,
+        "dz": DZ,
+        "ablation_configurations": ABLATION_MODELS,
+        "per_sample_output": output_file,
+        "summary_output": summary_file,
+    }
+
+    metadata_file = os.path.join(
+        REPORT_DIR,
+        "ablation_metadata.json",
+    )
+
+    with open(
+        metadata_file,
+        "w",
+        encoding="utf-8",
+    ) as file:
+
+        json.dump(
+            metadata,
+            file,
+            indent=4,
+        )
+
+    # =================================================================
+    # DISPLAY PER-SAMPLE RESULTS
+    # =================================================================
 
     print()
     print("=" * 70)
@@ -1408,9 +1784,9 @@ def run_ablation():
         )
     )
 
-    # =====================================================
+    # =================================================================
     # DISPLAY SUMMARY
-    # =====================================================
+    # =================================================================
 
     print()
     print("=" * 70)
@@ -1425,13 +1801,18 @@ def run_ablation():
         )
     )
 
-    # =====================================================
-    # DISPLAY OUTPUT FILES
-    # =====================================================
+    # =================================================================
+    # OUTPUT FILES
+    # =================================================================
+
+    print()
+    print("=" * 70)
+    print("ABLATION OUTPUT FILES")
+    print("=" * 70)
 
     print()
     print(
-        "Results saved:"
+        "Per-sample results:"
     )
 
     print(
@@ -1440,28 +1821,41 @@ def run_ablation():
 
     print()
     print(
-        "Summary saved:"
+        "Summary:"
     )
 
     print(
         summary_file
     )
 
-    # =====================================================
-    # COMPLETE
-    # =====================================================
+    print()
+    print(
+        "Metadata:"
+    )
+
+    print(
+        metadata_file
+    )
+
+    # =================================================================
+    # COMPLETION
+    # =================================================================
 
     print()
     print("=" * 70)
     print("ABLATION STUDY COMPLETE")
     print("=" * 70)
 
-    return dataframe, summary_dataframe
+    return (
+        dataframe,
+        summary_dataframe,
+    )
 
 
-# =========================================================
+# =====================================================================
 # ENTRY POINT
-# =========================================================
+# =====================================================================
 
 if __name__ == "__main__":
+
     run_ablation()

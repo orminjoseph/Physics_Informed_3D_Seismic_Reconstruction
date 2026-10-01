@@ -1,84 +1,115 @@
 """
 =========================================================
-Dictionary Learning Baseline - Controlled Matrix Test
+Dictionary Learning Baseline Test
 =========================================================
 
-Validates the Dictionary Learning reconstruction baseline
-across the complete controlled experimental matrix.
+Focused validation test for the Dictionary Learning
+seismic reconstruction baseline.
 
-Controlled experimental matrix:
+Purpose
+-------
+This test validates ONLY the Dictionary Learning
+reconstruction implementation.
 
-    Geological modes : 6
-    Missing rates    : 5
-    Missing mechanisms: 5
-    Random seeds     : 5
+It does NOT execute the 750-case controlled experimental
+matrix.
 
-Total:
+The complete controlled experimental matrix belongs to:
 
-    6 × 5 × 5 × 5 = 750 cases
+    evaluation/baselines/
+        dictionary_learning_controlled_matrix.py
 
-All experiments use the same:
+This focused test validates:
 
-    Cube size        : 64 × 128 × 128
-    Patch size       : 8 × 8 × 8
-    Dictionary size  : 64 components
-    Alpha            : 1.0
-    Maximum iterations: 20
-    Batch size       : 64
-    Training patches : 2000
-    Minimum observed : 0.80
+    1. Synthetic dataset generation
+    2. Tensor shapes
+    3. Tensor finiteness
+    4. Mask validity
+    5. Input consistency
+    6. Dictionary Learning reconstruction
+    7. Reconstruction shape
+    8. Reconstruction finiteness
+    9. Exact observed-data preservation
+   10. Modification of missing samples
+   11. Reconstruction metrics
+   12. Deterministic dataset generation
+   13. Deterministic Dictionary Learning reconstruction
 
-Observed seismic samples are preserved exactly.
+Test configuration
+------------------
+Cube size       : 64 × 128 × 128
+Missing rate    : 30%
+Geology         : folded
+Mask mechanism  : missing_crosslines
+Seed            : 42
+
+Dictionary Learning configuration
+----------------------------------
+Patch size              : 8 × 8 × 8
+Dictionary components   : 64
+Alpha                   : 1.0
+Maximum iterations      : 20
+Batch size              : 64
+Training patches        : 2000
+Minimum observed        : 0.80
+
+Observed seismic samples must be preserved exactly.
 
 Author: Ormin Joseph
 =========================================================
 """
 
-import csv
-import os
-import time
-from collections import defaultdict
+# =========================================================
+# IMPORTS
+# =========================================================
 
 import torch
 
-from dataset.synthetic_dataset import SyntheticSeismicDataset
+from dataset.synthetic_dataset import (
+    SyntheticSeismicDataset
+)
 
-from evaluation.baselines.dictionary_learning import (
-    dictionary_learning_reconstruction,
+from evaluation.baselines.dictionary_learning_controlled_matrix import (
+    dictionary_learning_reconstruction
+)
+
+from metrics.reconstruction_metrics import (
+    mae,
+    rmse,
+    psnr,
+    snr,
+    ssim
 )
 
 
 # =========================================================
-# Experimental configuration
+# TEST CONFIGURATION
 # =========================================================
 
-CUBE_SIZE = (64, 128, 128)
+CUBE_SIZE = (
+    64,
+    128,
+    128,
+)
 
-MISSING_RATES = [
-    0.30,
-]
+MISSING_RATE = 0.30
 
-GEOLOGICAL_MODES = [
-    "horizontal",
-    "dipping",
-]
+GEOLOGICAL_MODE = "folded"
 
-MASK_MODES = [
-    "random_voxels",
-    "missing_traces",
-]
+MASK_MODE = "missing_crosslines"
 
-SEEDS = [
-    42,
-    43,
-]
+SEED = 42
 
 
 # =========================================================
-# Dictionary Learning parameters
+# DICTIONARY LEARNING CONFIGURATION
 # =========================================================
 
-PATCH_SIZE = (8, 8, 8)
+PATCH_SIZE = (
+    8,
+    8,
+    8,
+)
 
 N_COMPONENTS = 64
 
@@ -94,321 +125,453 @@ MIN_OBSERVED_FRACTION = 0.80
 
 
 # =========================================================
-# Output configuration
+# NUMERICAL VALIDATION
 # =========================================================
 
-OUTPUT_DIR = os.path.join(
-    "outputs",
-    "synthetic_training",
-    "reports",
-)
-
-RAW_RESULTS_FILE = os.path.join(
-    OUTPUT_DIR,
-    "dictionary_learning_controlled_matrix.csv",
-)
-
-SUMMARY_RESULTS_FILE = os.path.join(
-    OUTPUT_DIR,
-    "dictionary_learning_controlled_matrix_summary.csv",
-)
+OBSERVED_TOLERANCE = 1.0e-6
 
 
 # =========================================================
-# Metric functions
+# HELPER: FINITE TENSOR VALIDATION
 # =========================================================
 
-def mae(prediction, target):
+def tensor_is_finite(
+    tensor
+):
     """
-    Mean Absolute Error.
-    """
-
-    return torch.mean(
-        torch.abs(prediction - target)
-    ).item()
-
-
-def rmse(prediction, target):
-    """
-    Root Mean Square Error.
+    Return True when every element of the tensor is finite.
     """
 
-    return torch.sqrt(
-        torch.mean(
-            (prediction - target) ** 2
+    return bool(
+        torch.isfinite(
+            tensor
+        ).all().item()
+    )
+
+
+# =========================================================
+# HELPER: METRIC CONVERSION
+# =========================================================
+
+def metric_to_float(
+    value
+):
+    """
+    Convert a metric result into a Python float.
+
+    Supports:
+        torch.Tensor
+        Python numeric values
+    """
+
+    if isinstance(
+        value,
+        torch.Tensor
+    ):
+        return float(
+            value.detach()
+            .cpu()
+            .item()
         )
-    ).item()
+
+    return float(value)
 
 
-def psnr(prediction, target, data_range=2.0):
+# =========================================================
+# HELPER: COMPUTE METRICS
+# =========================================================
+
+def compute_metrics(
+    reconstruction,
+    target
+):
     """
-    Peak Signal-to-Noise Ratio.
-
-    Synthetic seismic data are normalized approximately
-    to [-1, 1], therefore data_range = 2.
+    Compute the project's standard reconstruction metrics.
     """
 
-    mse = torch.mean(
-        (prediction - target) ** 2
-    ).item()
-
-    if mse == 0.0:
-        return float("inf")
-
-    return (
-        10.0
-        * torch.log10(
-            torch.tensor(
-                (data_range ** 2) / mse
+    return {
+        "MAE": metric_to_float(
+            mae(
+                reconstruction,
+                target
             )
-        )
-    ).item()
+        ),
 
+        "RMSE": metric_to_float(
+            rmse(
+                reconstruction,
+                target
+            )
+        ),
 
-def snr(prediction, target):
-    """
-    Signal-to-Noise Ratio.
-    """
+        "PSNR": metric_to_float(
+            psnr(
+                reconstruction,
+                target
+            )
+        ),
 
-    signal_power = torch.sum(
-        target ** 2
-    )
+        "SNR": metric_to_float(
+            snr(
+                reconstruction,
+                target
+            )
+        ),
 
-    noise_power = torch.sum(
-        (target - prediction) ** 2
-    )
-
-    if noise_power.item() == 0.0:
-        return float("inf")
-
-    return (
-        10.0
-        * torch.log10(
-            signal_power / noise_power
-        )
-    ).item()
-
-
-def ssim_simple(
-    prediction,
-    target,
-    data_range=2.0,
-):
-    """
-    Simple global SSIM-style measure used consistently
-    with the validated single-sample Dictionary Learning test.
-
-    The final unified evaluation pipeline should use the
-    project's standard SSIM implementation.
-    """
-
-    x = prediction.float()
-    y = target.float()
-
-    mu_x = torch.mean(x)
-    mu_y = torch.mean(y)
-
-    sigma_x = torch.var(
-        x,
-        unbiased=False,
-    )
-
-    sigma_y = torch.var(
-        y,
-        unbiased=False,
-    )
-
-    covariance = torch.mean(
-        (x - mu_x)
-        * (y - mu_y)
-    )
-
-    c1 = (
-        0.01 * data_range
-    ) ** 2
-
-    c2 = (
-        0.03 * data_range
-    ) ** 2
-
-    numerator = (
-        (2 * mu_x * mu_y + c1)
-        * (2 * covariance + c2)
-    )
-
-    denominator = (
-        (mu_x ** 2 + mu_y ** 2 + c1)
-        * (sigma_x + sigma_y + c2)
-    )
-
-    return (
-        numerator / denominator
-    ).item()
+        "SSIM": metric_to_float(
+            ssim(
+                reconstruction,
+                target
+            )
+        ),
+    }
 
 
 # =========================================================
-# Single experiment
+# MAIN TEST
 # =========================================================
 
-def run_single_case(
-    case_number,
-    total_cases,
-    missing_rate,
-    geological_mode,
-    mask_mode,
-    seed,
-):
-    """
-    Execute one controlled Dictionary Learning experiment.
-    """
+def main():
+
+    print("=" * 70)
+    print(
+        "DICTIONARY LEARNING BASELINE TEST"
+    )
+    print("=" * 70)
 
     print()
-    print("=" * 78)
     print(
-        f"CASE {case_number}/{total_cases}"
-    )
-    print("=" * 78)
-
-    print(
-        f"Missing rate     : {missing_rate:.2f}"
+        "This is a focused single-baseline validation test."
     )
 
     print(
-        f"Geological mode  : {geological_mode}"
-    )
-
-    print(
-        f"Mask mode        : {mask_mode}"
-    )
-
-    print(
-        f"Seed             : {seed}"
+        "It does NOT execute the 750-case controlled matrix."
     )
 
     print()
 
 
     # =====================================================
-    # Create controlled synthetic dataset
+    # DISPLAY TEST CONFIGURATION
     # =====================================================
+
+    print("Test configuration")
+    print("-" * 70)
+
+    print(
+        f"Cube size             : {CUBE_SIZE}"
+    )
+
+    print(
+        f"Missing rate          : {MISSING_RATE}"
+    )
+
+    print(
+        f"Geological mode       : {GEOLOGICAL_MODE}"
+    )
+
+    print(
+        f"Mask mode             : {MASK_MODE}"
+    )
+
+    print(
+        f"Seed                  : {SEED}"
+    )
+
+    print()
+
+
+    # =====================================================
+    # CREATE SYNTHETIC DATASET
+    # =====================================================
+
+    print(
+        "Creating synthetic dataset..."
+    )
 
     dataset = SyntheticSeismicDataset(
         num_samples=1,
         cube_size=CUBE_SIZE,
-        missing_probability=missing_rate,
-        seed=seed,
-        geological_mode=geological_mode,
-        mask_mode=mask_mode,
+        missing_probability=MISSING_RATE,
+        geological_mode=GEOLOGICAL_MODE,
+        mask_mode=MASK_MODE,
+        seed=SEED,
     )
 
 
     # =====================================================
-    # Obtain sample
+    # RETRIEVE SAMPLE
     # =====================================================
-
-    sample = dataset[0]
 
     (
         corrupted,
         target,
         mask,
         velocity,
-        actual_mask_mode,
-        actual_geological_mode,
-    ) = sample
+        returned_mask_mode,
+        returned_geological_mode,
+    ) = dataset[0]
 
 
     # =====================================================
-    # Expected shape
+    # EXPECTED TENSOR SHAPE
     # =====================================================
 
     expected_shape = (
         1,
-        *CUBE_SIZE,
+        *CUBE_SIZE
     )
 
 
     # =====================================================
-    # Shape validation
+    # TEST 1: CORRUPTED INPUT SHAPE
     # =====================================================
 
-    if tuple(corrupted.shape) != expected_shape:
+    if tuple(
+        corrupted.shape
+    ) != expected_shape:
+
         raise RuntimeError(
-            "Unexpected corrupted input shape: "
-            f"{tuple(corrupted.shape)}. "
-            f"Expected {expected_shape}."
+            "Dictionary Learning test failed: "
+            f"corrupted shape is "
+            f"{tuple(corrupted.shape)}, "
+            f"expected {expected_shape}."
         )
 
-    if tuple(target.shape) != expected_shape:
-        raise RuntimeError(
-            "Unexpected target shape: "
-            f"{tuple(target.shape)}. "
-            f"Expected {expected_shape}."
-        )
-
-    if tuple(mask.shape) != expected_shape:
-        raise RuntimeError(
-            "Unexpected mask shape: "
-            f"{tuple(mask.shape)}. "
-            f"Expected {expected_shape}."
-        )
+    print(
+        "PASS: corrupted input shape"
+    )
 
 
     # =====================================================
-    # Mask validation
+    # TEST 2: TARGET SHAPE
     # =====================================================
 
-    unique_mask = torch.unique(mask)
+    if tuple(
+        target.shape
+    ) != expected_shape:
 
-    if not torch.all(
+        raise RuntimeError(
+            "Dictionary Learning test failed: "
+            f"target shape is "
+            f"{tuple(target.shape)}, "
+            f"expected {expected_shape}."
+        )
+
+    print(
+        "PASS: target shape"
+    )
+
+
+    # =====================================================
+    # TEST 3: MASK SHAPE
+    # =====================================================
+
+    if tuple(
+        mask.shape
+    ) != expected_shape:
+
+        raise RuntimeError(
+            "Dictionary Learning test failed: "
+            f"mask shape is "
+            f"{tuple(mask.shape)}, "
+            f"expected {expected_shape}."
+        )
+
+    print(
+        "PASS: mask shape"
+    )
+
+
+    # =====================================================
+    # TEST 4: VELOCITY SHAPE
+    # =====================================================
+
+    if tuple(
+        velocity.shape
+    ) != expected_shape:
+
+        raise RuntimeError(
+            "Dictionary Learning test failed: "
+            f"velocity shape is "
+            f"{tuple(velocity.shape)}, "
+            f"expected {expected_shape}."
+        )
+
+    print(
+        "PASS: velocity shape"
+    )
+
+
+    # =====================================================
+    # TEST 5: DATASET METADATA
+    # =====================================================
+
+    if returned_mask_mode != MASK_MODE:
+
+        raise RuntimeError(
+            "Dictionary Learning test failed: "
+            f"expected mask mode '{MASK_MODE}', "
+            f"received '{returned_mask_mode}'."
+        )
+
+    if returned_geological_mode != GEOLOGICAL_MODE:
+
+        raise RuntimeError(
+            "Dictionary Learning test failed: "
+            f"expected geological mode "
+            f"'{GEOLOGICAL_MODE}', "
+            f"received '{returned_geological_mode}'."
+        )
+
+    print(
+        "PASS: dataset metadata"
+    )
+
+
+    # =====================================================
+    # TEST 6: FINITE INPUT VALUES
+    # =====================================================
+
+    for name, tensor in [
+        ("corrupted", corrupted),
+        ("target", target),
+        ("mask", mask),
+        ("velocity", velocity),
+    ]:
+
+        if not tensor_is_finite(
+            tensor
+        ):
+
+            raise RuntimeError(
+                "Dictionary Learning test failed: "
+                f"{name} contains NaN or infinite values."
+            )
+
+    print(
+        "PASS: input tensors contain finite values"
+    )
+
+
+    # =====================================================
+    # TEST 7: MASK VALUES
+    # =====================================================
+
+    unique_mask = torch.unique(
+        mask
+    )
+
+    valid_mask = torch.all(
         (unique_mask == 0)
         | (unique_mask == 1)
+    )
+
+    if not bool(
+        valid_mask.item()
     ):
+
         raise RuntimeError(
-            "Mask contains values other than 0 and 1."
+            "Dictionary Learning test failed: "
+            "mask contains values other than 0 and 1."
         )
+
+    print(
+        "PASS: mask contains only 0 and 1"
+    )
 
 
     # =====================================================
-    # Input consistency
+    # TEST 8: INPUT CONSISTENCY
     # =====================================================
 
     expected_corrupted = (
-        target * mask
+        target
+        * mask
     )
 
-    input_error = torch.max(
+    input_difference = torch.max(
         torch.abs(
             corrupted
             - expected_corrupted
         )
     ).item()
 
-    if input_error > 1e-6:
+    if input_difference > OBSERVED_TOLERANCE:
+
         raise RuntimeError(
-            "Corrupted input is inconsistent with "
-            "target and mask."
+            "Dictionary Learning test failed: "
+            "corrupted input is inconsistent with "
+            "target × mask."
         )
+
+    print(
+        "PASS: corrupted input consistency"
+    )
+
+    print(
+        f"      Maximum input difference: "
+        f"{input_difference:.6e}"
+    )
 
 
     # =====================================================
-    # Count observed and missing samples
+    # OBSERVED / MISSING SAMPLE COUNTS
     # =====================================================
 
     observed_samples = int(
-        torch.sum(mask == 1).item()
+        torch.sum(
+            mask == 1
+        ).item()
     )
 
     missing_samples = int(
-        torch.sum(mask == 0).item()
+        torch.sum(
+            mask == 0
+        ).item()
+    )
+
+    print()
+    print(
+        f"Observed samples       : {observed_samples}"
+    )
+
+    print(
+        f"Missing samples        : {missing_samples}"
     )
 
 
     # =====================================================
-    # Dictionary Learning reconstruction
+    # TEST 9: BOTH REGIONS MUST EXIST
     # =====================================================
 
-    start_time = time.perf_counter()
+    if observed_samples == 0:
+
+        raise RuntimeError(
+            "Dictionary Learning test failed: "
+            "there are no observed samples."
+        )
+
+    if missing_samples == 0:
+
+        raise RuntimeError(
+            "Dictionary Learning test failed: "
+            "there are no missing samples."
+        )
+
+    print(
+        "PASS: observed and missing regions exist"
+    )
+
+
+    # =====================================================
+    # DICTIONARY LEARNING RECONSTRUCTION
+    # =====================================================
+
+    print()
+    print(
+        "Running Dictionary Learning reconstruction..."
+    )
 
     reconstruction = (
         dictionary_learning_reconstruction(
@@ -421,36 +584,52 @@ def run_single_case(
             batch_size=BATCH_SIZE,
             max_training_patches=MAX_TRAINING_PATCHES,
             min_observed_fraction=MIN_OBSERVED_FRACTION,
-            random_state=seed,
+            random_state=SEED,
         )
     )
 
-    elapsed_time = (
-        time.perf_counter()
-        - start_time
-    )
-
 
     # =====================================================
-    # Output validation
+    # TEST 10: RECONSTRUCTION SHAPE
     # =====================================================
 
-    if reconstruction.shape != corrupted.shape:
+    if tuple(
+        reconstruction.shape
+    ) != expected_shape:
+
         raise RuntimeError(
-            "Reconstruction shape mismatch."
+            "Dictionary Learning test failed: "
+            f"reconstruction shape is "
+            f"{tuple(reconstruction.shape)}, "
+            f"expected {expected_shape}."
         )
 
-    if not torch.isfinite(
+    print(
+        "PASS: reconstruction shape"
+    )
+
+
+    # =====================================================
+    # TEST 11: RECONSTRUCTION FINITENESS
+    # =====================================================
+
+    if not tensor_is_finite(
         reconstruction
-    ).all():
+    ):
 
         raise RuntimeError(
-            "Reconstruction contains NaN or infinite values."
+            "Dictionary Learning test failed: "
+            "reconstruction contains NaN or "
+            "infinite values."
         )
+
+    print(
+        "PASS: reconstruction contains finite values"
+    )
 
 
     # =====================================================
-    # Observed-data preservation
+    # TEST 12: OBSERVED-DATA PRESERVATION
     # =====================================================
 
     observed_difference = torch.max(
@@ -460,29 +639,29 @@ def run_single_case(
         )
     ).item()
 
-    if observed_difference > 0.0:
+    if observed_difference > OBSERVED_TOLERANCE:
+
         raise RuntimeError(
-            "Observed-data preservation failed."
+            "Dictionary Learning test failed: "
+            f"observed-data preservation error is "
+            f"{observed_difference:.6e}, "
+            f"which exceeds the tolerance of "
+            f"{OBSERVED_TOLERANCE:.6e}."
         )
+
+    print(
+        "PASS: observed seismic samples preserved"
+    )
+
+    print(
+        f"      Maximum observed difference: "
+        f"{observed_difference:.6e}"
+    )
 
 
     # =====================================================
-    # Missing-sample reconstruction
+    # TEST 13: MISSING REGION MUST BE PROCESSED
     # =====================================================
-
-    zero_filled_error = torch.mean(
-        torch.abs(
-            corrupted[mask == 0]
-            - target[mask == 0]
-        )
-    ).item()
-
-    reconstructed_error = torch.mean(
-        torch.abs(
-            reconstruction[mask == 0]
-            - target[mask == 0]
-        )
-    ).item()
 
     missing_change = torch.mean(
         torch.abs(
@@ -492,597 +671,330 @@ def run_single_case(
     ).item()
 
     if missing_change <= 0.0:
+
         raise RuntimeError(
-            "Dictionary Learning did not modify "
-            "the missing samples."
+            "Dictionary Learning test failed: "
+            "reconstruction did not modify the "
+            "missing region."
         )
 
-
-    # =====================================================
-    # Global metrics
-    # =====================================================
-
-    metric_mae = mae(
-        reconstruction,
-        target,
+    print(
+        "PASS: missing region was reconstructed"
     )
 
-    metric_rmse = rmse(
-        reconstruction,
-        target,
-    )
-
-    metric_psnr = psnr(
-        reconstruction,
-        target,
-    )
-
-    metric_snr = snr(
-        reconstruction,
-        target,
-    )
-
-    metric_ssim = ssim_simple(
-        reconstruction,
-        target,
+    print(
+        f"      Mean missing-region change: "
+        f"{missing_change:.6f}"
     )
 
 
     # =====================================================
-    # Return experiment result
+    # BASELINE: ZERO-FILLED MISSING REGION
     # =====================================================
 
-    return {
-        "case": case_number,
-        "missing_rate": missing_rate,
-        "geological_mode": actual_geological_mode,
-        "mask_mode": actual_mask_mode,
-        "seed": seed,
-
-        "cube_depth": CUBE_SIZE[0],
-        "cube_height": CUBE_SIZE[1],
-        "cube_width": CUBE_SIZE[2],
-
-        "patch_depth": PATCH_SIZE[0],
-        "patch_height": PATCH_SIZE[1],
-        "patch_width": PATCH_SIZE[2],
-
-        "n_components": N_COMPONENTS,
-        "alpha": ALPHA,
-        "max_iter": MAX_ITER,
-        "batch_size": BATCH_SIZE,
-        "max_training_patches": MAX_TRAINING_PATCHES,
-        "min_observed_fraction": MIN_OBSERVED_FRACTION,
-
-        "observed_samples": observed_samples,
-        "missing_samples": missing_samples,
-
-        "input_consistency_error": input_error,
-        "observed_difference": observed_difference,
-
-        "zero_filled_missing_mae": zero_filled_error,
-        "dictionary_missing_mae": reconstructed_error,
-        "missing_reconstruction_change": missing_change,
-
-        "mae": metric_mae,
-        "rmse": metric_rmse,
-        "psnr": metric_psnr,
-        "snr": metric_snr,
-        "ssim": metric_ssim,
-
-        "runtime_seconds": elapsed_time,
-
-        "status": "SUCCESS",
-        "error": "",
-    }
+    zero_filled_missing_mae = torch.mean(
+        torch.abs(
+            corrupted[mask == 0]
+            - target[mask == 0]
+        )
+    ).item()
 
 
-# =========================================================
-# Main controlled experiment
-# =========================================================
+    # =====================================================
+    # DICTIONARY LEARNING MISSING-REGION ERROR
+    # =====================================================
 
-def main():
+    dictionary_missing_mae = torch.mean(
+        torch.abs(
+            reconstruction[mask == 0]
+            - target[mask == 0]
+        )
+    ).item()
 
-    print("=" * 78)
-    print("DICTIONARY LEARNING CONTROLLED MATRIX")
-    print("=" * 78)
+
+    # =====================================================
+    # GLOBAL METRICS
+    # =====================================================
 
     print()
-    print("Experimental design")
-    print("-" * 78)
-
     print(
-        f"Cube size              : {CUBE_SIZE}"
+        "Computing reconstruction metrics..."
     )
 
-    print(
-        f"Missing rates           : {MISSING_RATES}"
-    )
-
-    print(
-        f"Geological modes       : {len(GEOLOGICAL_MODES)}"
-    )
-
-    print(
-        f"Missing mechanisms     : {len(MASK_MODES)}"
-    )
-
-    print(
-        f"Random seeds           : {SEEDS}"
-    )
-
-    print(
-        f"Dictionary components  : {N_COMPONENTS}"
-    )
-
-    print(
-        f"Patch size             : {PATCH_SIZE}"
-    )
-
-    print(
-        f"Maximum iterations     : {MAX_ITER}"
-    )
-
-    print()
-
-
-    # =====================================================
-    # Calculate expected number of cases
-    # =====================================================
-
-    total_cases = (
-        len(MISSING_RATES)
-        * len(GEOLOGICAL_MODES)
-        * len(MASK_MODES)
-        * len(SEEDS)
-    )
-
-    print(
-        f"Expected total cases : {total_cases}"
-    )
-
-    if total_cases <=0:
-        raise RuntimeError(
-            "Controlled experimental matrix does not "
-            "contain exactly 750 cases."
-        )
-
-
-    # =====================================================
-    # Create output directory
-    # =====================================================
-
-    os.makedirs(
-        OUTPUT_DIR,
-        exist_ok=True,
+    metrics = compute_metrics(
+        reconstruction,
+        target
     )
 
 
     # =====================================================
-    # Storage for raw results
+    # TEST 14: METRICS MUST BE FINITE
     # =====================================================
 
-    results = []
-
-    successful_cases = 0
-
-    failed_cases = 0
-
-
-    # =====================================================
-    # Global experiment timer
-    # =====================================================
-
-    experiment_start = time.perf_counter()
-
-
-    # =====================================================
-    # Case counter
-    # =====================================================
-
-    case_number = 0
-
-
-    # =====================================================
-    # Controlled experimental matrix
-    # =====================================================
-
-    for geological_mode in GEOLOGICAL_MODES:
-
-        for missing_rate in MISSING_RATES:
-
-            for mask_mode in MASK_MODES:
-
-                for seed in SEEDS:
-
-                    case_number += 1
-
-                    try:
-
-                        result = run_single_case(
-                            case_number=case_number,
-                            total_cases=total_cases,
-                            missing_rate=missing_rate,
-                            geological_mode=geological_mode,
-                            mask_mode=mask_mode,
-                            seed=seed,
-                        )
-
-                        results.append(result)
-
-                        successful_cases += 1
-
-                        print(
-                            f"Case {case_number}/{total_cases} "
-                            f"SUCCESS"
-                        )
-
-                        print(
-                            f"MAE  : {result['mae']:.6f}"
-                        )
-
-                        print(
-                            f"RMSE : {result['rmse']:.6f}"
-                        )
-
-                        print(
-                            f"PSNR : {result['psnr']:.6f} dB"
-                        )
-
-                        print(
-                            f"SNR  : {result['snr']:.6f} dB"
-                        )
-
-                        print(
-                            f"SSIM : {result['ssim']:.6f}"
-                        )
-
-                        print(
-                            f"Runtime : "
-                            f"{result['runtime_seconds']:.4f} s"
-                        )
-
-                    except Exception as exc:
-
-                        failed_cases += 1
-
-                        error_message = (
-                            f"{type(exc).__name__}: {exc}"
-                        )
-
-                        print(
-                            f"Case {case_number}/{total_cases} "
-                            f"FAILED"
-                        )
-
-                        print(
-                            f"Error: {error_message}"
-                        )
-
-
-                        results.append({
-                            "case": case_number,
-                            "missing_rate": missing_rate,
-                            "geological_mode": geological_mode,
-                            "mask_mode": mask_mode,
-                            "seed": seed,
-
-                            "cube_depth": CUBE_SIZE[0],
-                            "cube_height": CUBE_SIZE[1],
-                            "cube_width": CUBE_SIZE[2],
-
-                            "patch_depth": PATCH_SIZE[0],
-                            "patch_height": PATCH_SIZE[1],
-                            "patch_width": PATCH_SIZE[2],
-
-                            "n_components": N_COMPONENTS,
-                            "alpha": ALPHA,
-                            "max_iter": MAX_ITER,
-                            "batch_size": BATCH_SIZE,
-                            "max_training_patches":
-                                MAX_TRAINING_PATCHES,
-                            "min_observed_fraction":
-                                MIN_OBSERVED_FRACTION,
-
-                            "observed_samples": "",
-                            "missing_samples": "",
-
-                            "input_consistency_error": "",
-                            "observed_difference": "",
-
-                            "zero_filled_missing_mae": "",
-                            "dictionary_missing_mae": "",
-                            "missing_reconstruction_change": "",
-
-                            "mae": "",
-                            "rmse": "",
-                            "psnr": "",
-                            "snr": "",
-                            "ssim": "",
-
-                            "runtime_seconds": "",
-
-                            "status": "FAILED",
-                            "error": error_message,
-                        })
-
-
-    # =====================================================
-    # Total experiment runtime
-    # =====================================================
-
-    total_runtime = (
-        time.perf_counter()
-        - experiment_start
-    )
-
-
-    # =====================================================
-    # Write raw results
-    # =====================================================
-
-    fieldnames = [
-        "case",
-        "missing_rate",
-        "geological_mode",
-        "mask_mode",
-        "seed",
-
-        "cube_depth",
-        "cube_height",
-        "cube_width",
-
-        "patch_depth",
-        "patch_height",
-        "patch_width",
-
-        "n_components",
-        "alpha",
-        "max_iter",
-        "batch_size",
-        "max_training_patches",
-        "min_observed_fraction",
-
-        "observed_samples",
-        "missing_samples",
-
-        "input_consistency_error",
-        "observed_difference",
-
-        "zero_filled_missing_mae",
-        "dictionary_missing_mae",
-        "missing_reconstruction_change",
-
-        "mae",
-        "rmse",
-        "psnr",
-        "snr",
-        "ssim",
-
-        "runtime_seconds",
-
-        "status",
-        "error",
-    ]
-
-
-    with open(
-        RAW_RESULTS_FILE,
-        "w",
-        newline="",
-        encoding="utf-8",
-    ) as file:
-
-        writer = csv.DictWriter(
-            file,
-            fieldnames=fieldnames,
-        )
-
-        writer.writeheader()
-
-        writer.writerows(results)
-
-
-    # =====================================================
-    # Build summary statistics
-    # =====================================================
-
-    grouped_results = defaultdict(list)
-
-    for result in results:
-
-        if result["status"] != "SUCCESS":
+    for metric_name, metric_value in metrics.items():
+
+        if metric_name in [
+            "PSNR",
+            "SNR",
+        ]:
             continue
 
-        key = (
-            result["geological_mode"],
-            result["missing_rate"],
-            result["mask_mode"],
-        )
+        if not torch.isfinite(
+            torch.tensor(metric_value)
+        ).item():
 
-        grouped_results[key].append(result)
+            raise RuntimeError(
+                "Dictionary Learning test failed: "
+                f"{metric_name} is not finite."
+            )
 
-
-    summary_rows = []
-
-
-    for (
-        geological_mode,
-        missing_rate,
-        mask_mode,
-    ), group in sorted(grouped_results.items()):
-
-        def mean_metric(name):
-
-            values = [
-                float(row[name])
-                for row in group
-                if row[name] != ""
-            ]
-
-            if not values:
-                return ""
-
-            return sum(values) / len(values)
-
-
-        summary_rows.append({
-            "geological_mode": geological_mode,
-            "missing_rate": missing_rate,
-            "mask_mode": mask_mode,
-
-            "n_cases": len(group),
-
-            "successful_cases": len(group),
-
-            "mae_mean": mean_metric("mae"),
-            "rmse_mean": mean_metric("rmse"),
-            "psnr_mean": mean_metric("psnr"),
-            "snr_mean": mean_metric("snr"),
-            "ssim_mean": mean_metric("ssim"),
-
-            "runtime_mean_seconds":
-                mean_metric("runtime_seconds"),
-
-            "dictionary_missing_mae_mean":
-                mean_metric(
-                    "dictionary_missing_mae"
-                ),
-
-            "zero_filled_missing_mae_mean":
-                mean_metric(
-                    "zero_filled_missing_mae"
-                ),
-        })
+    print(
+        "PASS: reconstruction metrics computed"
+    )
 
 
     # =====================================================
-    # Write summary results
-    # =====================================================
-
-    summary_fieldnames = [
-        "geological_mode",
-        "missing_rate",
-        "mask_mode",
-        "n_cases",
-        "successful_cases",
-
-        "mae_mean",
-        "rmse_mean",
-        "psnr_mean",
-        "snr_mean",
-        "ssim_mean",
-
-        "runtime_mean_seconds",
-
-        "dictionary_missing_mae_mean",
-        "zero_filled_missing_mae_mean",
-    ]
-
-
-    with open(
-        SUMMARY_RESULTS_FILE,
-        "w",
-        newline="",
-        encoding="utf-8",
-    ) as file:
-
-        writer = csv.DictWriter(
-            file,
-            fieldnames=summary_fieldnames,
-        )
-
-        writer.writeheader()
-
-        writer.writerows(summary_rows)
-
-
-    # =====================================================
-    # Final report
+    # DISPLAY RESULTS
     # =====================================================
 
     print()
-    print("=" * 78)
-    print("DICTIONARY LEARNING CONTROLLED MATRIX COMPLETE")
-    print("=" * 78)
+    print("=" * 70)
+    print(
+        "DICTIONARY LEARNING RESULTS"
+    )
+    print("=" * 70)
 
     print(
-        f"Expected cases : {total_cases}"
+        f"MAE                       : "
+        f"{metrics['MAE']:.6f}"
     )
 
     print(
-        f"Completed cases: {case_number}"
+        f"RMSE                      : "
+        f"{metrics['RMSE']:.6f}"
     )
 
     print(
-        f"Successful     : {successful_cases}"
+        f"PSNR                      : "
+        f"{metrics['PSNR']:.6f} dB"
     )
 
     print(
-        f"Failed         : {failed_cases}"
+        f"SNR                       : "
+        f"{metrics['SNR']:.6f} dB"
     )
 
     print(
-        f"Total runtime  : "
-        f"{total_runtime:.2f} seconds"
-    )
-
-    print()
-
-    print(
-        f"Raw results:"
+        f"SSIM                      : "
+        f"{metrics['SSIM']:.6f}"
     )
 
     print(
-        RAW_RESULTS_FILE
-    )
-
-    print()
-
-    print(
-        f"Summary results:"
+        f"Zero-filled missing MAE  : "
+        f"{zero_filled_missing_mae:.6f}"
     )
 
     print(
-        SUMMARY_RESULTS_FILE
+        f"Dictionary missing MAE   : "
+        f"{dictionary_missing_mae:.6f}"
     )
 
-    print()
+    print(
+        f"Missing-region change    : "
+        f"{missing_change:.6f}"
+    )
+
+    print(
+        f"Observed preservation    : "
+        f"{observed_difference:.6e}"
+    )
 
 
     # =====================================================
-    # Overall status
+    # REPRODUCIBILITY TEST
     # =====================================================
 
-    if (
-        case_number == total_cases
-        and successful_cases == total_cases
-        and failed_cases == 0
+    print()
+    print(
+        "Testing deterministic dataset generation..."
+    )
+
+    dataset_repeat = SyntheticSeismicDataset(
+        num_samples=1,
+        cube_size=CUBE_SIZE,
+        missing_probability=MISSING_RATE,
+        geological_mode=GEOLOGICAL_MODE,
+        mask_mode=MASK_MODE,
+        seed=SEED,
+    )
+
+    (
+        corrupted_repeat,
+        target_repeat,
+        mask_repeat,
+        velocity_repeat,
+        mask_mode_repeat,
+        geological_mode_repeat,
+    ) = dataset_repeat[0]
+
+
+    # =====================================================
+    # TEST 15: DATASET REPRODUCIBILITY
+    # =====================================================
+
+    if not torch.equal(
+        corrupted,
+        corrupted_repeat
     ):
 
-        print(
-            "OVERALL STATUS: PASS"
+        raise RuntimeError(
+            "Dictionary Learning test failed: "
+            "repeated dataset generation produced "
+            "different corrupted data."
         )
 
-        print(
-            "All controlled Dictionary Learning "
-            "experiments completed successfully."
+    if not torch.equal(
+        target,
+        target_repeat
+    ):
+
+        raise RuntimeError(
+            "Dictionary Learning test failed: "
+            "repeated dataset generation produced "
+            "different targets."
         )
 
-    else:
+    if not torch.equal(
+        mask,
+        mask_repeat
+    ):
 
-        print(
-            "OVERALL STATUS: FAIL"
+        raise RuntimeError(
+            "Dictionary Learning test failed: "
+            "repeated dataset generation produced "
+            "different masks."
         )
 
-        print(
-            "One or more controlled Dictionary Learning "
-            "experiments failed."
+    if not torch.equal(
+        velocity,
+        velocity_repeat
+    ):
+
+        raise RuntimeError(
+            "Dictionary Learning test failed: "
+            "repeated dataset generation produced "
+            "different velocity models."
         )
+
+    if mask_mode_repeat != MASK_MODE:
+
+        raise RuntimeError(
+            "Dictionary Learning test failed: "
+            "repeated dataset returned a different "
+            "mask mode."
+        )
+
+    if geological_mode_repeat != GEOLOGICAL_MODE:
+
+        raise RuntimeError(
+            "Dictionary Learning test failed: "
+            "repeated dataset returned a different "
+            "geological mode."
+        )
+
+    print(
+        "PASS: dataset generation is reproducible"
+    )
+
+
+    # =====================================================
+    # RECONSTRUCTION REPRODUCIBILITY
+    # =====================================================
+
+    print(
+        "Testing deterministic Dictionary Learning "
+        "reconstruction..."
+    )
+
+    reconstruction_repeat = (
+        dictionary_learning_reconstruction(
+            corrupted_cube=corrupted_repeat,
+            mask=mask_repeat,
+            patch_size=PATCH_SIZE,
+            n_components=N_COMPONENTS,
+            alpha=ALPHA,
+            max_iter=MAX_ITER,
+            batch_size=BATCH_SIZE,
+            max_training_patches=MAX_TRAINING_PATCHES,
+            min_observed_fraction=MIN_OBSERVED_FRACTION,
+            random_state=SEED,
+        )
+    )
+
+
+    # =====================================================
+    # TEST 16: RECONSTRUCTION REPRODUCIBILITY
+    # =====================================================
+
+    reconstruction_difference = torch.max(
+        torch.abs(
+            reconstruction
+            - reconstruction_repeat
+        )
+    ).item()
+
+    if reconstruction_difference > OBSERVED_TOLERANCE:
+
+        raise RuntimeError(
+            "Dictionary Learning test failed: "
+            "repeated reconstruction is not "
+            "deterministic within the configured tolerance."
+        )
+
+    print(
+        "PASS: Dictionary Learning reconstruction "
+        "is reproducible"
+    )
+
+    print(
+        f"      Maximum repeated reconstruction "
+        f"difference: {reconstruction_difference:.6e}"
+    )
+
+
+    # =====================================================
+    # FINAL TEST STATUS
+    # =====================================================
+
+    print()
+    print("=" * 70)
+    print(
+        "DICTIONARY LEARNING BASELINE TEST: PASS"
+    )
+    print("=" * 70)
+
+    print()
+    print(
+        "The Dictionary Learning baseline passed the "
+        "focused single-case validation."
+    )
+
+    print()
+    print(
+        "The 750-case controlled experiment remains "
+        "separate under:"
+    )
+
+    print(
+        "evaluation/baselines/"
+        "dictionary_learning_controlled_matrix.py"
+    )
+
+    print()
 
 
 # =========================================================
-# Entry point
+# ENTRY POINT
 # =========================================================
 
 if __name__ == "__main__":

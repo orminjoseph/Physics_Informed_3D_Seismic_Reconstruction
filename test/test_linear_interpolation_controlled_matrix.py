@@ -1,87 +1,72 @@
 """
 =================================================================
-Linear Interpolation Controlled Experimental Matrix
+Linear Interpolation Baseline Test
 =================================================================
 
 Physics-Informed 3D Encoder-Decoder Framework
 with Predictive Uncertainty for Seismic Data Reconstruction
 
-Controlled evaluation of the Linear Interpolation baseline
-using the standardized synthetic experimental matrix.
+Purpose
+-------
 
-Experimental matrix
---------------------
+Focused validation test for the Linear Interpolation seismic
+reconstruction baseline.
 
-Missing rates:
-    10%, 20%, 30%, 40%, 50%
+This file is a SOFTWARE TEST only.
 
-Missing mechanisms:
-    random_voxels
-    missing_traces
-    missing_inlines
-    missing_crosslines
-    missing_blocks
+It does NOT execute the 750-case controlled experimental matrix.
 
-Geological modes:
-    horizontal
-    dipping
-    faulted
-    folded
-    complex
-    highly_complex
+The full controlled experimental implementation is located at:
 
-Random seeds:
-    42, 43, 44, 45, 46
+    evaluation/baselines/linear_interpolation_controlled_matrix.py
 
-Total cases:
-    5 missing rates
-    × 5 missing mechanisms
-    × 6 geological modes
-    × 5 seeds
+This focused test verifies:
 
-    = 750 controlled experiments
+    1. Synthetic dataset generation
+    2. Expected tensor shapes
+    3. Dataset metadata consistency
+    4. Input consistency
+    5. Presence of observed samples
+    6. Presence of missing samples
+    7. Linear Interpolation execution
+    8. Reconstruction shape
+    9. Finite reconstruction values
+    10. Exact observed-data preservation
+    11. Modification of missing samples
+    12. Reconstruction metrics
+    13. Dataset reproducibility
+    14. Reconstruction reproducibility
 
-Standard seismic cube:
+Representative test case
+------------------------
+
+Cube:
     (D, H, W) = (64, 128, 128)
 
 Tensor convention:
     (C, D, H, W) = (1, 64, 128, 128)
 
-Metrics:
-    MAE
-    RMSE
-    PSNR
-    SNR
-    SSIM
+Missing rate:
+    30%
 
-Additional checks:
-    - Input consistency
-    - Observed-sample preservation
-    - Missing-only reconstruction metrics
-    - Finite reconstruction
-    - Runtime
-    - Reproducibility through deterministic dataset seeds
+Missing mechanism:
+    missing_crosslines
 
-Output:
-    outputs/synthetic_training/reports/
+Geological mode:
+    folded
 
-Files:
-    linear_interpolation_controlled_matrix.csv
-    linear_interpolation_controlled_matrix_summary.csv
+Random seed:
+    42
 
 Author: Ormin Joseph
 =================================================================
 """
 
-import csv
-import os
-import time
-
 import torch
 
 from dataset.synthetic_dataset import SyntheticSeismicDataset
 
-from evaluation.baselines.baseline_linear_interpolation import (
+from evaluation.baselines.baseline_linear_interpolation_controlled_matrix import (
     linear_interpolation_reconstruction
 )
 
@@ -95,82 +80,20 @@ from metrics.reconstruction_metrics import (
 
 
 # ================================================================
-# DEVICE
+# TEST CONFIGURATION
 # ================================================================
 
 DEVICE = torch.device("cpu")
 
-
-# ================================================================
-# STANDARD CONTROLLED EXPERIMENTAL MATRIX
-# ================================================================
-
 CUBE_SIZE = (64, 128, 128)
 
-MISSING_RATES = [
-    0.30,
-]
+MISSING_RATE = 0.30
 
-MISSING_MECHANISMS = [
-    "random_voxels",
-    "missing_traces",
-]
+MISSING_MECHANISM = "missing_crosslines"
 
-GEOLOGICAL_MODES = [
-    "horizontal",
-    "dipping",
-]
+GEOLOGICAL_MODE = "folded"
 
-SEEDS = [
-    42,
-    43,
-]
-
-
-# ================================================================
-# EXPECTED NUMBER OF EXPERIMENTAL CASES
-# ================================================================
-
-EXPECTED_CASES = (
-    len(MISSING_RATES)
-    * len(MISSING_MECHANISMS)
-    * len(GEOLOGICAL_MODES)
-    * len(SEEDS)
-)
-
-
-# ================================================================
-# OUTPUT DIRECTORY
-# ================================================================
-
-OUTPUT_DIRECTORY = (
-    "outputs"
-    + os.sep
-    + "synthetic_training"
-    + os.sep
-    + "reports"
-)
-
-
-os.makedirs(
-    OUTPUT_DIRECTORY,
-    exist_ok=True
-)
-
-
-# ================================================================
-# OUTPUT FILES
-# ================================================================
-
-RAW_RESULTS_FILE = os.path.join(
-    OUTPUT_DIRECTORY,
-    "linear_interpolation_controlled_matrix.csv"
-)
-
-SUMMARY_RESULTS_FILE = os.path.join(
-    OUTPUT_DIRECTORY,
-    "linear_interpolation_controlled_matrix_summary.csv"
-)
+SEED = 42
 
 
 # ================================================================
@@ -179,51 +102,92 @@ SUMMARY_RESULTS_FILE = os.path.join(
 
 def to_float(value):
     """
-    Convert a metric value to a Python float.
+    Convert a metric value to a standard Python float.
     """
 
     if isinstance(value, torch.Tensor):
 
-        return float(value.detach().cpu().item())
+        return float(
+            value.detach()
+            .cpu()
+            .item()
+        )
 
     return float(value)
 
 
 # ================================================================
-# SINGLE CONTROLLED EXPERIMENT
+# MAIN TEST
 # ================================================================
 
-def run_single_case(
-        missing_rate,
-        missing_mechanism,
-        geological_mode,
-        seed
-):
-    """
-    Run one controlled Linear Interpolation experiment.
+def main():
 
-    Returns
-    -------
-    dict
-        Results for the experimental case.
-    """
+    print(
+        "\n"
+        "=========================================================\n"
+        "LINEAR INTERPOLATION BASELINE TEST\n"
+        "=========================================================\n"
+    )
 
-    # ------------------------------------------------------------
-    # Create exactly one synthetic sample.
-    # ------------------------------------------------------------
+    print(
+        "This is a focused software test.\n"
+        "It does NOT execute the 750-case controlled matrix.\n"
+    )
+
+    print(
+        f"Cube size        : {CUBE_SIZE}"
+    )
+
+    print(
+        f"Missing rate     : {MISSING_RATE}"
+    )
+
+    print(
+        f"Missing mechanism: {MISSING_MECHANISM}"
+    )
+
+    print(
+        f"Geological mode  : {GEOLOGICAL_MODE}"
+    )
+
+    print(
+        f"Random seed      : {SEED}"
+    )
+
+    print(
+        "=========================================================\n"
+    )
+
+
+    # ============================================================
+    # 1. CREATE SYNTHETIC DATASET
+    # ============================================================
+
+    print(
+        "[1/12] Creating deterministic synthetic dataset..."
+    )
 
     dataset = SyntheticSeismicDataset(
         num_samples=1,
         cube_size=CUBE_SIZE,
-        missing_probability=missing_rate,
-        geological_mode=geological_mode,
-        mask_mode=missing_mechanism,
-        seed=seed
+        missing_probability=MISSING_RATE,
+        geological_mode=GEOLOGICAL_MODE,
+        mask_mode=MISSING_MECHANISM,
+        seed=SEED
     )
 
-    # ------------------------------------------------------------
-    # Retrieve the single controlled sample.
-    # ------------------------------------------------------------
+    print(
+        "      PASS - Dataset created."
+    )
+
+
+    # ============================================================
+    # 2. RETRIEVE TEST SAMPLE
+    # ============================================================
+
+    print(
+        "[2/12] Retrieving test sample..."
+    )
 
     (
         corrupted_cube,
@@ -234,9 +198,18 @@ def run_single_case(
         resolved_geological_mode
     ) = dataset[0]
 
-    # ------------------------------------------------------------
-    # Validate tensor shapes.
-    # ------------------------------------------------------------
+    print(
+        "      PASS - Test sample retrieved."
+    )
+
+
+    # ============================================================
+    # 3. VALIDATE EXPECTED SHAPES
+    # ============================================================
+
+    print(
+        "[3/12] Validating tensor shapes..."
+    )
 
     expected_shape = (
         1,
@@ -269,46 +242,73 @@ def run_single_case(
             f"received {tuple(mask.shape)}."
         )
 
-    # ------------------------------------------------------------
-    # Validate metadata.
-    # ------------------------------------------------------------
+    print(
+        f"      PASS - Tensor shape = {expected_shape}"
+    )
 
-    if mask_type != missing_mechanism:
+
+    # ============================================================
+    # 4. VALIDATE DATASET METADATA
+    # ============================================================
+
+    print(
+        "[4/12] Validating dataset metadata..."
+    )
+
+    if mask_type != MISSING_MECHANISM:
 
         raise RuntimeError(
             "Mask mechanism mismatch. "
-            f"Expected {missing_mechanism}, "
-            f"received {mask_type}."
+            f"Expected '{MISSING_MECHANISM}', "
+            f"received '{mask_type}'."
         )
 
-    if resolved_geological_mode != geological_mode:
+    if resolved_geological_mode != GEOLOGICAL_MODE:
 
         raise RuntimeError(
             "Geological mode mismatch. "
-            f"Expected {geological_mode}, "
-            f"received {resolved_geological_mode}."
+            f"Expected '{GEOLOGICAL_MODE}', "
+            f"received '{resolved_geological_mode}'."
         )
 
-    # ------------------------------------------------------------
-    # Move tensors to the standard evaluation device.
-    # ------------------------------------------------------------
+    print(
+        "      PASS - Dataset metadata is correct."
+    )
+
+
+    # ============================================================
+    # 5. MOVE TENSORS TO TEST DEVICE
+    # ============================================================
+
+    print(
+        "[5/12] Moving tensors to test device..."
+    )
 
     corrupted_cube = corrupted_cube.to(DEVICE)
+
     target = target.to(DEVICE)
+
     mask = mask.to(DEVICE)
 
-    # ------------------------------------------------------------
-    # Verify that the input cube is actually the masked target.
-    #
-    # The synthetic dataset convention is:
-    #
-    #     corrupted_cube = target * mask
-    # ------------------------------------------------------------
+    print(
+        f"      PASS - Device = {DEVICE}"
+    )
+
+
+    # ============================================================
+    # 6. VALIDATE INPUT CONSISTENCY
+    # ============================================================
+
+    print(
+        "[6/12] Checking corrupted-input consistency..."
+    )
+
+    expected_corrupted = target * mask
 
     input_consistency_error = torch.max(
         torch.abs(
             corrupted_cube
-            - target * mask
+            - expected_corrupted
         )
     ).item()
 
@@ -316,49 +316,85 @@ def run_single_case(
 
         raise RuntimeError(
             "Input consistency check failed. "
-            f"Maximum difference: "
-            f"{input_consistency_error}"
+            f"Maximum difference = "
+            f"{input_consistency_error:.10e}"
         )
 
-    # ------------------------------------------------------------
-    # Confirm that observed samples are present.
-    # ------------------------------------------------------------
+    print(
+        "      PASS - Corrupted input is consistent with target × mask."
+    )
+
+
+    # ============================================================
+    # 7. VERIFY OBSERVED AND MISSING SAMPLES
+    # ============================================================
+
+    print(
+        "[7/12] Checking observed and missing samples..."
+    )
 
     observed = mask == 1
+
     missing = mask == 0
 
-    if not observed.any():
+    observed_count = int(
+        observed.sum().item()
+    )
+
+    missing_count = int(
+        missing.sum().item()
+    )
+
+    if observed_count == 0:
 
         raise RuntimeError(
-            "Controlled case contains no observed samples."
+            "No observed samples were found."
         )
 
-    if not missing.any():
+    if missing_count == 0:
 
         raise RuntimeError(
-            "Controlled case contains no missing samples."
+            "No missing samples were found."
         )
 
-    # ------------------------------------------------------------
-    # Run Linear Interpolation.
-    # ------------------------------------------------------------
+    print(
+        f"      Observed samples: {observed_count}"
+    )
 
-    start_time = time.perf_counter()
+    print(
+        f"      Missing samples : {missing_count}"
+    )
+
+    print(
+        "      PASS - Both observed and missing samples exist."
+    )
+
+
+    # ============================================================
+    # 8. RUN LINEAR INTERPOLATION
+    # ============================================================
+
+    print(
+        "[8/12] Running Linear Interpolation..."
+    )
 
     reconstruction = linear_interpolation_reconstruction(
         corrupted_cube,
         mask
     )
 
-    end_time = time.perf_counter()
-
-    runtime_seconds = (
-        end_time - start_time
+    print(
+        "      PASS - Linear Interpolation executed."
     )
 
-    # ------------------------------------------------------------
-    # Validate reconstruction shape.
-    # ------------------------------------------------------------
+
+    # ============================================================
+    # 9. VALIDATE RECONSTRUCTION
+    # ============================================================
+
+    print(
+        "[9/12] Validating reconstruction..."
+    )
 
     if tuple(reconstruction.shape) != expected_shape:
 
@@ -368,20 +404,30 @@ def run_single_case(
             f"received {tuple(reconstruction.shape)}."
         )
 
-    # ------------------------------------------------------------
-    # Validate finite reconstruction.
-    # ------------------------------------------------------------
-
     if not torch.isfinite(reconstruction).all():
 
         raise RuntimeError(
-            "Linear interpolation produced "
+            "Linear Interpolation produced "
             "non-finite reconstruction values."
         )
 
-    # ------------------------------------------------------------
-    # Verify exact preservation of observed samples.
-    # ------------------------------------------------------------
+    print(
+        f"      PASS - Reconstruction shape = "
+        f"{tuple(reconstruction.shape)}"
+    )
+
+    print(
+        "      PASS - Reconstruction contains only finite values."
+    )
+
+
+    # ============================================================
+    # 10. VERIFY OBSERVED-DATA PRESERVATION
+    # ============================================================
+
+    print(
+        "[10/12] Checking observed-data preservation..."
+    )
 
     observed_difference = torch.max(
         torch.abs(
@@ -394,13 +440,59 @@ def run_single_case(
 
         raise RuntimeError(
             "Observed seismic samples were modified. "
-            f"Maximum difference: "
-            f"{observed_difference}"
+            f"Maximum difference = "
+            f"{observed_difference:.10e}"
         )
 
-    # ------------------------------------------------------------
-    # Calculate common reconstruction metrics.
-    # ------------------------------------------------------------
+    print(
+        f"      Maximum observed difference = "
+        f"{observed_difference:.10e}"
+    )
+
+    print(
+        "      PASS - Observed seismic samples preserved exactly."
+    )
+
+
+    # ============================================================
+    # 11. VERIFY MISSING-SAMPLE RECONSTRUCTION
+    # ============================================================
+
+    print(
+        "[11/12] Checking missing-region reconstruction..."
+    )
+
+    missing_difference = torch.max(
+        torch.abs(
+            reconstruction[missing]
+            - corrupted_cube[missing]
+        )
+    ).item()
+
+    if missing_difference == 0.0:
+
+        raise RuntimeError(
+            "Linear Interpolation did not modify any missing "
+            "samples. Reconstruction may not have been applied."
+        )
+
+    print(
+        f"      Maximum missing-region change = "
+        f"{missing_difference:.10e}"
+    )
+
+    print(
+        "      PASS - Missing samples were reconstructed."
+    )
+
+
+    # ============================================================
+    # 12. CALCULATE RECONSTRUCTION METRICS
+    # ============================================================
+
+    print(
+        "[12/12] Calculating reconstruction metrics..."
+    )
 
     mae_value = to_float(
         mae(
@@ -437,313 +529,174 @@ def run_single_case(
         )
     )
 
-    # ------------------------------------------------------------
-    # Calculate metrics specifically on missing samples.
-    #
-    # This is particularly important for reconstruction methods
-    # because observed samples are already known.
-    # ------------------------------------------------------------
-
-    reconstruction_missing = reconstruction[missing]
-    target_missing = target[missing]
-
     missing_mae_value = to_float(
         mae(
-            reconstruction_missing,
-            target_missing
+            reconstruction[missing],
+            target[missing]
         )
     )
 
     missing_rmse_value = to_float(
         rmse(
-            reconstruction_missing,
-            target_missing
+            reconstruction[missing],
+            target[missing]
         )
     )
 
-    # ------------------------------------------------------------
-    # Return all controlled-case results.
-    # ------------------------------------------------------------
+    print(
+        "\n"
+        "      Reconstruction Metrics\n"
+        "      -----------------------"
+    )
 
-    return {
-        "missing_rate": missing_rate,
-        "missing_mechanism": missing_mechanism,
-        "geological_mode": geological_mode,
-        "seed": seed,
-        "cube_depth": CUBE_SIZE[0],
-        "cube_height": CUBE_SIZE[1],
-        "cube_width": CUBE_SIZE[2],
-        "mae": mae_value,
-        "rmse": rmse_value,
-        "psnr": psnr_value,
-        "snr": snr_value,
-        "ssim": ssim_value,
-        "missing_mae": missing_mae_value,
-        "missing_rmse": missing_rmse_value,
-        "runtime_seconds": runtime_seconds,
-        "observed_difference": observed_difference,
-        "input_consistency_error": input_consistency_error,
-        "status": "SUCCESS"
-    }
+    print(
+        f"      MAE          : {mae_value:.6f}"
+    )
 
+    print(
+        f"      RMSE         : {rmse_value:.6f}"
+    )
 
-# ================================================================
-# CSV FIELD NAMES
-# ================================================================
+    print(
+        f"      PSNR         : {psnr_value:.6f}"
+    )
 
-FIELD_NAMES = [
-    "missing_rate",
-    "missing_mechanism",
-    "geological_mode",
-    "seed",
-    "cube_depth",
-    "cube_height",
-    "cube_width",
-    "mae",
-    "rmse",
-    "psnr",
-    "snr",
-    "ssim",
-    "missing_mae",
-    "missing_rmse",
-    "runtime_seconds",
-    "observed_difference",
-    "input_consistency_error",
-    "status"
-]
+    print(
+        f"      SNR          : {snr_value:.6f}"
+    )
+
+    print(
+        f"      SSIM         : {ssim_value:.6f}"
+    )
+
+    print(
+        f"      Missing MAE  : {missing_mae_value:.6f}"
+    )
+
+    print(
+        f"      Missing RMSE : {missing_rmse_value:.6f}"
+    )
 
 
-# ================================================================
-# MAIN CONTROLLED EXPERIMENT
-# ================================================================
-
-def main():
+    # ============================================================
+    # REPRODUCIBILITY TEST
+    # ============================================================
 
     print(
         "\n"
         "=========================================================\n"
-        "LINEAR INTERPOLATION CONTROLLED EXPERIMENTAL MATRIX\n"
-        "=========================================================\n"
-    )
-
-    print(
-        f"Cube size       : {CUBE_SIZE}"
-    )
-
-    print(
-        f"Missing rates   : {MISSING_RATES}"
-    )
-
-    print(
-        f"Missing methods : {MISSING_MECHANISMS}"
-    )
-
-    print(
-        f"Geological modes: {GEOLOGICAL_MODES}"
-    )
-
-    print(
-        f"Seeds           : {SEEDS}"
-    )
-
-    print(
-        f"Expected cases  : {EXPECTED_CASES}"
-    )
-
-    print(
-        f"Output directory: {OUTPUT_DIRECTORY}"
-    )
-
-    print(
-        "=========================================================\n"
+        "REPRODUCIBILITY VALIDATION\n"
+        "========================================================="
     )
 
     # ------------------------------------------------------------
-    # Prepare result storage.
+    # Recreate the dataset with exactly the same configuration.
     # ------------------------------------------------------------
 
-    results = []
+    dataset_repeat = SyntheticSeismicDataset(
+        num_samples=1,
+        cube_size=CUBE_SIZE,
+        missing_probability=MISSING_RATE,
+        geological_mode=GEOLOGICAL_MODE,
+        mask_mode=MISSING_MECHANISM,
+        seed=SEED
+    )
 
-    successful_cases = 0
-    failed_cases = 0
+    (
+        corrupted_repeat,
+        target_repeat,
+        mask_repeat,
+        velocity_repeat,
+        mask_type_repeat,
+        geological_mode_repeat
+    ) = dataset_repeat[0]
 
-    case_number = 0
+    corrupted_repeat = corrupted_repeat.to(DEVICE)
+
+    target_repeat = target_repeat.to(DEVICE)
+
+    mask_repeat = mask_repeat.to(DEVICE)
 
     # ------------------------------------------------------------
-    # Create / overwrite raw result CSV.
+    # Compare generated datasets.
     # ------------------------------------------------------------
 
-    with open(
-        RAW_RESULTS_FILE,
-        "w",
-        newline=""
-    ) as csv_file:
+    dataset_difference = max(
+        torch.max(
+            torch.abs(
+                corrupted_cube
+                - corrupted_repeat
+            )
+        ).item(),
 
-        writer = csv.DictWriter(
-            csv_file,
-            fieldnames=FIELD_NAMES
+        torch.max(
+            torch.abs(
+                target
+                - target_repeat
+            )
+        ).item(),
+
+        torch.max(
+            torch.abs(
+                mask
+                - mask_repeat
+            )
+        ).item()
+    )
+
+    if dataset_difference > 1e-6:
+
+        raise RuntimeError(
+            "Dataset reproducibility check failed. "
+            f"Maximum difference = "
+            f"{dataset_difference:.10e}"
         )
 
-        writer.writeheader()
+    print(
+        f"Dataset reproducibility difference = "
+        f"{dataset_difference:.10e}"
+    )
 
-        # --------------------------------------------------------
-        # Execute every controlled experimental combination.
-        # --------------------------------------------------------
+    print(
+        "PASS - Dataset generation is deterministic."
+    )
 
-        for missing_rate in MISSING_RATES:
 
-            for missing_mechanism in MISSING_MECHANISMS:
+    # ------------------------------------------------------------
+    # Repeat Linear Interpolation.
+    # ------------------------------------------------------------
 
-                for geological_mode in GEOLOGICAL_MODES:
+    reconstruction_repeat = (
+        linear_interpolation_reconstruction(
+            corrupted_repeat,
+            mask_repeat
+        )
+    )
 
-                    for seed in SEEDS:
+    reconstruction_difference = torch.max(
+        torch.abs(
+            reconstruction
+            - reconstruction_repeat
+        )
+    ).item()
 
-                        case_number += 1
+    if reconstruction_difference > 1e-6:
 
-                        print(
-                            f"Case {case_number}/{EXPECTED_CASES} | "
-                            f"Missing={missing_rate:.2f} | "
-                            f"Mechanism={missing_mechanism} | "
-                            f"Geology={geological_mode} | "
-                            f"Seed={seed}"
-                        )
+        raise RuntimeError(
+            "Linear Interpolation reproducibility check failed. "
+            f"Maximum difference = "
+            f"{reconstruction_difference:.10e}"
+        )
 
-                        try:
+    print(
+        f"Reconstruction reproducibility difference = "
+        f"{reconstruction_difference:.10e}"
+    )
 
-                            case_result = run_single_case(
-                                missing_rate=missing_rate,
-                                missing_mechanism=missing_mechanism,
-                                geological_mode=geological_mode,
-                                seed=seed
-                            )
+    print(
+        "PASS - Linear Interpolation is deterministic."
+    )
 
-                            results.append(
-                                case_result
-                            )
-
-                            writer.writerow(
-                                case_result
-                            )
-
-                            csv_file.flush()
-
-                            successful_cases += 1
-
-                            print(
-                                f"  Status SUCCESS | "
-                                f"MAE={case_result['mae']:.6f} | "
-                                f"RMSE={case_result['rmse']:.6f} | "
-                                f"SSIM={case_result['ssim']:.6f} | "
-                                f"Runtime="
-                                f"{case_result['runtime_seconds']:.4f}s"
-                            )
-
-                        except Exception as error:
-
-                            failed_cases += 1
-
-                            failed_result = {
-                                "missing_rate": missing_rate,
-                                "missing_mechanism": missing_mechanism,
-                                "geological_mode": geological_mode,
-                                "seed": seed,
-                                "cube_depth": CUBE_SIZE[0],
-                                "cube_height": CUBE_SIZE[1],
-                                "cube_width": CUBE_SIZE[2],
-                                "mae": "",
-                                "rmse": "",
-                                "psnr": "",
-                                "snr": "",
-                                "ssim": "",
-                                "missing_mae": "",
-                                "missing_rmse": "",
-                                "runtime_seconds": "",
-                                "observed_difference": "",
-                                "input_consistency_error": "",
-                                "status": f"FAILED: {error}"
-                            }
-
-                            writer.writerow(
-                                failed_result
-                            )
-
-                            csv_file.flush()
-
-                            print(
-                                f"  Status FAILED | "
-                                f"{error}"
-                            )
-
-    # ============================================================
-    # SUMMARY STATISTICS
-    # ============================================================
-
-    if successful_cases > 0:
-
-        metric_names = [
-            "mae",
-            "rmse",
-            "psnr",
-            "snr",
-            "ssim",
-            "missing_mae",
-            "missing_rmse",
-            "runtime_seconds"
-        ]
-
-        summary_rows = []
-
-        for metric_name in metric_names:
-
-            values = [
-                float(row[metric_name])
-                for row in results
-            ]
-
-            mean_value = (
-                sum(values)
-                / len(values)
-            )
-
-            minimum_value = min(values)
-            maximum_value = max(values)
-
-            summary_rows.append(
-                {
-                    "metric": metric_name,
-                    "mean": mean_value,
-                    "minimum": minimum_value,
-                    "maximum": maximum_value,
-                    "successful_cases": successful_cases
-                }
-            )
-
-        # --------------------------------------------------------
-        # Write summary CSV.
-        # --------------------------------------------------------
-
-        with open(
-            SUMMARY_RESULTS_FILE,
-            "w",
-            newline=""
-        ) as csv_file:
-
-            summary_writer = csv.DictWriter(
-                csv_file,
-                fieldnames=[
-                    "metric",
-                    "mean",
-                    "minimum",
-                    "maximum",
-                    "successful_cases"
-                ]
-            )
-
-            summary_writer.writeheader()
-
-            summary_writer.writerows(
-                summary_rows
-            )
 
     # ============================================================
     # FINAL STATUS
@@ -752,62 +705,32 @@ def main():
     print(
         "\n"
         "=========================================================\n"
-        "LINEAR INTERPOLATION CONTROLLED MATRIX COMPLETE\n"
-        "========================================================="
+        "LINEAR INTERPOLATION BASELINE TEST COMPLETE\n"
+        "=========================================================\n"
     )
 
     print(
-        f"Expected cases : {EXPECTED_CASES}"
+        "OVERALL STATUS: PASS"
     )
 
     print(
-        f"Completed cases: {case_number}"
+        "\nThe Linear Interpolation baseline passed the "
+        "focused software validation test."
     )
 
     print(
-        f"Successful     : {successful_cases}"
+        "\nThe full 750-case controlled experiment remains "
+        "separate under:"
     )
 
     print(
-        f"Failed         : {failed_cases}"
+        "evaluation/baselines/"
+        "linear_interpolation_controlled_matrix.py"
     )
 
     print(
-        f"\nRaw results:\n{RAW_RESULTS_FILE}"
+        "\n=========================================================\n"
     )
-
-    print(
-        f"Summary results:\n{SUMMARY_RESULTS_FILE}"
-    )
-
-    # ------------------------------------------------------------
-    # Overall pass/fail condition.
-    # ------------------------------------------------------------
-
-    if (
-        case_number == EXPECTED_CASES
-        and successful_cases == EXPECTED_CASES
-        and failed_cases == 0
-    ):
-
-        print(
-            "\nOVERALL STATUS: PASS"
-        )
-
-        print(
-            "All controlled Linear Interpolation "
-            "experiments completed successfully."
-        )
-
-    else:
-
-        print(
-            "\nOVERALL STATUS: FAIL"
-        )
-
-        print(
-            "One or more controlled experiments failed."
-        )
 
 
 # ================================================================

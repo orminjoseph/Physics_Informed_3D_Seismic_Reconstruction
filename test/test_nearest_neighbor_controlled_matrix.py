@@ -1,87 +1,80 @@
 """
 ====================================================================
-Nearest Neighbor Controlled Experimental Matrix
+Nearest Neighbor Baseline Test
 ====================================================================
 
-Physics-Informed 3D Encoder-Decoder Framework with Predictive
-Uncertainty for Seismic Data Reconstruction
+Physics-Informed 3D Encoder-Decoder Framework
+with Predictive Uncertainty for Seismic Data Reconstruction
 
-Controlled benchmark for the Nearest Neighbor baseline.
+Purpose
+-------
 
-Experimental matrix
--------------------
-Missing rates:
-    10%, 20%, 30%, 40%, 50%
+Focused software validation test for the Nearest Neighbor seismic
+reconstruction baseline.
 
-Missing mechanisms:
-    random_voxels
-    missing_traces
-    missing_inlines
-    missing_crosslines
-    missing_blocks
+This file does NOT execute the 750-case controlled experimental
+matrix.
 
-Geological modes:
-    horizontal
-    dipping
-    faulted
-    folded
-    complex
-    highly_complex
+The full controlled experimental implementation remains under:
 
-Random seeds:
-    42, 43, 44, 45, 46
+    evaluation/baselines/nearest_neighbor_controlled_matrix.py
 
-Total cases:
-    5 missing rates
-    × 5 missing mechanisms
-    × 6 geological modes
-    × 5 seeds
-    = 750 cases
+This focused test verifies:
 
-Standard cube size
-------------------
+    1. Synthetic dataset generation
+    2. Expected tensor shapes
+    3. Dataset metadata
+    4. Input consistency
+    5. Observed and missing samples
+    6. Nearest Neighbor reconstruction
+    7. Reconstruction shape
+    8. Finite reconstruction values
+    9. Exact observed-data preservation
+    10. Missing-region reconstruction
+    11. Reconstruction metrics
+    12. Dataset reproducibility
+    13. Reconstruction reproducibility
+
+Representative test case
+------------------------
+
+Cube:
     (D, H, W) = (64, 128, 128)
 
-Tensor convention
------------------
-    (C, D, H, W)
+Tensor convention:
+    (C, D, H, W) = (1, 64, 128, 128)
 
-For this experiment:
-    (1, 64, 128, 128)
+Missing rate:
+    30%
 
-The reconstruction baseline receives exactly the same
-corrupted input and mask used in the controlled experiment.
+Missing mechanism:
+    missing_crosslines
 
-Observed samples must remain unchanged.
+Geological mode:
+    folded
 
-Outputs
--------
-Raw results:
-    outputs/synthetic_training/reports/
-        nearest_neighbor_controlled_matrix.csv
+Random seed:
+    42
 
-Summary results:
-    outputs/synthetic_training/reports/
-        nearest_neighbor_controlled_matrix_summary.csv
+Device:
+    CPU
 
 Author: Ormin Joseph
 ====================================================================
 """
 
+
 # ====================================================================
 # IMPORTS
 # ====================================================================
 
-import csv
-import os
-import time
-
-import numpy as np
 import torch
 
-from dataset.synthetic_dataset import SyntheticSeismicDataset
+from dataset.synthetic_dataset import (
+    SyntheticSeismicDataset
+)
 
-from evaluation.baselines.baseline_nearest_neighbor import (
+from evaluation.baselines.baseline_nearest_neighbor_controlled_matrix import (
     nearest_neighbor_reconstruction
 )
 
@@ -95,160 +88,183 @@ from metrics.reconstruction_metrics import (
 
 
 # ====================================================================
-# EXPERIMENT CONFIGURATION
+# TEST CONFIGURATION
 # ====================================================================
 
-# Standard controlled benchmark cube.
-CUBE_SIZE = (64, 128, 128)
+# --------------------------------------------------------------
+# Nearest Neighbor uses the CPU because the implementation relies
+# on SciPy's distance-transform operation.
+# --------------------------------------------------------------
 
-# Number of channels.
-CHANNELS = 1
-
-# Missing rates.
-MISSING_RATES = [
-    0.30,
-]
-
-# Missing mechanisms.
-MASK_MODES = [
-    "random_voxels",
-    "missing_traces",
-]
-
-# Geological complexity modes.
-GEOLOGICAL_MODES = [
-    "horizontal",
-    "dipping",
-]
-
-# Controlled random seeds.
-SEEDS = [
-    42,
-    43,
-]
-
-# One synthetic sample is sufficient for each controlled case.
-SAMPLES_PER_CASE = 1
-
-# Expected number of experiments.
-EXPECTED_CASES = (
-    len(MISSING_RATES)
-    * len(MASK_MODES)
-    * len(GEOLOGICAL_MODES)
-    * len(SEEDS)
-)
-
-# CPU is used because the nearest-neighbor operation relies on
-# SciPy's distance transform.
 DEVICE = torch.device("cpu")
 
-# Output directory.
-OUTPUT_DIR = os.path.join(
-    "outputs",
-    "synthetic_training",
-    "reports"
+
+# --------------------------------------------------------------
+# Standard project test cube.
+# --------------------------------------------------------------
+
+CUBE_SIZE = (
+    64,
+    128,
+    128
 )
 
-# Raw result file.
-RAW_RESULTS_FILE = os.path.join(
-    OUTPUT_DIR,
-    "nearest_neighbor_controlled_matrix.csv"
-)
 
-# Summary result file.
-SUMMARY_RESULTS_FILE = os.path.join(
-    OUTPUT_DIR,
-    "nearest_neighbor_controlled_matrix_summary.csv"
-)
+# --------------------------------------------------------------
+# Number of seismic channels.
+# --------------------------------------------------------------
+
+CHANNELS = 1
+
+
+# --------------------------------------------------------------
+# Representative missing-data rate.
+# --------------------------------------------------------------
+
+MISSING_RATE = 0.30
+
+
+# --------------------------------------------------------------
+# Representative missing-data mechanism.
+# --------------------------------------------------------------
+
+MISSING_MECHANISM = "missing_crosslines"
+
+
+# --------------------------------------------------------------
+# Representative geological model.
+# --------------------------------------------------------------
+
+GEOLOGICAL_MODE = "folded"
+
+
+# --------------------------------------------------------------
+# Deterministic random seed.
+# --------------------------------------------------------------
+
+SEED = 42
+
+
+# --------------------------------------------------------------
+# Observed-data preservation tolerance.
+#
+# This corresponds to the project's controlled-experiment
+# preservation requirement.
+# --------------------------------------------------------------
+
+OBSERVED_PRESERVATION_TOLERANCE = 1.0e-6
 
 
 # ====================================================================
-# UTILITY FUNCTIONS
+# UTILITY FUNCTION
 # ====================================================================
 
 def to_float(value):
     """
     Convert a metric result into a standard Python float.
 
-    This makes the values safe for CSV writing and statistical
-    processing.
+    Parameters
+    ----------
+    value : torch.Tensor or numeric
+        Metric value.
+
+    Returns
+    -------
+    float
+        Python floating-point value.
     """
 
     if isinstance(value, torch.Tensor):
-        return float(value.detach().cpu().item())
+
+        return float(
+            value.detach()
+            .cpu()
+            .item()
+        )
 
     return float(value)
 
 
-def ensure_output_directory():
-    """
-    Create the output directory if it does not already exist.
-    """
+# ====================================================================
+# MAIN TEST
+# ====================================================================
 
-    os.makedirs(
-        OUTPUT_DIR,
-        exist_ok=True
+def main():
+
+    print(
+        "\n"
+        "============================================================\n"
+        "NEAREST NEIGHBOR BASELINE TEST\n"
+        "============================================================\n"
+    )
+
+    print(
+        "Focused software validation test.\n"
+    )
+
+    print(
+        "This test does NOT execute the 750-case "
+        "controlled experimental matrix.\n"
+    )
+
+    print(
+        f"Cube size        : {CUBE_SIZE}"
+    )
+
+    print(
+        f"Missing rate     : {MISSING_RATE}"
+    )
+
+    print(
+        f"Missing mechanism: {MISSING_MECHANISM}"
+    )
+
+    print(
+        f"Geological mode  : {GEOLOGICAL_MODE}"
+    )
+
+    print(
+        f"Random seed      : {SEED}"
+    )
+
+    print(
+        f"Device           : {DEVICE}"
+    )
+
+    print(
+        "============================================================\n"
     )
 
 
-# ====================================================================
-# SINGLE CONTROLLED CASE
-# ====================================================================
+    # ================================================================
+    # 1. CREATE SYNTHETIC DATASET
+    # ================================================================
 
-def run_single_case(
-        missing_rate,
-        mask_mode,
-        geological_mode,
-        seed
-):
-    """
-    Run one controlled Nearest Neighbor experiment.
-
-    Parameters
-    ----------
-    missing_rate : float
-        Fraction of the seismic cube that is missing.
-
-    mask_mode : str
-        Missing-data mechanism.
-
-    geological_mode : str
-        Geological complexity.
-
-    seed : int
-        Random seed.
-
-    Returns
-    -------
-    dict
-        Results for the controlled experiment.
-    """
-
-    # --------------------------------------------------------------
-    # Construct exactly one synthetic sample.
-    # --------------------------------------------------------------
+    print(
+        "[1/13] Creating deterministic synthetic dataset..."
+    )
 
     dataset = SyntheticSeismicDataset(
-        num_samples=SAMPLES_PER_CASE,
+        num_samples=1,
         cube_size=CUBE_SIZE,
-        missing_probability=missing_rate,
-        geological_mode=geological_mode,
-        mask_mode=mask_mode,
-        seed=seed
+        missing_probability=MISSING_RATE,
+        geological_mode=GEOLOGICAL_MODE,
+        mask_mode=MISSING_MECHANISM,
+        seed=SEED
     )
 
-    # --------------------------------------------------------------
-    # Retrieve the single controlled sample.
-    #
-    # The canonical dataset returns:
-    #
-    # input_cube
-    # target
-    # mask
-    # velocity
-    # mask_type
-    # geological_mode
-    # --------------------------------------------------------------
+    print(
+        "      PASS - Synthetic dataset created."
+    )
+
+
+    # ================================================================
+    # 2. RETRIEVE TEST SAMPLE
+    # ================================================================
+
+    print(
+        "[2/13] Retrieving test sample..."
+    )
 
     (
         corrupted_cube,
@@ -259,17 +275,18 @@ def run_single_case(
         returned_geological_mode
     ) = dataset[0]
 
-    # --------------------------------------------------------------
-    # Move tensors to CPU.
-    # --------------------------------------------------------------
+    print(
+        "      PASS - Test sample retrieved."
+    )
 
-    corrupted_cube = corrupted_cube.to(DEVICE)
-    target = target.to(DEVICE)
-    mask = mask.to(DEVICE)
 
-    # --------------------------------------------------------------
-    # Confirm expected tensor shape.
-    # --------------------------------------------------------------
+    # ================================================================
+    # 3. VALIDATE TENSOR SHAPES
+    # ================================================================
+
+    print(
+        "[3/13] Validating tensor shapes..."
+    )
 
     expected_shape = (
         CHANNELS,
@@ -277,160 +294,359 @@ def run_single_case(
     )
 
     if tuple(corrupted_cube.shape) != expected_shape:
-        raise ValueError(
+
+        raise RuntimeError(
             "Unexpected corrupted_cube shape. "
             f"Expected {expected_shape}, "
             f"received {tuple(corrupted_cube.shape)}."
         )
 
     if tuple(target.shape) != expected_shape:
-        raise ValueError(
+
+        raise RuntimeError(
             "Unexpected target shape. "
             f"Expected {expected_shape}, "
             f"received {tuple(target.shape)}."
         )
 
     if tuple(mask.shape) != expected_shape:
-        raise ValueError(
+
+        raise RuntimeError(
             "Unexpected mask shape. "
             f"Expected {expected_shape}, "
             f"received {tuple(mask.shape)}."
         )
 
-    # --------------------------------------------------------------
-    # Verify mask and metadata.
-    # --------------------------------------------------------------
+    print(
+        f"      PASS - Tensor shape = {expected_shape}"
+    )
 
-    if returned_mask_mode != mask_mode:
-        raise ValueError(
+
+    # ================================================================
+    # 4. VALIDATE DATASET METADATA
+    # ================================================================
+
+    print(
+        "[4/13] Validating dataset metadata..."
+    )
+
+    if returned_mask_mode != MISSING_MECHANISM:
+
+        raise RuntimeError(
             "Dataset returned an unexpected mask mode. "
-            f"Expected '{mask_mode}', "
+            f"Expected '{MISSING_MECHANISM}', "
             f"received '{returned_mask_mode}'."
         )
 
-    if returned_geological_mode != geological_mode:
-        raise ValueError(
+    if returned_geological_mode != GEOLOGICAL_MODE:
+
+        raise RuntimeError(
             "Dataset returned an unexpected geological mode. "
-            f"Expected '{geological_mode}', "
+            f"Expected '{GEOLOGICAL_MODE}', "
             f"received '{returned_geological_mode}'."
         )
 
-    # --------------------------------------------------------------
-    # Count observed and missing samples.
-    # --------------------------------------------------------------
-
-    observed_count = int(
-        torch.sum(mask == 1).item()
+    print(
+        "      PASS - Dataset metadata is correct."
     )
 
-    missing_count = int(
-        torch.sum(mask == 0).item()
+
+    # ================================================================
+    # 5. MOVE TENSORS TO CPU
+    # ================================================================
+
+    print(
+        "[5/13] Moving tensors to evaluation device..."
     )
 
-    if observed_count == 0:
-        raise ValueError(
-            "Controlled case contains no observed samples."
+    corrupted_cube = corrupted_cube.to(DEVICE)
+
+    target = target.to(DEVICE)
+
+    mask = mask.to(DEVICE)
+
+    print(
+        f"      PASS - Device = {DEVICE}"
+    )
+
+
+    # ================================================================
+    # 6. VALIDATE FINITE INPUT DATA
+    # ================================================================
+
+    print(
+        "[6/13] Checking input tensors for finite values..."
+    )
+
+    if not torch.isfinite(corrupted_cube).all():
+
+        raise RuntimeError(
+            "Corrupted seismic cube contains "
+            "non-finite values."
         )
 
-    if missing_count == 0:
-        raise ValueError(
-            "Controlled case contains no missing samples."
+    if not torch.isfinite(target).all():
+
+        raise RuntimeError(
+            "Target seismic cube contains "
+            "non-finite values."
         )
 
+    if not torch.isfinite(mask).all():
+
+        raise RuntimeError(
+            "Observation mask contains "
+            "non-finite values."
+        )
+
+    print(
+        "      PASS - Input tensors contain finite values."
+    )
+
+
+    # ================================================================
+    # 7. VALIDATE INPUT CONSISTENCY
+    # ================================================================
+
+    print(
+        "[7/13] Checking corrupted-input consistency..."
+    )
+
     # --------------------------------------------------------------
-    # Verify that the corrupted input is consistent with the
-    # target and observation mask.
+    # The synthetic dataset follows:
     #
-    # Input should equal:
+    #     corrupted_cube = target * mask
     #
-    #       target * mask
+    # Observed locations therefore contain the original target
+    # values, while missing locations are zeroed.
     # --------------------------------------------------------------
+
+    expected_corrupted = (
+        target * mask
+    )
 
     input_consistency_error = torch.max(
         torch.abs(
-            corrupted_cube -
-            (target * mask)
+            corrupted_cube
+            -
+            expected_corrupted
         )
     ).item()
 
-    if input_consistency_error > 1e-6:
-        raise ValueError(
-            "Corrupted input is inconsistent with "
-            "target * mask. "
-            f"Maximum difference: "
-            f"{input_consistency_error:.6e}"
+    if input_consistency_error > OBSERVED_PRESERVATION_TOLERANCE:
+
+        raise RuntimeError(
+            "Input consistency check failed. "
+            f"Maximum difference = "
+            f"{input_consistency_error:.10e}"
         )
 
-    # --------------------------------------------------------------
-    # Run the Nearest Neighbor reconstruction.
-    # --------------------------------------------------------------
+    print(
+        f"      Maximum input difference = "
+        f"{input_consistency_error:.10e}"
+    )
 
-    start_time = time.perf_counter()
+    print(
+        "      PASS - Corrupted input is consistent "
+        "with target × mask."
+    )
+
+
+    # ================================================================
+    # 8. VERIFY OBSERVED AND MISSING SAMPLES
+    # ================================================================
+
+    print(
+        "[8/13] Checking observed and missing samples..."
+    )
+
+    observed = mask == 1
+
+    missing = mask == 0
+
+    observed_count = int(
+        observed.sum().item()
+    )
+
+    missing_count = int(
+        missing.sum().item()
+    )
+
+    if observed_count == 0:
+
+        raise RuntimeError(
+            "No observed seismic samples were found."
+        )
+
+    if missing_count == 0:
+
+        raise RuntimeError(
+            "No missing seismic samples were found."
+        )
+
+    print(
+        f"      Observed samples = {observed_count}"
+    )
+
+    print(
+        f"      Missing samples  = {missing_count}"
+    )
+
+    print(
+        "      PASS - Both observed and missing samples exist."
+    )
+
+
+    # ================================================================
+    # 9. RUN NEAREST NEIGHBOR RECONSTRUCTION
+    # ================================================================
+
+    print(
+        "[9/13] Running Nearest Neighbor reconstruction..."
+    )
 
     reconstruction = nearest_neighbor_reconstruction(
         corrupted_cube,
         mask
     )
 
-    runtime = time.perf_counter() - start_time
+    print(
+        "      PASS - Nearest Neighbor reconstruction executed."
+    )
+
+
+    # ================================================================
+    # 10. VALIDATE RECONSTRUCTION
+    # ================================================================
+
+    print(
+        "[10/13] Validating reconstructed seismic cube..."
+    )
 
     # --------------------------------------------------------------
-    # Validate reconstruction shape.
+    # Check output shape.
     # --------------------------------------------------------------
 
     if tuple(reconstruction.shape) != expected_shape:
-        raise ValueError(
+
+        raise RuntimeError(
             "Unexpected reconstruction shape. "
             f"Expected {expected_shape}, "
             f"received {tuple(reconstruction.shape)}."
         )
 
     # --------------------------------------------------------------
-    # Validate finite values.
+    # Check finite values.
     # --------------------------------------------------------------
 
     if not torch.isfinite(reconstruction).all():
-        raise ValueError(
+
+        raise RuntimeError(
             "Nearest Neighbor reconstruction contains "
             "non-finite values."
         )
 
-    # --------------------------------------------------------------
-    # Verify exact observed-data preservation.
-    # --------------------------------------------------------------
+    print(
+        f"      PASS - Reconstruction shape = "
+        f"{tuple(reconstruction.shape)}"
+    )
+
+    print(
+        "      PASS - Reconstruction contains only finite values."
+    )
+
+
+    # ================================================================
+    # 11. VERIFY OBSERVED-DATA PRESERVATION
+    # ================================================================
+
+    print(
+        "[11/13] Checking observed-data preservation..."
+    )
 
     observed_difference = torch.max(
         torch.abs(
-            reconstruction[mask == 1]
+            reconstruction[observed]
             -
-            corrupted_cube[mask == 1]
+            corrupted_cube[observed]
         )
     ).item()
 
-    if observed_difference > 1e-6:
-        raise ValueError(
+    if observed_difference > OBSERVED_PRESERVATION_TOLERANCE:
+
+        raise RuntimeError(
             "Observed-data preservation failed. "
-            f"Maximum observed difference: "
-            f"{observed_difference:.6e}"
+            f"Maximum difference = "
+            f"{observed_difference:.10e}"
         )
 
-    # --------------------------------------------------------------
-    # Confirm missing samples were reconstructed.
-    # --------------------------------------------------------------
+    print(
+        f"      Maximum observed difference = "
+        f"{observed_difference:.10e}"
+    )
+
+    print(
+        "      PASS - Observed seismic samples "
+        "were preserved exactly."
+    )
+
+
+    # ================================================================
+    # VERIFY MISSING-REGION RECONSTRUCTION
+    # ================================================================
+
+    print(
+        "[12/13] Checking missing-region reconstruction..."
+    )
+
+    missing_reconstruction = reconstruction[
+        missing
+    ]
+
+    missing_corrupted = corrupted_cube[
+        missing
+    ]
 
     missing_change = torch.mean(
         torch.abs(
-            reconstruction[mask == 0]
+            missing_reconstruction
             -
-            corrupted_cube[mask == 0]
+            missing_corrupted
         )
     ).item()
 
     # --------------------------------------------------------------
-    # Calculate reconstruction metrics.
-    #
-    # IMPORTANT:
-    # These are the canonical project metric functions.
+    # A zero change would indicate that the missing values were not
+    # modified by the reconstruction algorithm.
+    # --------------------------------------------------------------
+
+    if missing_change <= 0.0:
+
+        raise RuntimeError(
+            "Nearest Neighbor reconstruction did not modify "
+            "the missing region."
+        )
+
+    print(
+        f"      Mean missing-region change = "
+        f"{missing_change:.10e}"
+    )
+
+    print(
+        "      PASS - Missing samples were reconstructed."
+    )
+
+
+    # ================================================================
+    # 13. CALCULATE RECONSTRUCTION METRICS
+    # ================================================================
+
+    print(
+        "[13/13] Calculating reconstruction metrics..."
+    )
+
+    # --------------------------------------------------------------
+    # Global metrics.
     # --------------------------------------------------------------
 
     mae_value = to_float(
@@ -469,18 +685,14 @@ def run_single_case(
     )
 
     # --------------------------------------------------------------
-    # Calculate metrics specifically on missing samples.
+    # Missing-region metrics.
     #
-    # This is useful for reconstruction analysis because the
-    # observed samples are already known.
+    # These metrics isolate the actual reconstruction task from
+    # the already-observed samples.
     # --------------------------------------------------------------
 
-    missing_reconstruction = reconstruction[
-        mask == 0
-    ]
-
     missing_target = target[
-        mask == 0
+        missing
     ]
 
     missing_mae_value = to_float(
@@ -505,532 +717,219 @@ def run_single_case(
         )
     )
 
-    # --------------------------------------------------------------
-    # Return standardized experiment result.
-    # --------------------------------------------------------------
-
-    return {
-        "missing_rate_requested": missing_rate,
-        "mask_mode": mask_mode,
-        "geological_mode": geological_mode,
-        "seed": seed,
-
-        "cube_depth": CUBE_SIZE[0],
-        "cube_height": CUBE_SIZE[1],
-        "cube_width": CUBE_SIZE[2],
-
-        "observed_samples": observed_count,
-        "missing_samples": missing_count,
-
-        "input_consistency_error": input_consistency_error,
-        "observed_difference": observed_difference,
-
-        "missing_reconstruction_change": missing_change,
-
-        "missing_mae": missing_mae_value,
-        "missing_rmse": missing_rmse_value,
-
-        "mae": mae_value,
-        "rmse": rmse_value,
-        "psnr": psnr_value,
-        "snr": snr_value,
-        "ssim": ssim_value,
-
-        "runtime_seconds": runtime,
-
-        "status": "SUCCESS",
-        "error": ""
-    }
-
-
-# ====================================================================
-# WRITE RAW RESULTS
-# ====================================================================
-
-def write_raw_results(results):
-    """
-    Write all individual controlled experiments to CSV.
-    """
-
-    if not results:
-        return
-
-    fieldnames = list(
-        results[0].keys()
+    print(
+        "\n"
+        "      Reconstruction Metrics\n"
+        "      -----------------------"
     )
 
-    with open(
-        RAW_RESULTS_FILE,
-        "w",
-        newline="",
-        encoding="utf-8"
-    ) as file:
+    print(
+        f"      MAE          : {mae_value:.6f}"
+    )
 
-        writer = csv.DictWriter(
-            file,
-            fieldnames=fieldnames
+    print(
+        f"      RMSE         : {rmse_value:.6f}"
+    )
+
+    print(
+        f"      PSNR         : {psnr_value:.6f} dB"
+    )
+
+    print(
+        f"      SNR          : {snr_value:.6f} dB"
+    )
+
+    print(
+        f"      SSIM         : {ssim_value:.6f}"
+    )
+
+    print(
+        f"      Missing MAE  : {missing_mae_value:.6f}"
+    )
+
+    print(
+        f"      Missing RMSE : {missing_rmse_value:.6f}"
+    )
+
+
+    # ================================================================
+    # REPRODUCIBILITY TEST
+    # ================================================================
+
+    print(
+        "\n"
+        "============================================================\n"
+        "REPRODUCIBILITY VALIDATION\n"
+        "============================================================"
+    )
+
+    # --------------------------------------------------------------
+    # Recreate the same synthetic dataset using exactly the same
+    # configuration and random seed.
+    # --------------------------------------------------------------
+
+    dataset_repeat = SyntheticSeismicDataset(
+        num_samples=1,
+        cube_size=CUBE_SIZE,
+        missing_probability=MISSING_RATE,
+        geological_mode=GEOLOGICAL_MODE,
+        mask_mode=MISSING_MECHANISM,
+        seed=SEED
+    )
+
+    (
+        corrupted_repeat,
+        target_repeat,
+        mask_repeat,
+        velocity_repeat,
+        returned_mask_mode_repeat,
+        returned_geological_mode_repeat
+    ) = dataset_repeat[0]
+
+    corrupted_repeat = corrupted_repeat.to(DEVICE)
+
+    target_repeat = target_repeat.to(DEVICE)
+
+    mask_repeat = mask_repeat.to(DEVICE)
+
+    # --------------------------------------------------------------
+    # Compare corrupted cubes.
+    # --------------------------------------------------------------
+
+    corrupted_difference = torch.max(
+        torch.abs(
+            corrupted_cube
+            -
+            corrupted_repeat
+        )
+    ).item()
+
+    # --------------------------------------------------------------
+    # Compare targets.
+    # --------------------------------------------------------------
+
+    target_difference = torch.max(
+        torch.abs(
+            target
+            -
+            target_repeat
+        )
+    ).item()
+
+    # --------------------------------------------------------------
+    # Compare masks.
+    # --------------------------------------------------------------
+
+    mask_difference = torch.max(
+        torch.abs(
+            mask
+            -
+            mask_repeat
+        )
+    ).item()
+
+    # --------------------------------------------------------------
+    # Use the largest difference as the overall reproducibility
+    # measure.
+    # --------------------------------------------------------------
+
+    dataset_difference = max(
+        corrupted_difference,
+        target_difference,
+        mask_difference
+    )
+
+    if dataset_difference > OBSERVED_PRESERVATION_TOLERANCE:
+
+        raise RuntimeError(
+            "Dataset reproducibility check failed. "
+            f"Maximum difference = "
+            f"{dataset_difference:.10e}"
         )
 
-        writer.writeheader()
+    print(
+        f"      Dataset reproducibility difference = "
+        f"{dataset_difference:.10e}"
+    )
 
-        writer.writerows(
-            results
+    print(
+        "      PASS - Dataset generation is deterministic."
+    )
+
+
+    # --------------------------------------------------------------
+    # Repeat Nearest Neighbor reconstruction.
+    # --------------------------------------------------------------
+
+    reconstruction_repeat = (
+        nearest_neighbor_reconstruction(
+            corrupted_repeat,
+            mask_repeat
+        )
+    )
+
+    # --------------------------------------------------------------
+    # Compare reconstructions.
+    # --------------------------------------------------------------
+
+    reconstruction_difference = torch.max(
+        torch.abs(
+            reconstruction
+            -
+            reconstruction_repeat
+        )
+    ).item()
+
+    if reconstruction_difference > OBSERVED_PRESERVATION_TOLERANCE:
+
+        raise RuntimeError(
+            "Nearest Neighbor reproducibility check failed. "
+            f"Maximum difference = "
+            f"{reconstruction_difference:.10e}"
         )
 
-
-# ====================================================================
-# SUMMARY STATISTICS
-# ====================================================================
-
-def calculate_summary(results):
-    """
-    Calculate mean and standard deviation of reconstruction
-    metrics grouped by:
-
-        missing rate
-        mask mode
-        geological mode
-
-    across the five random seeds.
-    """
-
-    grouped = {}
-
-    for result in results:
-
-        key = (
-            result["missing_rate_requested"],
-            result["mask_mode"],
-            result["geological_mode"]
-        )
-
-        if key not in grouped:
-            grouped[key] = []
-
-        grouped[key].append(
-            result
-        )
-
-    summary = []
-
-    metric_names = [
-        "missing_mae",
-        "missing_rmse",
-        "mae",
-        "rmse",
-        "psnr",
-        "snr",
-        "ssim",
-        "runtime_seconds"
-    ]
-
-    for key, group in grouped.items():
-
-        missing_rate = key[0]
-        mask_mode = key[1]
-        geological_mode = key[2]
-
-        row = {
-            "missing_rate_requested": missing_rate,
-            "mask_mode": mask_mode,
-            "geological_mode": geological_mode,
-            "n_seeds": len(group)
-        }
-
-        for metric_name in metric_names:
-
-            values = np.asarray(
-                [
-                    item[metric_name]
-                    for item in group
-                ],
-                dtype=np.float64
-            )
-
-            row[
-                f"{metric_name}_mean"
-            ] = float(
-                np.mean(values)
-            )
-
-            row[
-                f"{metric_name}_std"
-            ] = float(
-                np.std(
-                    values,
-                    ddof=1
-                )
-            ) if len(values) > 1 else 0.0
-
-        summary.append(row)
-
-    return summary
-
-
-def write_summary_results(summary):
-    """
-    Write grouped controlled-matrix statistics to CSV.
-    """
-
-    if not summary:
-        return
-
-    fieldnames = list(
-        summary[0].keys()
-    )
-
-    with open(
-        SUMMARY_RESULTS_FILE,
-        "w",
-        newline="",
-        encoding="utf-8"
-    ) as file:
-
-        writer = csv.DictWriter(
-            file,
-            fieldnames=fieldnames
-        )
-
-        writer.writeheader()
-
-        writer.writerows(
-            summary
-        )
-
-
-# ====================================================================
-# MAIN CONTROLLED MATRIX
-# ====================================================================
-
-def main():
-
-    # --------------------------------------------------------------
-    # Create output directory.
-    # --------------------------------------------------------------
-
-    ensure_output_directory()
-
-    print("=" * 70)
-    print("NEAREST NEIGHBOR CONTROLLED EXPERIMENTAL MATRIX")
-    print("=" * 70)
-
-    print()
     print(
-        f"Cube size           : {CUBE_SIZE}"
+        f"      Reconstruction reproducibility difference = "
+        f"{reconstruction_difference:.10e}"
     )
 
     print(
-        f"Missing rates       : {MISSING_RATES}"
+        "      PASS - Nearest Neighbor reconstruction is deterministic."
+    )
+
+
+    # ================================================================
+    # FINAL STATUS
+    # ================================================================
+
+    print(
+        "\n"
+        "============================================================\n"
+        "NEAREST NEIGHBOR BASELINE TEST COMPLETE\n"
+        "============================================================\n"
     )
 
     print(
-        f"Missing mechanisms  : {MASK_MODES}"
+        "OVERALL STATUS: PASS"
     )
 
     print(
-        f"Geological modes    : {GEOLOGICAL_MODES}"
+        "\nThe Nearest Neighbor baseline passed the "
+        "focused software validation test."
     )
 
     print(
-        f"Seeds               : {SEEDS}"
+        "\nThe full controlled experimental implementation remains:"
     )
 
     print(
-        f"Expected cases      : {EXPECTED_CASES}"
-    )
-
-    print()
-
-    # --------------------------------------------------------------
-    # Storage for raw experiment results.
-    # --------------------------------------------------------------
-
-    results = []
-
-    case_number = 0
-
-    start_matrix_time = time.perf_counter()
-
-    # --------------------------------------------------------------
-    # Controlled experimental loops.
-    # --------------------------------------------------------------
-
-    for missing_rate in MISSING_RATES:
-
-        for mask_mode in MASK_MODES:
-
-            for geological_mode in GEOLOGICAL_MODES:
-
-                for seed in SEEDS:
-
-                    case_number += 1
-
-                    print(
-                        f"Case {case_number}/{EXPECTED_CASES}"
-                    )
-
-                    print(
-                        f"  Missing rate : "
-                        f"{missing_rate:.2f}"
-                    )
-
-                    print(
-                        f"  Mask mode    : "
-                        f"{mask_mode}"
-                    )
-
-                    print(
-                        f"  Geology      : "
-                        f"{geological_mode}"
-                    )
-
-                    print(
-                        f"  Seed         : "
-                        f"{seed}"
-                    )
-
-                    try:
-
-                        result = run_single_case(
-                            missing_rate=missing_rate,
-                            mask_mode=mask_mode,
-                            geological_mode=geological_mode,
-                            seed=seed
-                        )
-
-                        results.append(
-                            result
-                        )
-
-                        print(
-                            f"  Status       : "
-                            f"{result['status']}"
-                        )
-
-                        print(
-                            f"  Missing MAE  : "
-                            f"{result['missing_mae']:.6f}"
-                        )
-
-                        print(
-                            f"  MAE          : "
-                            f"{result['mae']:.6f}"
-                        )
-
-                        print(
-                            f"  RMSE         : "
-                            f"{result['rmse']:.6f}"
-                        )
-
-                        print(
-                            f"  PSNR         : "
-                            f"{result['psnr']:.6f} dB"
-                        )
-
-                        print(
-                            f"  SNR          : "
-                            f"{result['snr']:.6f} dB"
-                        )
-
-                        print(
-                            f"  SSIM         : "
-                            f"{result['ssim']:.6f}"
-                        )
-
-                        print(
-                            f"  Runtime      : "
-                            f"{result['runtime_seconds']:.4f} s"
-                        )
-
-                    except Exception as error:
-
-                        error_result = {
-                            "missing_rate_requested": missing_rate,
-                            "mask_mode": mask_mode,
-                            "geological_mode": geological_mode,
-                            "seed": seed,
-
-                            "cube_depth": CUBE_SIZE[0],
-                            "cube_height": CUBE_SIZE[1],
-                            "cube_width": CUBE_SIZE[2],
-
-                            "observed_samples": "",
-                            "missing_samples": "",
-
-                            "input_consistency_error": "",
-                            "observed_difference": "",
-
-                            "missing_reconstruction_change": "",
-
-                            "missing_mae": "",
-                            "missing_rmse": "",
-
-                            "mae": "",
-                            "rmse": "",
-                            "psnr": "",
-                            "snr": "",
-                            "ssim": "",
-
-                            "runtime_seconds": "",
-
-                            "status": "FAILED",
-                            "error": str(error)
-                        }
-
-                        results.append(
-                            error_result
-                        )
-
-                        print(
-                            f"  Status       : FAILED"
-                        )
-
-                        print(
-                            f"  Error        : "
-                            f"{error}"
-                        )
-
-                    print()
-
-                    # --------------------------------------------------
-                    # Save progress after every case.
-                    #
-                    # This protects the experiment from losing all
-                    # results if execution is interrupted.
-                    # --------------------------------------------------
-
-                    write_raw_results(
-                        results
-                    )
-
-    # --------------------------------------------------------------
-    # Calculate total runtime.
-    # --------------------------------------------------------------
-
-    total_runtime = (
-        time.perf_counter()
-        -
-        start_matrix_time
-    )
-
-    # --------------------------------------------------------------
-    # Final raw results.
-    # --------------------------------------------------------------
-
-    write_raw_results(
-        results
-    )
-
-    # --------------------------------------------------------------
-    # Calculate summary statistics using successful cases only.
-    # --------------------------------------------------------------
-
-    successful_results = [
-        result
-        for result in results
-        if result["status"] == "SUCCESS"
-    ]
-
-    failed_results = [
-        result
-        for result in results
-        if result["status"] == "FAILED"
-    ]
-
-    summary = calculate_summary(
-        successful_results
-    )
-
-    write_summary_results(
-        summary
-    )
-
-    # --------------------------------------------------------------
-    # Final report.
-    # --------------------------------------------------------------
-
-    print("=" * 70)
-    print(
-        "NEAREST NEIGHBOR CONTROLLED MATRIX COMPLETE"
-    )
-    print("=" * 70)
-
-    print()
-    print(
-        f"Expected cases : {EXPECTED_CASES}"
+        "evaluation/baselines/"
+        "nearest_neighbor_controlled_matrix.py"
     )
 
     print(
-        f"Completed cases: {len(results)}"
+        "\n============================================================\n"
     )
-
-    print(
-        f"Successful     : "
-        f"{len(successful_results)}"
-    )
-
-    print(
-        f"Failed         : "
-        f"{len(failed_results)}"
-    )
-
-    print(
-        f"Total runtime  : "
-        f"{total_runtime:.2f} s"
-    )
-
-    print()
-
-    print(
-        f"Raw results:"
-    )
-
-    print(
-        f"  {RAW_RESULTS_FILE}"
-    )
-
-    print()
-
-    print(
-        f"Summary results:"
-    )
-
-    print(
-        f"  {SUMMARY_RESULTS_FILE}"
-    )
-
-    print()
-
-    # --------------------------------------------------------------
-    # Overall status.
-    # --------------------------------------------------------------
-
-    if (
-        len(results) == EXPECTED_CASES
-        and
-        len(failed_results) == 0
-    ):
-
-        print(
-            "OVERALL STATUS: PASS"
-        )
-
-        print(
-            "All controlled Nearest Neighbor experiments "
-            "completed successfully."
-        )
-
-    else:
-
-        print(
-            "OVERALL STATUS: FAIL"
-        )
-
-        print(
-            "One or more controlled experiments failed."
-        )
-
-    print("=" * 70)
 
 
 # ====================================================================
@@ -1038,4 +937,5 @@ def main():
 # ====================================================================
 
 if __name__ == "__main__":
+
     main()
